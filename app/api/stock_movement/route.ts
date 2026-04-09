@@ -4,6 +4,7 @@ import { query } from "@/lib/stock_movement_db" // Assuming this path is correct
 import { getStockDataframe } from '@/lib/sti_processing_utils';
 import { StockData } from '@/custom_utilities/custom_types';
 import { update_raw_material__intake_date } from '@/lib/stack_pricing_utils';
+import { update_past_trade_variables } from '@/lib/db_sync';
 
 // Define the type for the expected JSON response
 // IMPORTANT: For App Router, we usually return raw data/objects, 
@@ -59,7 +60,7 @@ export async function POST(request: NextRequest) {
     // It can access process.env and the database.
     const current_stock_summary:StockData = await getStockDataframe(current_stock_file);
     // await update_raw_material__intake_date(current_stock_file);
-
+    // await update_past_trade_variables()
     return NextResponse.json({ current_stock_summary }, { status: 200 });
 
   } catch (error) {

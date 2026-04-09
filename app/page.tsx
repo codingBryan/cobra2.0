@@ -90,7 +90,7 @@ export default function Home() {
     set_undefined_file_drop_visible(!undefined_file_drop_visible);
   }
   const HandleUpdateGhostBatches = async () => {
-    if (!uploadedFiles.ghost_batches_file || !uploadedFiles.misc_file) {
+    if (!uploadedFiles.ghost_batches_file) {
         alert("Please Upload Ghost Batchses file.");
         return;
     }
@@ -98,7 +98,7 @@ export default function Home() {
 
     const form_data = new FormData();
     form_data.append("ghost_batches_file", uploadedFiles.ghost_batches_file);
-    form_data.append("misc_file", uploadedFiles.misc_file)
+    // form_data.append("misc_file", uploadedFiles.misc_file)
 
     try {
         const response = await fetch('/api/test_endpoint', {

@@ -330,3 +330,96 @@ CREATE TABLE stock_adjustment (
         REFERENCES daily_stock_summaries(id)
         ON DELETE CASCADE
 ) ENGINE=InnoDB;
+
+
+
+
+CREATE TABLE certified_stock_tracker (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    season VARCHAR(20) NOT NULL,
+    sale_type VARCHAR(50),
+    outturn VARCHAR(50),
+    lot_number VARCHAR(50),
+    cooperative VARCHAR(100),
+    wet_mill VARCHAR(100),
+    county VARCHAR(50),
+    grade VARCHAR(20),
+    grower_code VARCHAR(50),
+    purchased_weight DECIMAL(10, 2),
+    
+    rfa_certified BOOLEAN DEFAULT FALSE,
+    rfa_expiry_date DATE,
+    rfa_certificate_holder VARCHAR(100),
+    rfa_declared_weight DECIMAL(10, 2),
+    
+    eudr_certified BOOLEAN DEFAULT FALSE,
+    eudr_expiry_date DATE,
+    eudr_certificate_holder VARCHAR(100),
+    eudr_declared_weight DECIMAL(10, 2),
+    
+    cafe_certified BOOLEAN DEFAULT FALSE,
+    cafe_expiry_date DATE,
+    cafe_certificate_holder VARCHAR(100),
+    cafe_declared_weight DECIMAL(10, 2),
+    
+    impact_certified BOOLEAN DEFAULT FALSE,
+    impact_expiry_date DATE,
+    impact_declared_weight DECIMAL(10, 2),
+    
+    aaa_project BOOLEAN DEFAULT FALSE,
+    aaa_volume DECIMAL(10, 2),
+    geodata_available BOOLEAN DEFAULT FALSE,
+    aaa_declared_weight DECIMAL(10, 2),
+    
+    netzero_project BOOLEAN DEFAULT FALSE,
+    netzero_declared_weight DECIMAL(10, 2),
+    
+    fully_declared BOOLEAN DEFAULT FALSE,
+    
+    -- Optional: Indexing frequently queried columns speeds up search operations
+    INDEX idx_lot_number (lot_number),
+    INDEX idx_grower_code (grower_code)
+);
+
+CREATE TABLE sale_contract (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    contract_number VARCHAR(50),
+    weight_kilos DECIMAL(10, 2),
+    quality VARCHAR(30),
+    grade VARCHAR(20),
+    certs_declared BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE certifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    certificate VARCHAR(50)
+);
+
+-- M:N Table linking sale_contract and certfications
+CREATE TABLE sale_contract_certification (
+    sale_contract_id INT NOT NULL,
+    certification_id INT NOT NULL,
+    
+    PRIMARY KEY (sale_contract_id, certification_id),
+    
+    FOREIGN KEY (sale_contract_id) REFERENCES sale_contract(id) ON DELETE CASCADE,
+    FOREIGN KEY (certification_id) REFERENCES certfications(id) ON DELETE CASCADE,
+    
+    -- Index for reverse lookups (finding contracts by certification)
+    INDEX idx_certification_id (certification_id)
+);
+
+-- M:N Table linking sale_contract and certified_stock_tracker
+CREATE TABLE sale_contract_stock (
+    sale_contract_id INT NOT NULL,
+    stock_tracker_id INT NOT NULL,
+    allocated_weight DECIMAL(10, 2) NOT NULL, 
+    
+    PRIMARY KEY (sale_contract_id, stock_tracker_id),
+    
+    FOREIGN KEY (sale_contract_id) REFERENCES sale_contract(id) ON DELETE CASCADE,
+    FOREIGN KEY (stock_tracker_id) REFERENCES certified_stock_tracker(id) ON DELETE CASCADE,
+    
+    -- Index for reverse lookups (finding contracts by stock)
+    INDEX idx_stock_tracker_id (stock_tracker_id)
+);

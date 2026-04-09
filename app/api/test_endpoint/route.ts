@@ -1,4 +1,4 @@
-import { findUncostedProcessingBatches, updateTradeVariablesFromCsv, filterAndSaveMissingInputTradeBatches, process_sale_diff_update } from '@/lib/stack_pricing_utils';
+import { findUncostedProcessingBatches, updateTradeVariablesFromCsv,update_post_trade_variables_unorthodox, filterAndSaveMissingInputTradeBatches, process_sale_diff_update } from '@/lib/stack_pricing_utils';
 import { NextRequest, NextResponse } from 'next/server';
 // Assuming the utility file is stored at lib/find_and_save_uncosted_batches.ts
 
@@ -40,9 +40,8 @@ export async function POST(request: NextRequest) {
     try {
         const formData = await request.formData();
         const file = formData.get(FILE_FIELD_NAME);
-        const misc_file = formData.get("misc_file") as File;
 
-        if (!file || !(file instanceof File) || !misc_file || !(misc_file instanceof File)) {
+        if (!file || !(file instanceof File)) {
             return NextResponse.json({ 
                 success: false, 
                 message: `File upload failed. Expected '${FILE_FIELD_NAME}' file part.` 
@@ -53,6 +52,7 @@ export async function POST(request: NextRequest) {
         // await process_sale_diff_update(file);
         await updateTradeVariablesFromCsv(file);
         // await filterAndSaveMissingInputTradeBatches(misc_file);
+        // await update_post_trade_variables_unorthodox()
 
         return NextResponse.json({ 
             success: true, 

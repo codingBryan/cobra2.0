@@ -798,16 +798,18 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
             fetch('/api/process_gdi', { method: 'POST', body: formData }).then(r => r.json()),
             fetch('/api/process_sta', { method: 'POST', body: formData }).then(r => r.json()),
             fetch('/api/stock_movement', { method: 'POST', body: formData }).then(r => r.json()),
-            fetch('/api/process_pa', { method: 'POST', body: formData }).then(r => r.json())
+            fetch('/api/process_pa', { method: 'POST', body: formData }).then(r => r.json()),
+            
         ]);
 
+        const strategy_update = await fetch('/api/update_undefined_strategies', { method: 'POST', body: formData })
+        const strategy_update_reponse = strategy_update.json()
         // 4. Extract Data
         const inbound_weight = stiResult.total_delivered_qty;
         const outbound_weight = gdiResult.groupedData?.totalOutbound;
         const adjustment_weight = staResult.totalAdjustment;
         const xbs_current_stock_report = stockResult['current_stock_summary'];
         const processing_summary_object = paResult;
-
         // Check for integrity
         if (!processing_summary_object || outbound_weight === undefined || inbound_weight === undefined || !xbs_current_stock_report) {
             throw new Error("Missing crucial daily summary data points from file processing.");
@@ -856,7 +858,6 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
 
         // 7. Final Updates (Parallel)
         await Promise.all([
-            fetch('/api/update_undefined_strategies', { method: 'POST', body: formData }),
             fetch('/api/update_post_stacks', { method: 'POST', body: formData })
         ]);
 
@@ -2562,24 +2563,34 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                 <h3 className="font-bold text-[#51534a]">Composition Ingredients</h3>
                                 <span className="text-xs text-[#968C83]">{result.composition.length} Batches</span>
                             </div>
-                            <table className="w-full text-sm text-left">
-                                <thead className="bg-[#51534a] text-white font-medium">
-                                    <tr>
-                                        <th className="py-3 px-4">Batch ID</th>
-                                        <th className="py-3 px-4">Strategy</th>
-                                        <th className="py-3 px-4 text-right">Weight ({unit})</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-[#D6D2C4]">
-                                    {result.composition.map((comp, idx) => (
-                                        <tr key={idx} className="hover:bg-[#D6D2C4]/10">
-                                            <td className="py-3 px-4 font-mono text-[#007680] font-medium">{comp.batch_number}</td>
-                                            <td className="py-3 px-4 text-[#51534a]">{comp.strategy}</td>
-                                            <td className="py-3 px-4 text-right font-medium text-[#51534a]">{formatNumber(convertQty(comp.quantityKg, unit), 0)}</td>
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="bg-[#51534a] text-white font-medium">
+                                        <tr>
+                                            <th className="py-3 px-4">Batch ID</th>
+                                            <th className="py-3 px-4">Strategy</th>
+                                            <th className="py-3 px-4 text-right">Price ($/50)</th>
+                                            <th className="py-3 px-4 text-right">Hedge (c/lb)</th>
+                                            <th className="py-3 px-4 text-right">Weight ({unit})</th>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                                    </thead>
+                                    <tbody className="divide-y divide-[#D6D2C4]">
+                                        {result.composition.map((comp: any, idx: number) => (
+                                            <tr key={idx} className="hover:bg-[#D6D2C4]/10">
+                                                <td className="py-3 px-4 font-mono text-[#007680] font-medium">{comp.batch_number}</td>
+                                                <td className="py-3 px-4 text-[#51534a]">{comp.strategy}</td>
+                                                <td className="py-3 px-4 text-right text-[#51534a]">
+                                                    {comp.outrightPrice50kg}
+                                                </td>
+                                                <td className="py-3 px-4 text-right text-[#51534a]">
+                                                    {comp.hedgeLevelUSClb}
+                                                </td>
+                                                <td className="py-3 px-4 text-right font-medium text-[#51534a]">{formatNumber(convertQty(comp.quantityKg, unit), 0)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
                         </Card>
                     ) : (
                          <div className="text-center p-8 border-2 border-dashed border-[#D6D2C4] rounded-xl text-[#968C83]">

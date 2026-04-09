@@ -11,7 +11,8 @@ export async function GET(request: Request) {
   }
 
   try {
-    const historyBatch = await get_history_batch(batchNumber);
+    const historyBatch = await 
+    (batchNumber);
 
     if (!historyBatch) {
       return NextResponse.json({ error: 'Batch not found' }, { status: 404 });

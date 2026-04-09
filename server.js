@@ -19,8 +19,8 @@ app.prepare().then(() => {
   createServer(httpsOptions, (req, res) => {
     const parsedUrl = parse(req.url, true);
     handle(req, res, parsedUrl);
-  }).listen(443, (err) => {
+  }).listen(8443, (err) => {
     if (err) throw err;
-    console.log('> Ready on https://localhost:443');
+    console.log('> Ready on https://localhost:8443');
   });
 });

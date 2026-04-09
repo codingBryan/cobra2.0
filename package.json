@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node server.js",
-    "build": "next build",
-    "start": "node server.js",
+    "dev": "cross-env NODE_OPTIONS='--max-old-space-size=8192' ts-node server.js",
+    "build": "cross-env NODE_OPTIONS='--max-old-space-size=8192' next build",
+    "start": "cross-env NODE_OPTIONS='--max-old-space-size=8192' ts-node server.js",
     "lint": "next lint"
   },
   "dependencies": {
@@ -16,6 +16,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "cross-env": "^10.1.0",
     "crypto": "^1.0.1",
     "date-fns": "^4.1.0",
     "lucide-react": "^0.552.0",
@@ -35,6 +36,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "baseline-browser-mapping": "^2.10.8",
     "eslint": "^9",
     "eslint-config-next": "16.0.1",
     "tailwindcss": "^4",

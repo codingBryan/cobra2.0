@@ -1,5 +1,5 @@
 import pool, { query } from "./stock_movement_db";
-import { RowDataPacket, ResultSetHeader } from "mysql2/promise";
+import { RowDataPacket, ResultSetHeader, PoolConnection} from "mysql2/promise";
 import * as XLSX from 'xlsx'; // Assuming you are using the 'xlsx' library for Node.js/browser environments
 
 import * as fs from 'fs/promises';
@@ -8,51 +8,51 @@ import * as path from 'path';
 import { Batch, DailyStrategyRow, LastUpdateDates, PostStackBatchRow, SaleRecord } from "@/custom_utilities/custom_types";
 
 const STRATEGY_VALOS: Record<string, number> = {
-    "SPECIALTY": 95.0,
-    "AA TOP": 90.0,
-    "AB TOP": 70.0,
-    "PB TOP": 70.0,
-    "AA PLUS": 70.0,
-    "PB PLUS": 50.0,
-    "AB PLUS": 50.0,
-    "ABC PLUS": 45.0,
-    "AA FAQ": 40.0,
-    "PB FAQ": 20.0,
-    "AB FAQ": 20.0,
-    "ABC FAQ": 15.0,
-    "GRINDERS": -25.0,
-    "REJECTS": -270.0,
-    "MBUNIS": -25.0,
-    "GRINDER BOLD": -25.0, 
-    "GRINDER RC": 0, 
-    "GRINDER LIGHT": -70.0,
-    "WASTE": 0.45359,
+    "SPECIALTY": 160,
+    "AA TOP": 140,
+    "AB TOP": 80,
+    "PB TOP": 80,
+    "AA PLUS": 75.0,
+    "PB PLUS": 60.0,
+    "AB PLUS": 60.0,
+    "ABC PLUS": 50.0,
+    "AA FAQ": 45.0,
+    "PB FAQ": 30.0,
+    "AB FAQ": 30.0,
+    "ABC FAQ": 20.0,
+    "GRINDER BOLD": -5.0,
+    "GRINDER RC": -5.0,
+    "GRINDER LIGHT": -55.0,
+    "REJECTS": -220.0,
+    "MBUNIS": -30.0,
+    "WASTE":-220,
+    "MH":-30
 };
 
 const STRATEGY_MAPPING: Record<string, string[]> = {
     "SPECIALTY": [
-        "SPECIALTY - WASHED", "SPECIALTY - NATURAL", "SPECIALTY", "NATURAL", "POST NATURAL", "POST WASHED", "POST - WASHED"
+        "SPECIALTY - WASHED", "SPECIALTY - NATURAL", "SPECIALTY", "NATURAL", "POST NATURAL", "POST WASHED", "POST - WASHED", "IN SPECIALTY - WASHED", "FINISHED SPECIALTY - WASHED"
     ],
     "AA TOP": [
-        "AA - TOP", "POST 17 UP TOP", "IN AA - TOP", "PRE AA - TOP"
+        "AA - TOP", "POST 17 UP TOP", "IN AA - TOP", "PRE AA - TOP", "FINISHED AA - TOP"
     ],
     "AB TOP": [
         "AB - TOP", "FINISHED AB - TOP", "IN AB - TOP", "POST 16 TOP"
     ],
     "PB TOP": [
-        "PB-TOP", "PB - Top", "PB - TOP", "POST PB - TOP", "IN PB - TOP", "PRE PB - TOP"
+        "PB-TOP","FINISHED PB-TOP", "PB - Top", "PB - TOP", "POST PB - TOP", "IN PB - TOP", "PRE PB - TOP"
     ],
     "AA PLUS": [
-        "AA - PLUS", "IN AA - PLUS", "PRE AA - PLUS", "POST 17 UP PLUS"
+        "AA - PLUS", "IN AA - PLUS", "PRE AA - PLUS", "POST 17 UP PLUS", "FINISHED AA - PLUS"
     ],
     "AB PLUS": [
-        "AB - PLUS", "POST 16 PLUS", "PRE AB - PLUS", "IN AB - PLUS"
+        "AB - PLUS", "POST 16 PLUS", "POST 15 PLUS", "PRE AB - PLUS", "IN AB - PLUS", "FINISHED AB - PLUS"
     ],
     "PB PLUS": [
-        "PB - PLUS", "POST PB - PLUS", "PRE PB - PLUS", "IN PB - PLUS"
+        "PB - PLUS", "POST PB - PLUS", "PRE PB - PLUS", "IN PB - PLUS", "FINISHED PB - PLUS"
     ],
     "ABC PLUS": [
-        "ABC - PLUS", "POST 14 PLUS", "IN ABC - PLUS", "PRE ABC - PLUS"
+        "ABC - PLUS", "POST 14 PLUS", "IN ABC - PLUS", "PRE ABC - PLUS", "FINISHED ABC - PLUS"
     ],
     "AA FAQ": [
         "AA - FAQ", "AA - FAQ MINUS", "FAQ - PLUS", "PRE AA - FAQ", "IN AA - FAQ", "IN AA- FAQ", "IN AA - FAQ PLUS", "FINISHED AA - FAQ MINUS", "POST 17 UP FAQ", "FINISHED AA - FAQ", "POST FAQ PLUS"
@@ -61,7 +61,7 @@ const STRATEGY_MAPPING: Record<string, string[]> = {
         "AB - FAQ", "AB - FAQ MINUS", "PRE AB - FAQ", "IN AB - FAQ", "POST 15 FAQ", "POST FAQ MINUS", "FINISHED AB - FAQ MINUS", "FINISHED AB - FAQ", "POST 16 FAQ"
     ],
     "PB FAQ": [
-        "PB - FAQ", "PRE PB - FAQ", "IN PB - FAQ"
+        "PB - FAQ", "PRE PB - FAQ", "IN PB - FAQ", "POST PB - FAQ", "FINISHED PB - FAQ"
     ],
     "ABC FAQ": [
         "ABC - FAQ", "PRE ABC - FAQ", "IN ABC - FAQ", "POST 14 FAQ", "FINISHED ABC - FAQ"
@@ -79,7 +79,7 @@ const STRATEGY_MAPPING: Record<string, string[]> = {
         "MBUNIS", "ML", "MH", "PRE MBUNIS", "POST MH", "IN MBUNIS", "FINISHED MBUNIS"
     ],
     "REJECTS": [
-        "REJECTS L", "REJECT", "REJECTS B", "DEFECTS P. %", "LOW GRADE", "PRE REJECT", "IN REJECT", "IN REJECTS S", "POST REJECTS S", "FINISHED REJECT"
+        "REJECTS L", "REJECT", "REJECTS B", "DEFECTS P. %", "LOW GRADE", "PRE REJECT", "IN REJECT", "IN REJECTS S", "POST REJECTS S", "FINISHED REJECT", "POST REJECTS P"
     ],
     "WASTE": [
          "SWEEPINGS", "DUST", "STONES", "FINISHED DUST"
@@ -654,7 +654,7 @@ export async function calculate_and_update_trade_variables_for_other_processes(p
     const failingInputs = updatedInputs.filter(rec => rec.input_cost_usd_50 === null || rec.input_hedge_level_usc_lb === null);
     if (failingInputs.length > 0) {
         for (const fail of failingInputs) {
-            await logMissingBatchData(processNumber, fail.batch_number, "Missing input cost or hedge level");
+            // await logMissingBatchData(processNumber, fail.batch_number, "Missing input cost or hedge level");
         }
         return false;
     }
@@ -706,13 +706,13 @@ export async function calculate_and_update_trade_variables_for_other_processes(p
 
     for (const output of outputBatches) {
         if (!output.strategy || output.strategy === 'UNDEFINED') {
-            await logMissingBatchData(processNumber, output.batch_number, "Output strategy is UNDEFINED");
+            // await logMissingBatchData(processNumber, output.batch_number, "Output strategy is UNDEFINED");
             return false;
         }
         const mainStrategy = mapStrategyToMainKey(output.strategy);
         const valo = mainStrategy ? STRATEGY_VALOS[mainStrategy] : null;
         if (valo === null) {
-            await logMissingBatchData(processNumber, output.batch_number, `Strategy ${output.strategy} not found in VALOS`);
+            // await logMissingBatchData(processNumber, output.batch_number, `Strategy ${output.strategy} not found in VALOS`);
             return false;
         }
 
@@ -836,7 +836,7 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     const failingInputs = updatedInputs.filter(rec => rec.input_cost_usd_50 === null || rec.input_hedge_level_usc_lb === null);
     if (failingInputs.length > 0) {
         for (const fail of failingInputs) {
-            await logMissingBatchData(processNumber, fail.batch_number, "Missing input cost or hedge level (Bulking)");
+            // await logMissingBatchData(processNumber, fail.batch_number, "Missing input cost or hedge level (Bulking)");
         }
         return false;
     }
@@ -967,6 +967,7 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     const processes = await query<DailyProcessRow[]>({
         query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
     });
+    console.log("Succesfully fetched unpriced processes")
 
     if (processes && processes.length > 0) {
         for (const process of processes) {
@@ -981,7 +982,7 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     // 3. PHASE 2: Final Cleanup Iteration (Standard Pull)
     console.log("\n--- Starting Phase 2: Final Cleanup Iteration ---");
     const cleanupProcesses = await query<DailyProcessRow[]>({
-        query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
+        query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date DESC`,
     });
 
     if (cleanupProcesses && cleanupProcesses.length > 0) {
@@ -1003,6 +1004,102 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     return skippedProcessNumbers;
 }
 
+
+export async function update_post_trade_variables_unorthodox(): Promise<string[]> {
+    console.log("Starting update_post_trade_variables process (DB-Driven Mode).");
+    const skippedProcessNumbers: string[] = [];
+
+    // --- 1. PHASE 1: Chronological Processing with "Push" ---
+    // Optimization: Fetch all pending processes at once ordered by date to ensure correct dependency flow.
+    console.log("\n--- Starting Phase 1: Chronological Push Processing ---");
+    const processes = await query<DailyProcessRow[]>({
+        query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
+    });
+
+    if (processes && processes.length > 0) {
+        console.log(`Found ${processes.length} pending processes for Phase 1.`);
+        for (const process of processes) {
+            console.log(`[Phase 1] Processing ${process.process_number} (${process.process_type})...`);
+            try {
+                // Optimization: Add timeout race to prevent infinite hanging
+                const processingPromise = (async () => {
+                    if (process.process_type === 'BULKING') {
+                        return await process_bulking(process, true); // enablePush = true
+                    } else {
+                        return await calculate_and_update_trade_variables_for_other_processes(process, true); // enablePush = true
+                    }
+                })();
+
+                // Timeout after 60 seconds per process to prevent total freeze
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error("Process timed out after 60s")), 60000)
+                );
+
+
+                await Promise.race([processingPromise, timeoutPromise]);
+                
+                console.log(`[Phase 1] Successfully processed ${process.process_number}.`);
+            } catch (error) {
+                console.error(`[Phase 1] Error processing ${process.process_number}:`, error);
+                // We don't add to skipped yet; Phase 2 will retry strictly
+            }
+        }
+    } else {
+        console.log("No pending processes found for Phase 1.");
+    }
+
+    // --- 2. PHASE 2: Final Cleanup Iteration (Standard Pull) ---
+    // Re-fetch pending status to see what failed or was missed in the push phase.
+    console.log("\n--- Starting Phase 2: Final Cleanup Iteration ---");
+    const cleanupProcesses = await query<DailyProcessRow[]>({
+        query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
+    });
+
+    if (cleanupProcesses && cleanupProcesses.length > 0) {
+        console.log(`Found ${cleanupProcesses.length} processes remaining for Phase 2 cleanup.`);
+        for (const process of cleanupProcesses) {
+            console.log(`[Phase 2] Retrying ${process.process_number}...`);
+            let success = false;
+            try {
+                // Optimization: Add timeout race to prevent infinite hanging
+                const processingPromise = (async () => {
+                    if (process.process_type === 'BULKING') {
+                        return await process_bulking(process, false); // enablePush = false
+                    } else {
+                        return await calculate_and_update_trade_variables_for_other_processes(process, false); // enablePush = false
+                    }
+                })();
+
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error("Cleanup process timed out after 60s")), 60000)
+                );
+
+                success = await Promise.race([processingPromise, timeoutPromise]) as boolean;
+
+            } catch (e) {
+                console.error(`[Phase 2] Cleanup failed for ${process.process_number}:`, e);
+                success = false;
+            }
+            
+            if (!success) {
+                skippedProcessNumbers.push(process.process_number);
+                console.warn(`[Phase 2] Skipping process ${process.process_number} due to calculation failure.`);
+            } else {
+                console.log(`[Phase 2] Successfully recovered ${process.process_number}.`);
+            }
+        }
+    } else {
+        console.log("No processes required Phase 2 cleanup.");
+    }
+
+    console.log("\nTrade variable update process finished.");
+    if (skippedProcessNumbers.length > 0) {
+        console.log(`Skipped Processes: ${skippedProcessNumbers.join(', ')}`);
+    } else {
+        console.log("All processes updated successfully.");
+    }
+    return skippedProcessNumbers;
+}
 /**
  * Interface for the Excel row structure used in the input file.
  */
@@ -1564,7 +1661,7 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
     if (row.process_id) {
         const ingredientRows = await query<any[]>({
             query: `
-                SELECT id, batch_number, strategy, input_qty 
+                SELECT id, batch_number, strategy, input_qty, output_hedge_level_usc_lb, output_cost_usd_50
                 FROM daily_strategy_processing 
                 WHERE process_id = ? 
                   AND input_qty > 0
@@ -1577,6 +1674,8 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
                 batchId: ingRow.id.toString(), // Mapped to row ID as requested
                 batch_number: ingRow.batch_number,
                 strategy: ingRow.strategy || 'UNDEFINED',
+                outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
+                hedgeLevelUSClb: Number(row.output_hedge_level_usc_lb) || 0,
                 quantityKg: Number(ingRow.input_qty)
             }));
         }
@@ -2831,3 +2930,133 @@ export async function analysis_vs_actual(process_id: number) {
         outputs: outputResult || fallbackOutputs
     };
 }
+
+
+// --- Configuration & Helpers (Shared with route.ts) ---
+const process_shortcodes: { [key: string]: string } = {
+  'Bulking': 'BULK',
+  'Final - Bulking': 'FBULK',
+  'Color Sorting': 'CS',
+  'Regrading': 'RG',
+  'Gravity Separation': 'GS',
+  'Blowing': 'BLOW',
+  'Hand Picking': 'HP',
+  'Pre-Cleaning': 'PC',
+  'Vacuum-Packing': 'VP'
+};
+
+function extractOutturn(analysisNumber: string): string | null {
+  const match = analysisNumber.match(/(\d{2}[a-zA-Z]{2}\d{4})/);
+  return match ? match[0].toUpperCase() : null;
+}
+
+function padCounter(numStr: string): string {
+  const num = parseInt(numStr.replace(/\D/g, ''), 10);
+  if (isNaN(num)) return numStr;
+  return num.toString().padStart(5, '0');
+}
+
+/**
+ * Iterates through all unmapped records in batch_analysis and attempts to 
+ * link them to catalogue_summary or daily_strategy_processing.
+ * @returns The total number of analyses successfully mapped during this run.
+ */
+export async function remapUnmappedAnalyses(): Promise<number> {
+  let connection: PoolConnection | undefined;
+  let successfullyMappedCount = 0;
+
+  try {
+    if (!pool) throw new Error("Database pool not initialized");
+    connection = await pool.getConnection();
+
+    // 1. Fetch all unmapped analyses
+    const [unmappedRecords] = await connection.query<RowDataPacket[]>(
+      `SELECT id, analysis_type, analysis_number, qc_grade FROM batch_analysis WHERE mapped = FALSE`
+    );
+
+    if (unmappedRecords.length === 0) return 0;
+
+    for (const record of unmappedRecords) {
+      const analysisId = record.id;
+      const analysisType = record.analysis_type;
+      const analysisNumber = record.analysis_number;
+      const grade = record.qc_grade;
+      let isNowMapped = false;
+
+      // START TRANSACTION for each individual attempt to ensure data integrity
+      await connection.beginTransaction();
+
+      try {
+        // --- LOGIC A: Catalogue Mapping ---
+        if (analysisType === 'Auction' || analysisType === 'Direct Sale') {
+          let updateQuery = '';
+          let params: any[] = [];
+
+          if (analysisType === 'Direct Sale') {
+            const outturn = extractOutturn(analysisNumber);
+            if (outturn) {
+              updateQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'DS' AND analysis_id IS NULL AND outturn = ? LIMIT 1`;
+              params = [analysisId, outturn];
+            }
+          } else {
+            updateQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'Auction' AND analysis_id IS NULL AND lot_number = ? LIMIT 1`;
+            params = [analysisId, analysisNumber];
+          }
+
+          if (updateQuery) {
+            const [res] = await connection.query<ResultSetHeader>(updateQuery, params);
+            if (res.affectedRows > 0) isNowMapped = true;
+          }
+        } 
+        // --- LOGIC B: Process Mapping ---
+        else if (process_shortcodes.hasOwnProperty(analysisType)) {
+          const shortcode = process_shortcodes[analysisType];
+          const processNumber = `${shortcode}-${padCounter(analysisNumber)}`;
+
+          const [candidates] = await connection.query<RowDataPacket[]>(
+            `SELECT batch_number FROM daily_strategy_processing WHERE batch_number LIKE CONCAT(?, '%') AND output_qty > 0 AND analysis_id IS NULL`,
+            [processNumber]
+          );
+
+          let targetBatch: string | null = null;
+          if (candidates.length === 1) {
+            targetBatch = candidates[0].batch_number;
+          } else if (candidates.length > 1 && grade) {
+            const match = candidates.find(b => b.batch_number.toUpperCase().includes(grade.toUpperCase()));
+            if (match) targetBatch = match.batch_number;
+          }
+
+          if (targetBatch) {
+            const [res] = await connection.query<ResultSetHeader>(
+              `UPDATE daily_strategy_processing SET analysis_id = ? WHERE batch_number = ?`,
+              [analysisId, targetBatch]
+            );
+            if (res.affectedRows > 0) isNowMapped = true;
+          }
+        }
+
+        // Finalize if mapping occurred
+        if (isNowMapped) {
+          await connection.query(`UPDATE batch_analysis SET mapped = TRUE WHERE id = ?`, [analysisId]);
+          successfullyMappedCount++;
+        }
+
+        await connection.commit();
+      } catch (innerError) {
+        await connection.rollback();
+        console.error(`Error remapping analysis ID ${analysisId}:`, innerError);
+      }
+    }
+
+    return successfullyMappedCount;
+  } catch (error) {
+    console.error("Critical error in remapping utility:", error);
+    throw error;
+  } finally {
+    if (connection) connection.release();
+  }
+}
+
+
+
+
