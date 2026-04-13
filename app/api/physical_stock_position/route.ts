@@ -3,38 +3,34 @@ import { query } from '@/lib/stock_movement_db';
 
 export const dynamic = 'force-dynamic';
 
-// 1. Defined Object Variable with Theoretical Volumes (in Kgs)
-// You can adjust these base values as your real physical stock changes.
-const THEORETICAL_VOLUMES: Record<string, number> = {
-    finished: 150000,
-    post_natural: 120000,
-    post_specialty_washed: 80000,
-    post_17_up_top: 50000,
-    post_16_top: 45000,
-    post_15_top: 40000,
-    post_pb_top: 15000,
-    post_17_up_plus: 30000,
-    post_16_plus: 25000,
-    post_15_plus: 20000,
-    post_14_plus: 15000,
-    post_pb_plus: 10000,
-    post_17_up_faq: 20000,
-    post_16_faq: 18000,
-    post_15_faq: 15000,
-    post_14_faq: 12000,
-    post_pb_faq: 8000,
-    post_faq_minus: 25000,
-    post_grinder_bold: 10000,
-    post_grinder_light: 8000,
-    post_mh: 5000,
-    post_ml: 5000,
-    post_rejects_s: 2000,
-    post_rejects_p: 100
-};
+// Adjust this to match your Flask server URL
+const FLASK_API_URL = process.env.FLASK_API_URL || 'http://127.0.0.1:8100/api/processing_forecast';
 
-export async function GET() {
+export async function POST(request: Request) {
     try {
-        // Highly Optimized O(1) Fetch: Resolves contracts and their respective blends 
+        // 1. O(1) Memory Passthrough: Extract FormData stream directly from the client request
+        const formData = await request.formData();
+
+        // 2. Proxy the files to the Flask endpoint
+        // (Fetch natively handles streaming the multipart boundary, so no manual headers are needed)
+        const flaskResponse = await fetch(FLASK_API_URL, {
+            method: 'POST',
+            body: formData, 
+        });
+
+        if (!flaskResponse.ok) {
+            const errBody = await flaskResponse.json().catch(() => ({}));
+            console.error("Flask API failed:", errBody);
+            return NextResponse.json(
+                { error: 'Failed to process files via Flask engine', details: errBody }, 
+                { status: flaskResponse.status }
+            );
+        }
+
+        // 3. Dynamically set Theoretical Volumes from the Flask JSON response
+        const THEORETICAL_VOLUMES: Record<string, number> = await flaskResponse.json();
+
+        // 4. Highly Optimized O(1) Fetch: Resolves contracts and their respective blends 
         // in a single trip. Bypasses the need for recursive/iterative DB querying.
         const sqlQuery = `
             SELECT 
@@ -52,7 +48,7 @@ export async function GET() {
         const gridMap = new Map();
         const monthsSet = new Set<string>();
 
-        // Initialize the tracking grid
+        // Initialize the tracking grid with dynamic Flask values
         stacks.forEach(stack => {
             gridMap.set(stack, {
                 stack: stack,
@@ -140,7 +136,7 @@ export async function GET() {
         });
 
     } catch (error) {
-        console.error("Database error during Physical Positions fetch:", error);
-        return NextResponse.json({ error: 'Failed to fetch physical positions' }, { status: 500 });
+        console.error("Database or Request error during Physical Positions fetch:", error);
+        return NextResponse.json({ error: 'Failed to process physical positions' }, { status: 500 });
     }
 }
