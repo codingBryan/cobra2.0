@@ -54,6 +54,27 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: 'sale_contract_id is required' }, { status: 400 });
         }
 
+        // 0. O(1) Reset: Instantly revert any existing declarations for this contract before re-allocating
+        await query({
+            query: `
+                UPDATE certified_stock_tracker cst
+                INNER JOIN sale_contract_stock_declaration scsd ON cst.id = scsd.stock_tracker_id
+                SET 
+                    cst.rfa_declared_weight = GREATEST(0, COALESCE(cst.rfa_declared_weight, 0) - COALESCE(scsd.rfa_declared_weight, 0)),
+                    cst.eudr_declared_weight = GREATEST(0, COALESCE(cst.eudr_declared_weight, 0) - COALESCE(scsd.eudr_declared_weight, 0)),
+                    cst.cafe_declared_weight = GREATEST(0, COALESCE(cst.cafe_declared_weight, 0) - COALESCE(scsd.cafe_declared_weight, 0)),
+                    cst.impact_declared_weight = GREATEST(0, COALESCE(cst.impact_declared_weight, 0) - COALESCE(scsd.impact_declared_weight, 0)),
+                    cst.aaa_declared_weight = GREATEST(0, COALESCE(cst.aaa_declared_weight, 0) - COALESCE(scsd.aaa_declared_weight, 0)),
+                    cst.netzero_declared_weight = GREATEST(0, COALESCE(cst.netzero_declared_weight, 0) - COALESCE(scsd.netzero_declared_weight, 0))
+                WHERE scsd.sale_contract_id = ?
+            `,
+            values: [sale_contract_id]
+        });
+        await query({
+            query: `DELETE FROM sale_contract_stock_declaration WHERE sale_contract_id = ?`,
+            values: [sale_contract_id]
+        });
+
         // 1. Fetch Contract & Certificates in O(1) Trip
         const contractRows = await query({
             query: `
@@ -87,8 +108,9 @@ export async function POST(request: Request) {
         // 3. Fetch Stock
         let stockQuery = 'SELECT * FROM certified_stock_tracker WHERE 1=1';
         
-        // LOGICAL FIX: Exclude stock that is BOTH aaa and cafe (dual-certified).
-        if (certificates_to_declare.includes('aaa') && certificates_to_declare.includes('cafe')) {
+        // ⚡ OPTIMIZATION: Exclude stock that is BOTH aaa and cafe UNLESS both are declared
+        const requiresBoth = certificates_to_declare.includes('aaa') && certificates_to_declare.includes('cafe');
+        if (!requiresBoth) {
             stockQuery += ' AND NOT (aaa_project = 1 AND cafe_certified = 1)';
         }
         
@@ -96,7 +118,7 @@ export async function POST(request: Request) {
         let certified_purchases_to_declare = allStocks;
 
         // Trackers for bulk database updates
-        const trackerUpdatesMap = new Map<number, TrackerUpdate>();
+        const trackerUpdatesMap = new Map<number, any>();
         const declarationInsertsMap = new Map<number, any>();
         
         // Data tracker for the Excel report
@@ -117,15 +139,27 @@ export async function POST(request: Request) {
                 parseFloat(s[declaredField] || 0) < parseFloat(s[baseVolumeField] || 0)
             );
 
-            // OPTIMIZATION: Prioritize lots where the certificate holder is 'Kenyacof'
+            // OPTIMIZATION: Prioritize Kenyacof holders first, then Dual-Certified lots (if applicable)
             applicableStocks.sort((a, b) => {
+                // Tier 1: Kenyacof Priority
                 const aHolder = String(a[`${cert}_certificate_holder`] || a['cafe_certificate_holder'] || '').toLowerCase();
                 const bHolder = String(b[`${cert}_certificate_holder`] || b['cafe_certificate_holder'] || '').toLowerCase();
                 
                 const aIsKenyacof = aHolder.includes('kenyacof') ? 1 : 0;
                 const bIsKenyacof = bHolder.includes('kenyacof') ? 1 : 0;
                 
-                return bIsKenyacof - aIsKenyacof; // 1 (Kenyacof) comes before 0 (Other)
+                if (aIsKenyacof !== bIsKenyacof) {
+                    return bIsKenyacof - aIsKenyacof; // 1 (Kenyacof) comes before 0 (Other)
+                }
+
+                // Tier 2: Dual-Certification Priority (ONLY if contract requires both)
+                if (requiresBoth) {
+                    const aIsDual = (a.aaa_project == 1 && a.cafe_certified == 1) ? 1 : 0;
+                    const bIsDual = (b.aaa_project == 1 && b.cafe_certified == 1) ? 1 : 0;
+                    return bIsDual - aIsDual; // 1 (Dual-Certified) comes before 0 (Single-Certified)
+                }
+
+                return 0; // Keep original order if ties
             });
 
             for (const stock of applicableStocks) {
@@ -270,7 +304,6 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'Failed to process allocation' }, { status: 500 });
     }
 }
-
 
 
 export async function DELETE(request: Request) {

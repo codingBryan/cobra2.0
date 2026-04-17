@@ -8,6 +8,7 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
     try {
         // Highly Optimized: Resolves the M:N relationships and Blends directly in SQL.
+        // FIXED: Pulls the 'executed' flag from the 'sale_contract' (sc) table
         const sqlQuery = `
             SELECT 
                 sc.id, 
@@ -18,6 +19,7 @@ export async function GET() {
                 MAX(sc.quality) as quality,
                 MAX(sc.grade) as grade,
                 MAX(sc.blend_id) as blend_id,
+                MAX(sc.executed) as executed,
                 MAX(b.name) as blend_name,
                 MAX(cst.strategy) as strategy,
                 JSON_ARRAYAGG(c.certificate) as certifications
@@ -48,8 +50,8 @@ export async function POST(request: Request) {
         const certsDeclared = uniqueCerts.length > 0 ? 1 : 0;
 
         const insertSaleQuery = `
-            INSERT INTO sale_contract (contract_number, client, weight_kilos, quality, grade, shipping_date, certs_declared)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sale_contract (contract_number, client, weight_kilos, quality, grade, shipping_date, certs_declared, executed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
         `;
         const saleResult: any = await query({
             query: insertSaleQuery,
@@ -109,7 +111,8 @@ export async function POST(request: Request) {
                 shipping_date: shippingDate,
                 certifications: uniqueCerts,
                 blend_id: null,
-                blend_name: null
+                blend_name: null,
+                executed: false
             }
         });
     } catch (error) {
@@ -131,7 +134,6 @@ export async function PUT(request: Request) {
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
         const certsDeclared = uniqueCerts.length > 0 ? 1 : 0;
 
-        // FIX: Synchronized `certs_declared` to guarantee absolute alignment with schema semantics.
         await query({
             query: `UPDATE sale_contract SET quality = ?, grade = ?, blend_id = ?, certs_declared = ? WHERE id = ?`,
             values: [quality || null, grade || null, safeBlendId, certsDeclared, id]
@@ -188,8 +190,28 @@ export async function PUT(request: Request) {
     }
 }
 
-// Fallback handlers to bypass aggressive preflight/routing bugs
-export async function PATCH(request: Request) { return await PUT(request); }
+// Highly Optimized Dedicated Endpoint for toggling executed status O(1)
+export async function PATCH(request: Request) {
+    try {
+        const body = await request.json();
+        const { id, executed } = body;
+
+        if (!id || executed === undefined) {
+            return NextResponse.json({ error: 'ID and executed status are required' }, { status: 400 });
+        }
+
+        await query({
+            query: `UPDATE sale_contract SET executed = ? WHERE id = ?`,
+            values: [executed ? 1 : 0, id]
+        });
+
+        return NextResponse.json({ success: true });
+    } catch (error) {
+        console.error("Database error during PATCH:", error);
+        return NextResponse.json({ error: 'Failed to update contract execution status' }, { status: 500 });
+    }
+}
+
 export async function OPTIONS() {
     return NextResponse.json({}, { status: 200, headers: { 'Allow': 'GET, POST, PUT, PATCH, DELETE, OPTIONS' } });
 }

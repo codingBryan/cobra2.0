@@ -19,14 +19,17 @@ import {
   Search,
   ChevronRight,
   Download,
-  FileCheck
+  FileCheck,
+  Eye,
+  CheckCircle,
+  Circle
 } from 'lucide-react';
 
 // --- Constants & Types ---
 const KG_TO_LB = 2.2046;
 const KG_TO_BAG = 60;
 type Unit = 'kg' | 'bag' | 'mt';
-type MainTab = 'physical' | 'certification' | 'tracker' | 'contracts' | 'blends';
+type MainTab = 'physical' | 'certification' | 'tracker' | 'contracts' | 'blends' | 'declarations';
 const CERT_FILTERS = ["RFA", "CAFE", "NET ZERO", "EUDR", "AAA"] as const;
 const TRACKER_FILTERS = ["ALL", ...CERT_FILTERS] as const;
 
@@ -46,7 +49,7 @@ const BLEND_COMPONENTS = [
   { key: 'post_specialty_washed', label: 'POST SPECIALTY WASHED' },
   { key: 'post_17_up_top', label: 'POST 17 UP TOP' },
   { key: 'post_16_top', label: 'POST 16 TOP' },
-  { key: 'post_15_top', label: 'POST 16 TOP' },
+  { key: 'post_15_top', label: 'POST 15 TOP' },
   { key: 'post_pb_top', label: 'POST PB TOP' },
   { key: 'post_17_up_plus', label: 'POST 17 UP PLUS' },
   { key: 'post_16_plus', label: 'POST 16 PLUS' },
@@ -66,7 +69,6 @@ const BLEND_COMPONENTS = [
   { key: 'post_rejects_s', label: 'POST REJECTS S' },
   { key: 'post_rejects_p', label: 'POST REJECTS P' }
 ];
- 
 
 const INITIAL_BLEND_FORM = {
   name: '', client: '', grade: '', cup_profile: '', blend_no: '',
@@ -135,6 +137,7 @@ interface SaleContract {
   SMT?: number; 
   blend_id?: number;
   blend_name?: string;
+  executed?: boolean;
 }
 
 interface PhysicalPositionRecord {
@@ -143,6 +146,27 @@ interface PhysicalPositionRecord {
   months: Record<string, number>;
   total_shorts: number;
   net_position: number;
+}
+
+interface DeclarationRow {
+  contract_id: number;
+  contract_number: string;
+  client: string;
+  contract_weight: number;
+  shipping_date: string;
+  stock_id: number;
+  lot_number: string;
+  grade: string;
+  strategy: string;
+  cooperative: string;
+  wet_mill: string;
+  lot_purchased_weight: number;
+  rfa_declared_weight: number;
+  eudr_declared_weight: number;
+  cafe_declared_weight: number;
+  impact_declared_weight: number;
+  aaa_declared_weight: number;
+  netzero_declared_weight: number;
 }
 
 type TrackerColumn = {
@@ -234,7 +258,19 @@ function displayText(value: unknown, fallback = "—") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
-// ⚡ OPTIMIZATION: Core helper to dynamically route volume field (aaa_volume override)
+const certToField = (cert: string) => {
+    switch(cert) {
+        case 'RFA': return 'rfa_declared_weight';
+        case 'EUDR': return 'eudr_declared_weight';
+        case 'CAFE': return 'cafe_declared_weight';
+        case 'Impact': return 'impact_declared_weight';
+        case 'AAA': return 'aaa_declared_weight';
+        case 'NET ZERO': return 'netzero_declared_weight';
+        default: return '';
+    }
+}
+
+// ⚡ OPTIMIZATION: Core helper to dynamically route volume field
 function getEffectiveWeight(stock: CertifiedStock, cert: string) {
   if (cert === 'AAA') {
       return asNumber(stock.aaa_volume != null ? stock.aaa_volume : 0);
@@ -326,7 +362,7 @@ function buildTrackerRow(stock: CertifiedStock, cert: TrackerCertType) {
     county: displayText(stock.county),
     grade: displayText(stock.grade),
     grower_code: displayText(stock.grower_code),
-    effective_weight: getEffectiveWeight(stock, cert), // Dynamic AAA weighting mapped here
+    effective_weight: getEffectiveWeight(stock, cert), 
     rfa_certified: certFlags.RFA,
     rfa_expiry_date: formatDateDisplay(stock.rfa_expiry_date),
     rfa_certificate_holder: displayText(stock.rfa_certificate_holder),
@@ -401,10 +437,16 @@ function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
       { key: "cafe_expiry_date", label: "CAFE Expiry", align: "center", render: (row) => row.cafe_expiry_date, exportValue: (row) => row.cafe_expiry_date },
       { key: "cafe_certificate_holder", label: "CAFE Holder", align: "center", render: (row) => row.cafe_certificate_holder, exportValue: (row) => row.cafe_certificate_holder },
       { key: "cafe_declared_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_declared_weight != null ? `${formatQty(row.cafe_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.cafe_declared_weight != null ? formatQty(row.cafe_declared_weight, unit) : "") },
+      { key: "impact_certified", label: "Impact", align: "center", render: (row) => (row.impact_certified ? "Yes" : "No"), exportValue: (row) => (row.impact_certified ? "Yes" : "No") },
+      { key: "impact_expiry_date", label: "Impact Expiry", align: "center", render: (row) => row.impact_expiry_date, exportValue: (row) => row.impact_expiry_date },
+      { key: "impact_declared_weight", label: "Impact Decl.", align: "right", render: (row) => (row.impact_declared_weight != null ? `${formatQty(row.impact_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.impact_declared_weight != null ? formatQty(row.impact_declared_weight, unit) : "") },
       { key: "aaa_project", label: "AAA", align: "center", render: (row) => row.aaa_project ? "Yes" : "No", exportValue: (row) => (row.aaa_project ? "Yes" : "No") },
       { key: "aaa_volume", label: "AAA Vol.", align: "right", render: (row) => (row.aaa_volume != null ? `${formatQty(row.aaa_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_volume != null ? formatQty(row.aaa_volume, unit) : "") },
+      { key: "geodata_available", label: "Geo", align: "center", render: (row) => (row.geodata_available ? "Yes" : "No"), exportValue: (row) => (row.geodata_available ? "Yes" : "No") },
+      { key: "aaa_declared_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_declared_weight != null ? `${formatQty(row.aaa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_declared_weight != null ? formatQty(row.aaa_declared_weight, unit) : "") },
       { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
       { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
+      { key: "fully_declared", label: "Fully Declared", align: "center", render: (row) => (row.fully_declared ? "Yes" : "No"), exportValue: (row) => (row.fully_declared ? "Yes" : "No") },
     ],
     RFA: [
       { key: "rfa_certified", label: "RFA", align: "center", render: (row) => (row.rfa_certified ? "Yes" : "No"), exportValue: (row) => (row.rfa_certified ? "Yes" : "No") },
@@ -622,6 +664,53 @@ const FileDropZone = ({
     );
 };
 
+// --- Native Donut Chart Component ---
+function TrackerDonutChart({ data, unit }: { data: { name: string, value: number, color: string }[], unit: Unit }) {
+  const total = data.reduce((sum, d) => sum + d.value, 0);
+  if (total === 0) return <div className="text-sm italic text-[#968C83]">No holder data available.</div>;
+
+  let currentOffset = 0; 
+  
+  return (
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+        <div className="relative shrink-0 flex items-center justify-center h-[120px] w-[120px]">
+            <svg width="120" height="120" viewBox="0 0 42 42" className="overflow-visible -rotate-90">
+                <circle cx="21" cy="21" r="15.91549430918954" fill="transparent" stroke="#D6D2C4" strokeWidth="4" />
+                {data.map((slice, i) => {
+                    const percent = (slice.value / total) * 100;
+                    const offset = currentOffset;
+                    currentOffset -= percent; 
+                    return (
+                        <circle 
+                            key={i}
+                            cx="21" cy="21" r="15.91549430918954" 
+                            fill="transparent" stroke={slice.color} strokeWidth="4" 
+                            strokeDasharray={`${percent} ${100 - percent}`} 
+                            strokeDashoffset={offset}
+                            className="transition-all duration-500 ease-in-out"
+                        />
+                    );
+                })}
+            </svg>
+        </div>
+        <div className="flex-1 space-y-2 max-h-[140px] overflow-y-auto pr-1">
+            {data.map((slice, i) => (
+                <div key={i} className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2 min-w-0">
+                        <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: slice.color }}></div>
+                        <div className="flex flex-col min-w-0">
+                           <span className="truncate text-[#51534a] font-bold" title={slice.name}>{slice.name}</span>
+                           <span className="text-[10px] text-[#968C83]">{formatQty(slice.value, unit)} {unitText(unit)}</span>
+                        </div>
+                    </div>
+                    <span className="text-[#007680] font-bold pl-2">{((slice.value / total) * 100).toFixed(1)}%</span>
+                </div>
+            ))}
+        </div>
+    </div>
+  );
+}
+
 export default function CertificationViewer() {
   const [activeTab, setActiveTab] = useState<MainTab>('physical');
   const [activeCert, setActiveCert] = useState<CertType>('RFA');
@@ -630,6 +719,7 @@ export default function CertificationViewer() {
   const [stocks, setStocks] = useState<CertifiedStock[]>([]);
   const [sales, setSales] = useState<SaleContract[]>([]);
   const [blends, setBlends] = useState<Blend[]>([]);
+  const [declarations, setDeclarations] = useState<DeclarationRow[]>([]);
   
   // Physical Data state
   const [physicalData, setPhysicalData] = useState<{
@@ -695,6 +785,16 @@ export default function CertificationViewer() {
   const [selectedBlendId, setSelectedBlendId] = useState<number | null>(null);
   const [blendAllocContractId, setBlendAllocContractId] = useState<number | "">("");
   const [blendBusy, setBlendBusy] = useState(false);
+  
+  // Declarations UI state
+  const [viewingDeclarationContract, setViewingDeclarationContract] = useState<number | null>(null);
+  const [declarationModalCert, setDeclarationModalCert] = useState<string>("");
+  const [contractToDelete, setContractToDelete] = useState<number | null>(null);
+  const [isDeletingDecl, setIsDeletingDecl] = useState(false);
+
+  // Contracts UI View Filters
+  const [showExecutedContracts, setShowExecutedContracts] = useState(false);
+  const [contractSearch, setContractSearch] = useState('');
 
   const certOptions: CertType[] = ['RFA', 'CAFE', 'NET ZERO', 'EUDR', 'AAA'];
 
@@ -702,15 +802,17 @@ export default function CertificationViewer() {
     async function fetchData() {
       try {
         setLoading(true);
-        const [stocksRes, salesRes, blendsRes] = await Promise.all([
+        const [stocksRes, salesRes, blendsRes, declarationsRes] = await Promise.all([
           fetch('/api/certified_stocks', { cache: 'no-store' }),
           fetch('/api/contracts', { cache: 'no-store' }),
-          fetch('/api/blends', { cache: 'no-store' })
+          fetch('/api/blends', { cache: 'no-store' }),
+          fetch('/api/declare_certificates', { cache: 'no-store' })
         ]);
         
         if (stocksRes.ok) setStocks(await stocksRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
         if (salesRes.ok) setSales(await salesRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
         if (blendsRes.ok) setBlends(await blendsRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
+        if (declarationsRes.ok) setDeclarations(await declarationsRes.json().then(d => d.data || []));
       } catch (error) {
         console.error("Error fetching data:", error);
       } finally {
@@ -784,7 +886,6 @@ export default function CertificationViewer() {
         throw new Error(errorData.error || "Failed to declare certificates");
       }
       
-      // Handle File Download securely
       const blob = await response.blob();
       const disposition = response.headers.get('Content-Disposition');
       let filename = `Declaration_Contract_${contractId}.xlsx`;
@@ -803,6 +904,12 @@ export default function CertificationViewer() {
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
       
+      const decRes = await fetch("/api/declare_certificates", { cache: "no-store" });
+      if (decRes.ok) {
+         const d = await decRes.json();
+         setDeclarations(d.data || []);
+      }
+      
       alert("Certificates successfully declared and report downloaded!");
     } catch (error: any) {
       alert(`Error declaring certificates: ${error.message}`);
@@ -810,6 +917,68 @@ export default function CertificationViewer() {
       setIsDeclaringCertId(null);
     }
   };
+
+  const openDeclarationView = (contractId: number, firstCert: string) => {
+     setViewingDeclarationContract(contractId);
+     setDeclarationModalCert(firstCert);
+  };
+
+  const handleDeleteDeclaration = async () => {
+    if (!contractToDelete) return;
+    setIsDeletingDecl(true);
+    try {
+      const response = await fetch(`/api/declare_certificates?id=${contractToDelete}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error("Failed to delete declarations");
+      
+      setDeclarations(prev => prev.filter(d => d.contract_id !== contractToDelete));
+      setViewingDeclarationContract(null);
+      setContractToDelete(null);
+      alert("Declarations reverted successfully.");
+    } catch (error: any) {
+      alert(`Error deleting declarations: ${error.message}`);
+    } finally {
+      setIsDeletingDecl(false);
+    }
+  };
+
+  // O(1) Fetch toggle endpoint for contract execution logic
+  const toggleContractExecution = async (id: number, currentStatus: boolean) => {
+    try {
+      const response = await fetch('/api/contracts', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, executed: !currentStatus })
+      });
+      if (!response.ok) throw new Error("Failed to update status");
+      
+      setSales(prev => prev.map(sale => sale.id === id ? { ...sale, executed: !currentStatus } : sale));
+    } catch(e) {
+      alert("Failed to toggle contract execution status.");
+    }
+  };
+
+  // ⚡ O(N) Memoization for Contracts Tab Filtering
+  const filteredContracts = useMemo(() => {
+    return sales.filter(sale => {
+      // Execute toggle filter
+      if (!showExecutedContracts && bool(sale.executed)) return false;
+      
+      // Search filter
+      if (contractSearch) {
+        const q = contractSearch.toLowerCase();
+        const match = [
+          sale.contract_number,
+          sale.client,
+          sale.quality,
+          sale.strategy,
+          sale.grade,
+          sale.blend_name
+        ].some(val => String(val || '').toLowerCase().includes(q));
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [sales, showExecutedContracts, contractSearch]);
 
   const uniqueClients = useMemo(() => {
       const clients = sales.map(s => s.client).filter(Boolean) as string[];
@@ -851,17 +1020,13 @@ export default function CertificationViewer() {
       const isCertified = stock[flag] === 1 || stock[flag] === true || stock[flag] === '1';
       
       if (isCertified) {
-        // ⚡ Filter Out Dual Certified AAA/CAFE when querying specifically for AAA limits
-        if (activeCert === 'AAA' && bool(stock.aaa_project) && bool(stock.cafe_certified)) {
-          return; // Skip dual certs entirely
-        }
+        const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
+        if (isDual && activeCert === 'AAA') return; 
 
         const strat = stock.strategy || 'Unassigned';
         if (!strategyMap.has(strat)) strategyMap.set(strat, { strategy: strat, available: 0, shipmentsByMonth: {}, totalShipment: 0 });
         
         const record = strategyMap.get(strat)!;
-        
-        // ⚡ Use new dynamic effective weight to respect AAA volume overloads
         const rawWeight = getEffectiveWeight(stock, activeCert); 
         const weight = Math.abs(rawWeight || 0); 
         
@@ -878,6 +1043,9 @@ export default function CertificationViewer() {
     });
 
     sales.forEach(sale => {
+      // EXCLUDE Executed Contracts from Position Computations unconditionally
+      if (bool(sale.executed)) return;
+
       const certList = parseCerts(sale.certifications).map(c => c.toUpperCase().replace(/[^A-Z0-9]/g, ''));
       const isMatch = certList.includes(sanitizedTargetCert);
 
@@ -922,13 +1090,88 @@ export default function CertificationViewer() {
     };
   }, [activeCert, stocks, sales]); 
 
+  // ⚡ O(N) Physical Positions Grid Complete Construction:
+  // Dynamically fills in 0s for missing BLEND_COMPONENTS and accurately calculates missing shorts for unexecuted contracts.
+  const physicalGridView = useMemo(() => {
+    if (!hasFetchedPhysical || !physicalData.gridData) return { data: [], months: [], kpis: { totalTheoretical: 0, totalShorts: 0, totalNet: 0 } };
+    
+    const gridMap = new Map(physicalData.gridData.map(row => [row.stack, row]));
+    const missingShorts = new Map<string, { total: number, months: Record<string, number> }>();
+    const monthSet = new Set<string>(physicalData.months || []);
+    const blendMap = new Map(blends.map(b => [b.id, b]));
+
+    let extraShortsTotal = 0;
+
+    // O(N) pass to deduct shorts for zero-volume stacks dynamically
+    sales.forEach(sale => {
+        if (bool(sale.executed) || !sale.blend_id) return;
+        const blend = blendMap.get(Number(sale.blend_id));
+        if (!blend) return;
+
+        const monthKey = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
+        const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
+
+        BLEND_COMPONENTS.forEach(comp => {
+            if (!gridMap.has(comp.key)) {
+                const compPercent = asNumber(blend[comp.key]) / 100;
+                if (compPercent > 0) {
+                    const shortVol = weight * compPercent;
+                    if (!missingShorts.has(comp.key)) {
+                        missingShorts.set(comp.key, { total: 0, months: {} });
+                    }
+                    const record = missingShorts.get(comp.key)!;
+                    record.total += shortVol;
+                    record.months[monthKey] = (record.months[monthKey] || 0) + shortVol;
+                    monthSet.add(monthKey);
+                    extraShortsTotal += shortVol;
+                }
+            }
+        });
+    });
+    
+    const result = BLEND_COMPONENTS.map(comp => {
+        const existing = gridMap.get(comp.key);
+        if (existing) {
+            gridMap.delete(comp.key); 
+            return existing;
+        }
+        
+        const shorts = missingShorts.get(comp.key);
+        return {
+            stack: comp.key,
+            theoretical_volume: 0,
+            months: shorts ? shorts.months : {},
+            total_shorts: shorts ? shorts.total : 0,
+            net_position: shorts ? -shorts.total : 0
+        };
+    });
+    
+    gridMap.forEach(val => result.push(val));
+    
+    const sortedMonths = Array.from(monthSet).sort((a, b) => {
+        if (a === 'Unscheduled') return 1;
+        if (b === 'Unscheduled') return -1;
+        return new Date(a).getTime() - new Date(b).getTime();
+    });
+
+    return { 
+        data: result, 
+        months: sortedMonths, 
+        kpis: {
+            totalTheoretical: physicalData.kpis.totalTheoretical,
+            totalShorts: physicalData.kpis.totalShorts + extraShortsTotal,
+            totalNet: physicalData.kpis.totalNet - extraShortsTotal
+        }
+    };
+  }, [physicalData, hasFetchedPhysical, sales, blends]);
+
   // --- TRACKER TAB MEMOS ---
   const trackerVisibleStocks = useMemo(() => {
     return stocks
       .filter((stock) => matchesTrackerCert(stock, trackerCert))
       .filter((stock) => {
-         // ⚡ Exclude Dual AAA/CAFE when looking exactly at AAA limits
-         if (trackerCert === 'AAA' && bool(stock.aaa_project) && bool(stock.cafe_certified)) return false;
+         const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
+         if (isDual && trackerCert === 'AAA') return false;
          return true;
       })
       .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true));
@@ -939,7 +1182,6 @@ export default function CertificationViewer() {
   const trackerHolderRows = useMemo(() => {
     const holders = trackerVisibleStocks.reduce<Record<string, number>>((acc, stock) => {
       const holder = getTrackerHolderLabel(stock, trackerCert);
-      // ⚡ Swapped to respect effective weighting correctly mapped by certification type
       acc[holder] = (acc[holder] || 0) + getEffectiveWeight(stock, trackerCert);
       return acc;
     }, {});
@@ -952,18 +1194,9 @@ export default function CertificationViewer() {
 
   const trackerExpirySummary = useMemo(() => {
     const result = {
-      totalWithExpiry: 0,
-      expired: 0,
-      within7: 0,
-      within30: 0,
-      within60: 0,
-      within90: 0,
-      within120: 0,
-      noExpiry: 0,
-      nextExpiryLabel: "—",
-      nextExpiryDays: null as number | null,
-      nextExpiryLot: "—",
-      averageDays: null as number | null,
+      totalWithExpiry: 0, expired: 0, within7: 0, within30: 0, within60: 0, within90: 0,
+      within120: 0, noExpiry: 0, nextExpiryLabel: "—", nextExpiryDays: null as number | null,
+      nextExpiryLot: "—", averageDays: null as number | null,
     };
 
     let totalDays = 0;
@@ -1007,22 +1240,74 @@ export default function CertificationViewer() {
   const trackerSelectedLabel = trackerCert === "ALL" ? "All certifications" : trackerCert;
   const trackerVisibleRows = useMemo(() => trackerVisibleStocks.map((stock) => buildTrackerRow(stock, trackerCert)), [trackerVisibleStocks, trackerCert]);
 
-  const aaaAllocationSummary = useMemo(() => {
-    // ⚡ Applies exact dual cert exclusion 
-    const stocksForAaa = stocks.filter((stock) => bool(stock.aaa_project) && !(bool(stock.aaa_project) && bool(stock.cafe_certified)));
-    const contractsForAaa = sales.filter((sale) => parseCerts(sale.certifications).some((c) => ["AAA", "AAA/CP", "CP"].includes(c.toUpperCase())));
-    
-    const bucket = (label: "AAA" | "AAA/CP") => {
-      const lots = stocksForAaa.filter((stock) => getAaaReservationLabelFromStock(stock) === label);
-      const salesForBucket = contractsForAaa.filter((sale) => getAaaReservationLabelFromSale(sale) === label);
-      const lotKg = lots.reduce((sum, stock) => sum + getEffectiveWeight(stock, 'AAA'), 0); // Enforce aaa_volume calculation metric
-      const declaredKg = salesForBucket.reduce((sum, sale) => sum + asNumber(sale.weight_kilos), 0);
-      return { label, lotKg, lotCount: lots.length, declaredKg, contractCount: salesForBucket.length, balanceKg: lotKg - declaredKg };
+  const allocationSummary = useMemo(() => {
+    const summary: Record<string, { label: string, lotKg: number, lotCount: number, contractCount: number, declaredKg: number, balanceKg: number }> = {
+      RFA: { label: "RFA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      CAFE: { label: "CAFE", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      "NET ZERO": { label: "NET ZERO", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      EUDR: { label: "EUDR", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      AAA: { label: "AAA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      "AAA/CP": { label: "AAA/CP", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
     };
-    return { aaa: bucket("AAA"), aaaCp: bucket("AAA/CP") };
-  }, [sales, stocks]);
 
-  // --- BLENDS TAB MEMOS ---
+    stocks.forEach(stock => {
+      const aaa = bool(stock.aaa_project);
+      const cafe = bool(stock.cafe_certified);
+      if (bool(stock.rfa_certified)) { summary.RFA.lotCount++; summary.RFA.lotKg += getEffectiveWeight(stock, 'RFA'); }
+      if (cafe) { summary.CAFE.lotCount++; summary.CAFE.lotKg += getEffectiveWeight(stock, 'CAFE'); }
+      if (bool(stock.netzero_project)) { summary["NET ZERO"].lotCount++; summary["NET ZERO"].lotKg += getEffectiveWeight(stock, 'NET ZERO'); }
+      if (bool(stock.eudr_certified)) { summary.EUDR.lotCount++; summary.EUDR.lotKg += getEffectiveWeight(stock, 'EUDR'); }
+      if (aaa) {
+         if (cafe) { summary["AAA/CP"].lotCount++; summary["AAA/CP"].lotKg += getEffectiveWeight(stock, 'AAA'); }
+         else { summary.AAA.lotCount++; summary.AAA.lotKg += getEffectiveWeight(stock, 'AAA'); }
+      }
+    });
+
+    sales.forEach(sale => {
+      // NOTE: We historically keep tracking connected declarations and cert lists regardless of execution logic.
+      const certs = parseCerts(sale.certifications).map(c => c.toUpperCase());
+      if (certs.includes('RFA')) summary.RFA.contractCount++;
+      if (certs.includes('CAFE')) summary.CAFE.contractCount++;
+      if (certs.includes('NET ZERO')) summary["NET ZERO"].contractCount++;
+      if (certs.includes('EUDR')) summary.EUDR.contractCount++;
+      if (certs.includes('AAA') || certs.includes('AAA/CP') || certs.includes('CP')) {
+          if (certs.includes('AAA/CP') || certs.includes('CAFE') || certs.includes('CP')) summary["AAA/CP"].contractCount++;
+          else summary.AAA.contractCount++;
+      }
+    });
+
+    declarations.forEach(decl => {
+       summary.RFA.declaredKg += asNumber(decl.rfa_declared_weight);
+       summary.CAFE.declaredKg += asNumber(decl.cafe_declared_weight);
+       summary["NET ZERO"].declaredKg += asNumber(decl.netzero_declared_weight);
+       summary.EUDR.declaredKg += asNumber(decl.eudr_declared_weight);
+       
+       if (asNumber(decl.aaa_declared_weight) > 0) {
+           if (asNumber(decl.cafe_declared_weight) > 0) summary["AAA/CP"].declaredKg += asNumber(decl.aaa_declared_weight);
+           else summary.AAA.declaredKg += asNumber(decl.aaa_declared_weight);
+       }
+    });
+
+    (Object.keys(summary) as Array<keyof typeof summary>).forEach(k => {
+       summary[k].balanceKg = summary[k].lotKg - summary[k].declaredKg;
+    });
+
+    return summary;
+  }, [stocks, sales, declarations]);
+
+  const renderAllocationCard = (label: string, bucket: { lotKg: number, lotCount: number, contractCount: number, declaredKg: number, balanceKg: number }) => (
+    <div key={label} className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
+      <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">{label}</div>
+      <div className="mt-2 text-2xl font-bold text-[#51534a]">{formatQty(bucket.lotKg, unit)} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span></div>
+      <div className="mt-4 space-y-1 text-xs text-[#51534a]">
+        <div className="flex items-center justify-between gap-2"><span>Stock lots</span><span className="font-bold">{bucket.lotCount}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>Linked contracts</span><span className="font-bold">{bucket.contractCount}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>Declared</span><span className="font-bold">{formatQty(bucket.declaredKg, unit)} {unitText(unit)}</span></div>
+        <div className="flex items-center justify-between gap-2 pt-1"><span>Balance</span><span className={`font-bold ${bucket.balanceKg >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{bucket.balanceKg > 0 ? "+" : ""}{formatQty(bucket.balanceKg, unit)} {unitText(unit)}</span></div>
+      </div>
+    </div>
+  );
+
   const visibleBlends = useMemo(() => {
     const q = blendSearch.trim().toLowerCase();
     return blends.map((blend) => ({ blend, composition: getBlendCompositionRow(blend), linkedContracts: sales.filter((sale) => Number(sale.blend_id) === blend.id) }))
@@ -1036,6 +1321,42 @@ export default function CertificationViewer() {
   }, [blends, sales, selectedBlendId]);
 
   const blendCompositionTotal = useMemo(() => BLEND_COMPONENTS.reduce((sum, comp) => sum + asNumber(blendForm[comp.key]), 0), [blendForm]);
+
+  const blendValidationMessage = useMemo(() => {
+    const entered = BLEND_COMPONENTS.some((comp) => asNumber(blendForm[comp.key]) > 0);
+    if (!isAddBlendModalOpen || !entered) return "";
+    if (Math.abs(blendCompositionTotal - 100) < 0.01) return "";
+    return blendCompositionTotal > 100 ? `Blend composition is over 100% (${blendCompositionTotal.toFixed(2)}%). Reduce one or more components.` : `Blend composition is below 100% (${blendCompositionTotal.toFixed(2)}%). Add the remaining percentage before saving.`;
+  }, [isAddBlendModalOpen, blendCompositionTotal, blendForm]);
+
+  const declaredContractsSummary = useMemo(() => {
+    const map = new Map<number, {
+       contract_id: number; contract_number: string; client: string; contract_weight: number;
+       shipping_date: string; certs: Set<string>; lots: DeclarationRow[];
+    }>();
+
+    declarations.forEach((row) => {
+       if (!map.has(row.contract_id)) {
+           map.set(row.contract_id, {
+               contract_id: row.contract_id, contract_number: row.contract_number, client: row.client,
+               contract_weight: asNumber(row.contract_weight), shipping_date: row.shipping_date,
+               certs: new Set<string>(), lots: []
+           });
+       }
+       const c = map.get(row.contract_id)!;
+       c.lots.push(row);
+       
+       if (asNumber(row.rfa_declared_weight) > 0) c.certs.add('RFA');
+       if (asNumber(row.eudr_declared_weight) > 0) c.certs.add('EUDR');
+       if (asNumber(row.cafe_declared_weight) > 0) c.certs.add('CAFE');
+       if (asNumber(row.impact_declared_weight) > 0) c.certs.add('Impact');
+       if (asNumber(row.aaa_declared_weight) > 0) c.certs.add('AAA');
+       if (asNumber(row.netzero_declared_weight) > 0) c.certs.add('NET ZERO');
+    });
+    
+    return Array.from(map.values()).sort((a, b) => b.contract_id - a.contract_id);
+  }, [declarations]);
+
 
   const handleUploadSol = async () => {
     if (!solFile) return;
@@ -1203,14 +1524,12 @@ export default function CertificationViewer() {
   async function deleteBlend(blendId: number) {
     const linked = sales.filter((sale) => Number(sale.blend_id) === blendId);
     try {
-      // 1. Unlink existing contracts optimally
       await Promise.allSettled(
         linked.map(async (sale) => {
           try { await updateContractBlend(sale.id, null); } catch (error) {}
         })
       );
       
-      // 2. Execute Backend Deletion via Query Params
       const response = await fetch(`/api/blends?id=${blendId}`, {
         method: "DELETE",
       });
@@ -1219,7 +1538,6 @@ export default function CertificationViewer() {
         throw new Error("Backend database deletion failed");
       }
 
-      // 3. Clean up the Frontend State ONLY after backend success
       setBlends((prev) => prev.filter((blend) => blend.id !== blendId));
       if (selectedBlendId === blendId) setSelectedBlendId(null);
       setSales((prev) => prev.map((sale) => (Number(sale.blend_id) === blendId ? { ...sale, blend_id: undefined, blend_name: undefined } : sale)));
@@ -1251,7 +1569,28 @@ export default function CertificationViewer() {
   }
 
   if (loading) {
-    return <div className="min-h-screen bg-[#D6D2C4] flex items-center justify-center text-[#51534a] font-bold">Loading Position Data...</div>;
+    return (
+      <div className="min-h-screen bg-[#D6D2C4] flex flex-col items-center justify-center text-[#51534a] font-bold">
+        <style>{`
+          @keyframes steamUp {
+            0% { opacity: 0; transform: translateY(4px); }
+            50% { opacity: 1; }
+            100% { opacity: 0; transform: translateY(-8px); }
+          }
+          .steam-1 { animation: steamUp 1.5s infinite ease-in-out; }
+          .steam-2 { animation: steamUp 1.5s infinite ease-in-out 0.3s; }
+          .steam-3 { animation: steamUp 1.5s infinite ease-in-out 0.6s; }
+        `}</style>
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" className="mb-4">
+          <path d="M16 28V44C16 48.4183 19.5817 52 24 52H40C44.4183 52 48 48.4183 48 44V28H16Z" fill="#007680"/>
+          <path d="M48 32H52C54.2091 32 56 33.7909 56 36C56 38.2091 54.2091 40 52 40H48" stroke="#007680" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/>
+          <path className="steam-1" d="M24 20C24 16 28 16 28 12" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
+          <path className="steam-2" d="M32 22C32 18 36 18 36 14" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
+          <path className="steam-3" d="M40 20C40 16 44 16 44 12" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
+        </svg>
+        <div>Brewing Position Data...</div>
+      </div>
+    );
   }
 
   return (
@@ -1363,7 +1702,7 @@ export default function CertificationViewer() {
             </div>
             
             <form onSubmit={handleFetchPhysicalPositions} className="p-5 flex flex-col gap-4">
-              <p className="text-xs text-[#968C83] mb-2">Upload the required reports to calculate theoretical blend allocations.</p>
+              <p className="text-xs text-[#968C83] mb-2">Upload the required reports to calculate theoretical blend allocations. The backend processing script will automatically exclude executed contracts from computations.</p>
               <div className="space-y-4">
                   <FileDropZone 
                     label="Current Stock (CSV)" 
@@ -1586,6 +1925,7 @@ export default function CertificationViewer() {
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
               <div>
                 <div className="text-lg font-bold text-[#51534a]">Create New Blend</div>
+                <div className="text-xs text-[#968C83]">Composition must equal exactly 100%</div>
               </div>
               <button onClick={() => setIsAddBlendModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/30 transition-all">
                 <X size={18} />
@@ -1593,11 +1933,11 @@ export default function CertificationViewer() {
             </div>
             
             <div className="max-h-[calc(90vh-72px)] overflow-y-auto p-5">
-              {Math.abs(blendCompositionTotal - 100) > 0.01 && blendCompositionTotal > 0 && (
+              {blendValidationMessage ? (
                 <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 shadow-sm">
-                  {blendCompositionTotal > 100 ? `Blend composition is over 100% (${blendCompositionTotal.toFixed(2)}%). Reduce one or more components.` : `Blend composition is below 100% (${blendCompositionTotal.toFixed(2)}%). Add the remaining percentage before saving.`}
+                  {blendValidationMessage}
                 </div>
-              )}
+              ) : null}
 
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                 <input 
@@ -1640,6 +1980,7 @@ export default function CertificationViewer() {
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#D6D2C4]">
                   <div className="h-full rounded-full bg-[#007680]" style={{ width: `${Math.min(100, blendCompositionTotal)}%` }} />
                 </div>
+                <div className="mt-2 text-xs text-[#968C83]">Composition must equal exactly 100% before saving.</div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   {BLEND_COMPONENTS.map((comp) => (
                     <div key={comp.key}>
@@ -1664,6 +2005,133 @@ export default function CertificationViewer() {
         </div>
       )}
 
+      {/* --- DECLARATION VIEW MODAL --- */}
+      {viewingDeclarationContract && (() => {
+          const contract = declaredContractsSummary.find(c => c.contract_id === viewingDeclarationContract);
+          if (!contract) return null;
+          
+          const activeLots = contract.lots.filter(l => {
+              const field = certToField(declarationModalCert);
+              return field && asNumber(l[field as keyof DeclarationRow]) > 0;
+          });
+          
+          const totalDeclared = activeLots.reduce((sum, l) => sum + asNumber(l[certToField(declarationModalCert) as keyof DeclarationRow]), 0);
+          
+          return (
+              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+                  <div className="bg-white w-full max-w-5xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8 max-h-[90vh]">
+                      <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-[#F5F5F3]">
+                          <div>
+                              <h3 className="font-bold text-[#51534a] text-lg">Declaration Details: {contract.contract_number}</h3>
+                              <p className="text-xs text-[#968C83]">Client: {contract.client || '-'} · Contract Weight: {formatQty(contract.contract_weight, unit)} {unitText(unit)}</p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                              <button 
+                                onClick={() => setContractToDelete(contract.contract_id)} 
+                                className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors"
+                              >
+                                  Delete Allocation
+                              </button>
+                              <button onClick={() => setViewingDeclarationContract(null)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/50">
+                                  <X size={20} />
+                              </button>
+                          </div>
+                      </div>
+                      
+                      <div className="flex border-b border-[#D6D2C4] px-6 bg-white overflow-x-auto">
+                          {Array.from(contract.certs).map(cert => (
+                              <button 
+                                  key={cert}
+                                  onClick={() => setDeclarationModalCert(cert)}
+                                  className={`px-4 py-3 text-sm font-bold border-b-2 transition-colors ${declarationModalCert === cert ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a]'}`}
+                              >
+                                  {cert}
+                              </button>
+                          ))}
+                          {contract.certs.size === 0 && (
+                             <span className="py-3 text-sm font-medium text-[#968C83] italic">No active certifications recorded.</span>
+                          )}
+                      </div>
+                      
+                      <div className="p-6 overflow-y-auto bg-[#F5F5F3] flex-1">
+                          <div className="bg-white border border-[#D6D2C4] rounded-xl overflow-hidden shadow-sm">
+                              <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
+                                  <table className="w-full text-sm text-left whitespace-nowrap">
+                                      <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
+                                          <tr>
+                                              <th className="py-3 px-4">Lot Number</th>
+                                              <th className="py-3 px-4">Grade</th>
+                                              <th className="py-3 px-4">Strategy</th>
+                                              <th className="py-3 px-4">Cooperative / Wet Mill</th>
+                                              <th className="py-3 px-4 text-right">Lot Purch. Weight</th>
+                                              <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">Declared ({unitText(unit)})</th>
+                                          </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-[#D6D2C4]">
+                                          {activeLots.length > 0 ? activeLots.map((lot, idx) => (
+                                              <tr key={lot.stock_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
+                                                  <td className="py-3 px-4 font-bold text-[#007680]">{lot.lot_number}</td>
+                                                  <td className="py-3 px-4 text-[#51534a]">{lot.grade || '-'}</td>
+                                                  <td className="py-3 px-4 text-[#51534a]">{lot.strategy || '-'}</td>
+                                                  <td className="py-3 px-4 text-[#51534a]">
+                                                      <div className="flex flex-col">
+                                                          <span>{lot.cooperative || '-'}</span>
+                                                          <span className="text-[10px] text-[#968C83]">{lot.wet_mill || '-'}</span>
+                                                      </div>
+                                                  </td>
+                                                  <td className="py-3 px-4 text-right text-[#968C83]">{formatQty(asNumber(lot.lot_purchased_weight), unit)}</td>
+                                                  <td className="py-3 px-4 text-right font-bold text-[#007680] bg-[#A4DBE8]/10 border-l border-[#D6D2C4]/50">
+                                                      {formatQty(asNumber(lot[certToField(declarationModalCert) as keyof DeclarationRow]), unit)}
+                                                  </td>
+                                              </tr>
+                                          )) : (
+                                              <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No lots found for the {declarationModalCert} certification.</td></tr>
+                                          )}
+                                      </tbody>
+                                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
+                                          <tr>
+                                              <td colSpan={5} className="py-3 px-4 text-right">TOTAL {declarationModalCert} DECLARED:</td>
+                                              <td className="py-3 px-4 text-right text-[#007680] border-l border-[#D6D2C4]/50">{formatQty(totalDeclared, unit)}</td>
+                                          </tr>
+                                      </tfoot>
+                                  </table>
+                              </div>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          );
+      })()}
+
+      {/* --- DELETE CONFIRMATION MODAL --- */}
+      {contractToDelete && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-white w-full max-w-sm rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6">
+              <h3 className="font-bold text-lg text-[#51534a] mb-2">Delete Declaration?</h3>
+              <p className="text-sm text-[#968C83]">This will instantly revert all allocated volumes back to the physical stock pool. Are you sure you want to proceed?</p>
+            </div>
+            <div className="flex border-t border-[#D6D2C4] bg-[#F5F5F3]">
+              <button 
+                onClick={() => setContractToDelete(null)} 
+                disabled={isDeletingDecl} 
+                className="flex-1 py-3 text-sm font-bold text-[#51534a] hover:bg-[#D6D2C4]/30 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <div className="w-px bg-[#D6D2C4]"></div>
+              <button 
+                onClick={handleDeleteDeclaration} 
+                disabled={isDeletingDecl} 
+                className="flex-1 py-3 text-sm font-bold text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+              >
+                {isDeletingDecl ? 'Deleting...' : 'Yes, Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-[1400px] mx-auto space-y-6 p-4 md:p-6">
         
         {/* --- HEADER --- */}
@@ -1675,7 +2143,7 @@ export default function CertificationViewer() {
               </div>
               Positions
             </h1>
-            <p className="text-[#968C83] text-sm mt-1">Physical, Certification Tracker, Contracts, and Blends</p>
+            <p className="text-[#968C83] text-sm mt-1">Physical, Certification Tracker, Contracts, Blends & Declarations</p>
           </div>
           
           <div className="flex items-center gap-2">
@@ -1745,6 +2213,14 @@ export default function CertificationViewer() {
           >
             <Combine size={16} /> Blends
           </button>
+          <button
+            onClick={() => setActiveTab('declarations')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
+              activeTab === 'declarations' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
+            }`}
+          >
+            <FileCheck size={16} /> Declarations
+          </button>
         </div>
 
         {/* --- TAB CONTENT --- */}
@@ -1766,7 +2242,7 @@ export default function CertificationViewer() {
                   {activeTab === 'certification' ? `${activeCert} TOTAL STOCK` : 'PHYSICAL THEORETICAL STOCK'}
                 </div>
                 <div className="text-2xl font-bold text-[#51534a] mt-1">
-                  {formatNumber(convertQty(activeTab === 'certification' ? kpis.stock : physicalData.kpis.totalTheoretical, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
+                  {formatNumber(convertQty(activeTab === 'certification' ? kpis.stock : physicalGridView.kpis.totalTheoretical, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
                 </div>
                 {activeTab === 'certification' && (['RFA', 'CAFE', 'EUDR'].includes(activeCert)) && (
                   <div className="text-[10px] text-[#007680] mt-1.5 font-bold bg-[#A4DBE8]/30 border border-[#007680]/10 inline-block px-1.5 py-0.5 rounded">
@@ -1779,7 +2255,7 @@ export default function CertificationViewer() {
                    {activeTab === 'certification' ? `${activeCert} TOTAL SHORTS` : 'PHYSICAL TOTAL BLEND SHORTS'}
                 </div>
                 <div className="text-2xl font-bold text-[#5B3427] mt-1 flex items-center gap-2">
-                  {formatNumber(convertQty(activeTab === 'certification' ? kpis.shorts : physicalData.kpis.totalShorts, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
+                  {formatNumber(convertQty(activeTab === 'certification' ? kpis.shorts : physicalGridView.kpis.totalShorts, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
                   <TrendingDown size={18} className="text-[#B9975B]" />
                 </div>
               </Card>
@@ -1787,9 +2263,9 @@ export default function CertificationViewer() {
                 <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
                    {activeTab === 'certification' ? `${activeCert} NET POSITION` : 'PHYSICAL NET POSITION'}
                 </div>
-                <div className={`text-2xl font-bold mt-1 flex items-center gap-2 ${(activeTab === 'certification' ? kpis.net : physicalData.kpis.totalNet) >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                  {(activeTab === 'certification' ? kpis.net : physicalData.kpis.totalNet) > 0 ? '+' : ''}{formatNumber(convertQty(activeTab === 'certification' ? kpis.net : physicalData.kpis.totalNet, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
-                  {(activeTab === 'certification' ? kpis.net : physicalData.kpis.totalNet) >= 0 ? <TrendingUp size={18} className="text-[#97D700]" /> : <TrendingDown size={18} />}
+                <div className={`text-2xl font-bold mt-1 flex items-center gap-2 ${(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet) >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                  {(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet) > 0 ? '+' : ''}{formatNumber(convertQty(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
+                  {(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet) >= 0 ? <TrendingUp size={18} className="text-[#97D700]" /> : <TrendingDown size={18} />}
                 </div>
               </Card>
             </div>
@@ -1818,53 +2294,53 @@ export default function CertificationViewer() {
                     <table className="w-full text-sm text-left whitespace-nowrap">
                       <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
                         <tr>
-                          <th className="py-3 px-4 w-1/4">Post Stack</th>
-                          <th className="py-3 px-4 text-right">Theoretical Volume ({unit})</th>
-                          {physicalData.months.map(month => (
-                            <th key={month} className="py-3 px-4 text-right bg-[#5B3427]">{month}</th>
+                          <th className="py-2 px-4 w-1/4">Post Stack</th>
+                          <th className="py-2 px-4 text-right">Theoretical Volume ({unit})</th>
+                          {physicalGridView.months.map(month => (
+                            <th key={month} className="py-2 px-4 text-right bg-[#5B3427]">{month}</th>
                           ))}
-                          <th className="py-3 px-4 text-right bg-[#B9975B]/20 border-l border-white/10">Total Shorts</th>
-                          <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">Net Position</th>
+                          <th className="py-2 px-4 text-right bg-[#B9975B]/20 border-l border-white/10">Total Shorts</th>
+                          <th className="py-2 px-4 text-right bg-[#007680] border-l border-white/10">Net Position</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#D6D2C4]">
-                        {physicalData.gridData.length > 0 ? physicalData.gridData.map((row) => (
+                        {physicalGridView.data.length > 0 ? physicalGridView.data.map((row) => (
                           <tr key={row.stack} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                            <td className="py-3 px-4 font-medium text-[#007680]">{formatStackName(row.stack)}</td>
-                            <td className="py-3 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">
+                            <td className="py-1.5 px-4 font-medium text-[#007680]">{formatStackName(row.stack)}</td>
+                            <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">
                                 {formatNumber(convertQty(row.theoretical_volume, unit))}
                             </td>
-                            {physicalData.months.map(month => {
+                            {physicalGridView.months.map(month => {
                               const val = row.months[month] || 0;
                               return (
-                                <td key={month} className="py-3 px-4 text-right text-[#968C83]">
+                                <td key={month} className="py-1.5 px-4 text-right text-[#968C83]">
                                   {Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}
                                 </td>
                               );
                             })}
-                            <td className="py-3 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">
+                            <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">
                                 {formatNumber(convertQty(row.total_shorts, unit))}
                             </td>
-                            <td className={`py-3 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.net_position >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                            <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.net_position >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
                               {row.net_position > 0 ? '+' : ''}{formatNumber(convertQty(row.net_position, unit))}
                             </td>
                           </tr>
                         )) : (
-                          <tr><td colSpan={physicalData.months.length + 4} className="py-8 text-center text-[#968C83] italic">No physical positions data found.</td></tr>
+                          <tr><td colSpan={physicalGridView.months.length + 4} className="py-8 text-center text-[#968C83] italic">No physical positions data found.</td></tr>
                         )}
                       </tbody>
-                      {physicalData.gridData.length > 0 && (
+                      {physicalGridView.data.length > 0 && (
                          <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
                             <tr>
-                               <td className="py-3 px-4">TOTALS</td>
-                               <td className="py-3 px-4 text-right">{formatNumber(convertQty(physicalData.kpis.totalTheoretical, unit))}</td>
-                               {physicalData.months.map(month => {
-                                  const monthTotal = physicalData.gridData.reduce((sum, row) => sum + (row.months[month] || 0), 0);
-                                  return <td key={month} className="py-3 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
+                               <td className="py-2 px-4">TOTALS</td>
+                               <td className="py-2 px-4 text-right">{formatNumber(convertQty(physicalGridView.kpis.totalTheoretical, unit))}</td>
+                               {physicalGridView.months.map(month => {
+                                  const monthTotal = physicalGridView.data.reduce((sum, row) => sum + (row.months[month] || 0), 0);
+                                  return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
                                })}
-                               <td className="py-3 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(physicalData.kpis.totalShorts, unit))}</td>
-                               <td className={`py-3 px-4 text-right border-l border-[#D6D2C4]/50 ${physicalData.kpis.totalNet >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                                  {physicalData.kpis.totalNet > 0 ? '+' : ''}{formatNumber(convertQty(physicalData.kpis.totalNet, unit))}
+                               <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(physicalGridView.kpis.totalShorts, unit))}</td>
+                               <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${physicalGridView.kpis.totalNet >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                                  {physicalGridView.kpis.totalNet > 0 ? '+' : ''}{formatNumber(convertQty(physicalGridView.kpis.totalNet, unit))}
                                </td>
                             </tr>
                          </tfoot>
@@ -1891,26 +2367,26 @@ export default function CertificationViewer() {
                 <table className="w-full text-sm text-left whitespace-nowrap">
                   <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
                     <tr>
-                      <th className="py-3 px-4 w-1/4">Strategy</th>
-                      <th className="py-3 px-4 text-right">Available ({unit})</th>
+                      <th className="py-2 px-4 w-1/4">Strategy</th>
+                      <th className="py-2 px-4 text-right">Available ({unit})</th>
                       {uniqueMonths.map(month => (
-                        <th key={month} className="py-3 px-4 text-right bg-[#5B3427]">{month}</th>
+                        <th key={month} className="py-2 px-4 text-right bg-[#5B3427]">{month}</th>
                       ))}
-                      <th className="py-3 px-4 text-right bg-[#B9975B]/20 border-l border-white/10">Total Shipment</th>
-                      <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">Net Position</th>
+                      <th className="py-2 px-4 text-right bg-[#B9975B]/20 border-l border-white/10">Total Shipment</th>
+                      <th className="py-2 px-4 text-right bg-[#007680] border-l border-white/10">Net Position</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#D6D2C4]">
                     {tableData.length > 0 ? tableData.map((row) => (
                       <tr key={row.strategy} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                        <td className="py-3 px-4 font-medium text-[#007680]">{row.strategy}</td>
-                        <td className="py-3 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
+                        <td className="py-1.5 px-4 font-medium text-[#007680]">{row.strategy}</td>
+                        <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
                         {uniqueMonths.map(month => {
                           const val = row.shipmentsByMonth[month] || 0;
-                          return <td key={month} className="py-3 px-4 text-right text-[#968C83]">{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
+                          return <td key={month} className="py-1.5 px-4 text-right text-[#968C83]">{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
                         })}
-                        <td className="py-3 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
-                        <td className={`py-3 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                        <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
+                        <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
                           {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
                         </td>
                       </tr>
@@ -1921,14 +2397,14 @@ export default function CertificationViewer() {
                   {tableData.length > 0 && (
                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
                         <tr>
-                           <td className="py-3 px-4">TOTALS</td>
-                           <td className="py-3 px-4 text-right">{formatNumber(convertQty(kpis.stock, unit))}</td>
+                           <td className="py-2 px-4">TOTALS</td>
+                           <td className="py-2 px-4 text-right">{formatNumber(convertQty(kpis.stock, unit))}</td>
                            {uniqueMonths.map(month => {
                               const monthTotal = tableData.reduce((sum, row) => sum + (row.shipmentsByMonth[month] || 0), 0);
-                              return <td key={month} className="py-3 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
+                              return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
                            })}
-                           <td className="py-3 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(kpis.shorts, unit))}</td>
-                           <td className={`py-3 px-4 text-right border-l border-[#D6D2C4]/50 ${kpis.net >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                           <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(kpis.shorts, unit))}</td>
+                           <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${kpis.net >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
                               {kpis.net > 0 ? '+' : ''}{formatNumber(convertQty(kpis.net, unit))}
                            </td>
                         </tr>
@@ -2068,37 +2544,25 @@ export default function CertificationViewer() {
                       </div>
                     </div>
 
-                    {trackerCert === "AAA" ? (
-                      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                        {([aaaAllocationSummary.aaa, aaaAllocationSummary.aaaCp] as const).map((bucket) => (
-                          <div key={bucket.label} className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
-                            <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">{bucket.label}</div>
-                            <div className="mt-2 text-2xl font-bold text-[#51534a]">{formatQty(bucket.lotKg, unit)} {unitText(unit)}</div>
-                            <div className="mt-2 flex items-center justify-between text-xs text-[#51534a]"><span>Stock lots</span><span className="font-bold">{bucket.lotCount}</span></div>
-                            <div className="flex items-center justify-between text-xs text-[#51534a]"><span>Linked contracts</span><span className="font-bold">{bucket.contractCount}</span></div>
-                            <div className="flex items-center justify-between text-xs text-[#51534a]"><span>Declared</span><span className="font-bold">{formatQty(bucket.declaredKg, unit)} {unitText(unit)}</span></div>
-                            <div className="flex items-center justify-between text-xs text-[#51534a]"><span>Balance</span><span className={`font-bold ${bucket.balanceKg >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{bucket.balanceKg > 0 ? "+" : ""}{formatQty(bucket.balanceKg, unit)} {unitText(unit)}</span></div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {trackerCert === "ALL" ? (
+                         CERT_FILTERS.map(cert => renderAllocationCard(cert, allocationSummary[cert as keyof typeof allocationSummary]))
+                      ) : trackerCert === "AAA" ? (
+                         <>
+                           {renderAllocationCard("AAA", allocationSummary["AAA"])}
+                           {renderAllocationCard("AAA/CP", allocationSummary["AAA/CP"])}
+                         </>
+                      ) : (
+                         renderAllocationCard(trackerCert, allocationSummary[trackerCert as string])
+                      )}
+                    </div>
 
-                    <div className="mt-5 space-y-3">
-                      <div className="text-xs font-bold uppercase tracking-wider text-[#968C83]">Holder concentration</div>
-                      <div className="space-y-3">
-                        {trackerHolderRows.length ? trackerHolderRows.map((holder) => (
-                          <div key={holder.name} className="rounded-xl border border-[#D6D2C4] bg-[#F5F5F3] p-3">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-bold text-[#51534a]">{holder.name}</div>
-                                <div className="text-[11px] text-[#968C83]">{formatQty(holder.value, unit)} {unitText(unit)}</div>
-                              </div>
-                              <div className="text-xs font-bold text-[#007680]">{trackerVisibleTotalKg ? ((holder.value / trackerVisibleTotalKg) * 100).toFixed(1) : "0.0"}%</div>
-                            </div>
-                            <div className="mt-2 h-2 rounded-full bg-[#D6D2C4]"><div className="h-2 rounded-full bg-[#007680]" style={{ width: `${trackerVisibleTotalKg ? Math.min(100, (holder.value / trackerVisibleTotalKg) * 100) : 0}%` }} /></div>
-                          </div>
-                        )) : <div className="text-sm italic text-[#968C83]">No holder data available for this view.</div>}
-                      </div>
+                    <div className="mt-5 rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
+                      <div className="mb-4 text-[11px] font-bold uppercase tracking-wider text-[#968C83]">Holder concentration</div>
+                      <TrackerDonutChart 
+                         data={trackerHolderRows.map((row, i) => ({ ...row, color: ["#007680", "#B9975B", "#51534a", "#968C83", "#A4DBE8", "#5B3427"][i % 6] }))} 
+                         unit={unit} 
+                      />
                     </div>
                   </div>
                 </div>
@@ -2159,174 +2623,208 @@ export default function CertificationViewer() {
             </div>
           )}
 
-          {/* --- CONTRACTS TAB (O(1) State-Driven Editing) --- */}
+          {/* --- CONTRACTS TAB --- */}
           {activeTab === 'contracts' && (
-            <Card className="overflow-hidden border-none shadow-md">
-              <div className="overflow-x-auto max-h-[75vh] overflow-y-auto">
-                <table className="w-full text-sm text-left whitespace-nowrap">
-                  <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
-                    <tr>
-                      <th className="py-3 px-4">Contract</th>
-                      <th className="py-3 px-4">Client</th>
-                      <th className="py-3 px-4 text-right">Weight (kg)</th>
-                      <th className="py-3 px-4">Ship Date</th>
-                      <th className="py-3 px-4">Quality</th>
-                      <th className="py-3 px-4">Grade</th>
-                      <th className="py-3 px-4 w-1/4">Certifications</th>
-                      <th className="py-3 px-4">Blend</th>
-                      <th className="py-3 px-4 text-center">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#D6D2C4]">
-                    {sales.map((sale) => {
-                      const isEditing = editingContractId === sale.id;
-                      const displayCerts = parseCerts(sale.certifications);
-
-                      return (
-                        <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''}`}>
-                          <td className="py-3 px-4 font-bold text-[#51534a]">{sale.contract_number}</td>
-                          <td className="py-3 px-4 text-[#51534a]">{sale.client || '-'}</td>
-                          <td className="py-3 px-4 text-right font-medium text-[#5B3427]">
-                              {formatNumber(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')))}
-                          </td>
-                          <td className="py-3 px-4 text-[#968C83]">{sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : '-'}</td>
-                          
-                          {/* Quality Cell */}
-                          <td className="py-3 px-4">
-                            {isEditing ? (
-                              <select 
-                                className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                value={editForm.quality}
-                                onChange={(e) => setEditForm({...editForm, quality: e.target.value})}
-                              >
-                                <option value="" disabled>Select Quality</option>
-                                {CONTRACT_QUALITIES.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                              </select>
-                            ) : (
-                              <span className="text-[#007680] font-medium">{sale.quality || sale.strategy || '-'}</span>
-                            )}
-                          </td>
-
-                          {/* Grade Cell */}
-                          <td className="py-3 px-4">
-                             {isEditing ? (
-                              <input 
-                                type="text"
-                                className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                value={editForm.grade}
-                                onChange={(e) => setEditForm({...editForm, grade: e.target.value})}
-                                placeholder="Grade"
-                              />
-                            ) : (
-                              <span className="text-[#51534a]">{sale.grade || '-'}</span>
-                            )}
-                          </td>
-
-                          {/* Certifications Cell */}
-                          <td className="py-3 px-4">
-                            {isEditing ? (
-                              <div className="flex flex-col gap-2 min-w-[200px]">
-                                  <select 
-                                    className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                    value=""
-                                    onChange={(e) => {
-                                        const val = e.target.value;
-                                        if (val === 'UNCERTIFIED') {
-                                            setEditForm({...editForm, certifications: []});
-                                        } else if (val && !editForm.certifications.includes(val)) {
-                                            setEditForm({...editForm, certifications: [...editForm.certifications, val]});
-                                        }
-                                    }}
-                                  >
-                                    <option value="" disabled>Add Certification...</option>
-                                    <option value="UNCERTIFIED" className="text-[#B9975B] font-bold">Uncertified (Clear All)</option>
-                                    {certOptions.map(opt => <option key={opt} value={opt} disabled={editForm.certifications.includes(opt)}>{opt}</option>)}
-                                  </select>
-                                  <div className="flex flex-wrap gap-1">
-                                      {editForm.certifications.map(cert => (
-                                          <span key={cert} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-[#A4DBE8]/30 text-[#007680] border border-[#007680]/20 text-[10px] font-bold rounded-sm">
-                                            {cert}
-                                            <button 
-                                              type="button"
-                                              onClick={(e) => {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                                setEditForm({...editForm, certifications: editForm.certifications.filter(c => c !== cert)});
-                                              }} 
-                                              className="hover:text-red-500"
-                                            >
-                                              <X size={10} />
-                                            </button>
-                                          </span>
-                                      ))}
-                                  </div>
-                              </div>
-                            ) : (
-                              <div className="flex flex-wrap gap-1">
-                                  {displayCerts.length > 0 ? displayCerts.map(cert => (
-                                      <span key={cert} className="inline-flex px-1.5 py-0.5 bg-[#D6D2C4]/30 text-[#51534a] text-[10px] font-bold rounded-sm">
-                                        {cert}
-                                      </span>
-                                  )) : <span className="text-[#968C83] text-xs italic">Uncertified</span>}
-                              </div>
-                            )}
-                          </td>
-
-                          {/* Blend Cell */}
-                          <td className="py-3 px-4">
-                            {isEditing ? (
-                              <select 
-                                className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                value={editForm.blend_id}
-                                onChange={(e) => setEditForm({...editForm, blend_id: e.target.value ? Number(e.target.value) : ''})}
-                              >
-                                <option value="">No Blend</option>
-                                {blends.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                              </select>
-                            ) : (
-                              <span className="text-[#51534a] font-medium">
-                                {sale.blend_name || <span className="text-[#968C83] font-normal italic">Unassigned</span>}
-                              </span>
-                            )}
-                          </td>
-
-                          {/* Actions Cell */}
-                          <td className="py-3 px-4 text-center">
-                              {isEditing ? (
-                                  <div className="flex items-center justify-center gap-2">
-                                      <button onClick={() => handleSaveEdit(sale.id)} className="p-1.5 text-white bg-[#007680] hover:bg-[#007680]/80 rounded shadow-sm transition-colors">
-                                          <Check size={14} />
-                                      </button>
-                                      <button onClick={handleCancelEdit} className="p-1.5 text-[#51534a] bg-[#D6D2C4] hover:bg-[#968C83] rounded shadow-sm transition-colors">
-                                          <X size={14} />
-                                      </button>
-                                  </div>
-                              ) : (
-                                  <div className="flex items-center justify-center gap-2">
-                                      <button onClick={() => handleEditClick(sale)} title="Edit Contract" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
-                                          <Pencil size={14} />
-                                      </button>
-                                      <button onClick={() => handleEditClick(sale)} title="Allocate Blend" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
-                                          <Combine size={14} />
-                                      </button>
-                                      <button 
-                                          onClick={() => handleDeclareCertificates(sale.id)} 
-                                          title="Declare Certificates" 
-                                          disabled={isDeclaringCertId === sale.id}
-                                          className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors disabled:opacity-50"
-                                      >
-                                          <FileCheck size={14} />
-                                      </button>
-                                  </div>
-                              )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+            <div className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="relative w-full sm:w-96">
+                      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
+                      <input 
+                          type="text" 
+                          placeholder="Search contracts, clients, qualities..." 
+                          value={contractSearch}
+                          onChange={(e) => setContractSearch(e.target.value)}
+                          className="w-full border border-[#D6D2C4] rounded-lg pl-9 pr-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                      />
+                  </div>
+                  <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-2 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] transition-colors shadow-sm">
+                      <input 
+                          type="checkbox" 
+                          checked={showExecutedContracts}
+                          onChange={(e) => setShowExecutedContracts(e.target.checked)}
+                          className="w-4 h-4 text-[#007680] rounded focus:ring-[#007680]"
+                      />
+                      <span className="text-sm font-bold text-[#51534a]">Show Executed Contracts</span>
+                  </label>
               </div>
-            </Card>
+
+              <Card className="overflow-hidden border-none shadow-md">
+                <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
+                  <table className="w-full text-sm text-left whitespace-nowrap">
+                    <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
+                      <tr>
+                        <th className="py-3 px-4">Contract</th>
+                        <th className="py-3 px-4">Client</th>
+                        <th className="py-3 px-4 text-right">Weight (kg)</th>
+                        <th className="py-3 px-4">Ship Date</th>
+                        <th className="py-3 px-4">Quality</th>
+                        <th className="py-3 px-4">Grade</th>
+                        <th className="py-3 px-4 w-1/4">Certifications</th>
+                        <th className="py-3 px-4">Blend</th>
+                        <th className="py-3 px-4 text-center">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#D6D2C4]">
+                      {filteredContracts.length > 0 ? filteredContracts.map((sale) => {
+                        const isEditing = editingContractId === sale.id;
+                        const displayCerts = parseCerts(sale.certifications);
+                        const isExecuted = bool(sale.executed);
+
+                        return (
+                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isExecuted ? 'opacity-60' : ''}`}>
+                            <td className="py-3 px-4 font-bold text-[#51534a]">
+                                <div className="flex items-center gap-2">
+                                  {isExecuted && <CheckCircle size={14} className="text-[#007680]" />}
+                                  {sale.contract_number}
+                                </div>
+                            </td>
+                            <td className="py-3 px-4 text-[#51534a]">{sale.client || '-'}</td>
+                            <td className="py-3 px-4 text-right font-medium text-[#5B3427]">
+                                {formatNumber(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')))}
+                            </td>
+                            <td className="py-3 px-4 text-[#968C83]">{sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : '-'}</td>
+                            
+                            <td className="py-3 px-4">
+                              {isEditing ? (
+                                <select 
+                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
+                                  value={editForm.quality}
+                                  onChange={(e) => setEditForm({...editForm, quality: e.target.value})}
+                                >
+                                  <option value="" disabled>Select Quality</option>
+                                  {CONTRACT_QUALITIES.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                </select>
+                              ) : (
+                                <span className="text-[#007680] font-medium">{sale.quality || sale.strategy || '-'}</span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4">
+                               {isEditing ? (
+                                <input 
+                                  type="text"
+                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
+                                  value={editForm.grade}
+                                  onChange={(e) => setEditForm({...editForm, grade: e.target.value})}
+                                  placeholder="Grade"
+                                />
+                              ) : (
+                                <span className="text-[#51534a]">{sale.grade || '-'}</span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4">
+                              {isEditing ? (
+                                <div className="flex flex-col gap-2 min-w-[200px]">
+                                    <select 
+                                      className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
+                                      value=""
+                                      onChange={(e) => {
+                                          const val = e.target.value;
+                                          if (val === 'UNCERTIFIED') {
+                                              setEditForm({...editForm, certifications: []});
+                                          } else if (val && !editForm.certifications.includes(val)) {
+                                              setEditForm({...editForm, certifications: [...editForm.certifications, val]});
+                                          }
+                                      }}
+                                    >
+                                      <option value="" disabled>Add Certification...</option>
+                                      <option value="UNCERTIFIED" className="text-[#B9975B] font-bold">Uncertified (Clear All)</option>
+                                      {certOptions.map(opt => <option key={opt} value={opt} disabled={editForm.certifications.includes(opt)}>{opt}</option>)}
+                                    </select>
+                                    <div className="flex flex-wrap gap-1">
+                                        {editForm.certifications.map(cert => (
+                                            <span key={cert} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-[#A4DBE8]/30 text-[#007680] border border-[#007680]/20 text-[10px] font-bold rounded-sm">
+                                              {cert}
+                                              <button 
+                                                type="button"
+                                                onClick={(e) => {
+                                                  e.preventDefault();
+                                                  e.stopPropagation();
+                                                  setEditForm({...editForm, certifications: editForm.certifications.filter(c => c !== cert)});
+                                                }} 
+                                                className="hover:text-red-500"
+                                              >
+                                                <X size={10} />
+                                              </button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                    {displayCerts.length > 0 ? displayCerts.map(cert => (
+                                        <span key={cert} className="inline-flex px-1.5 py-0.5 bg-[#D6D2C4]/30 text-[#51534a] text-[10px] font-bold rounded-sm">
+                                          {cert}
+                                        </span>
+                                    )) : <span className="text-[#968C83] text-xs italic">Uncertified</span>}
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4">
+                              {isEditing ? (
+                                <select 
+                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
+                                  value={editForm.blend_id}
+                                  onChange={(e) => setEditForm({...editForm, blend_id: e.target.value ? Number(e.target.value) : ''})}
+                                >
+                                  <option value="">No Blend</option>
+                                  {blends.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                                </select>
+                              ) : (
+                                <span className="text-[#51534a] font-medium">
+                                  {sale.blend_name || <span className="text-[#968C83] font-normal italic">Unassigned</span>}
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4 text-center">
+                                {isEditing ? (
+                                    <div className="flex items-center justify-center gap-2">
+                                        <button onClick={() => handleSaveEdit(sale.id)} className="p-1.5 text-white bg-[#007680] hover:bg-[#007680]/80 rounded shadow-sm transition-colors">
+                                            <Check size={14} />
+                                        </button>
+                                        <button onClick={handleCancelEdit} className="p-1.5 text-[#51534a] bg-[#D6D2C4] hover:bg-[#968C83] rounded shadow-sm transition-colors">
+                                            <X size={14} />
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center justify-center gap-2">
+                                        <button 
+                                            onClick={() => toggleContractExecution(sale.id, isExecuted)}
+                                            title={isExecuted ? "Mark as Unexecuted" : "Mark as Executed"}
+                                            className={`p-1.5 rounded transition-colors ${isExecuted ? 'text-[#007680] hover:bg-[#A4DBE8]/30' : 'text-[#968C83] hover:text-[#51534a] hover:bg-[#D6D2C4]/50'}`}
+                                        >
+                                            {isExecuted ? <CheckCircle size={14} /> : <Circle size={14} />}
+                                        </button>
+                                        <button onClick={() => handleEditClick(sale)} title="Edit Contract" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
+                                            <Pencil size={14} />
+                                        </button>
+                                        <button onClick={() => handleEditClick(sale)} title="Allocate Blend" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
+                                            <Combine size={14} />
+                                        </button>
+                                        <button 
+                                            onClick={() => handleDeclareCertificates(sale.id)} 
+                                            title="Declare Certificates" 
+                                            disabled={isDeclaringCertId === sale.id}
+                                            className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors disabled:opacity-50"
+                                        >
+                                            <FileCheck size={14} />
+                                        </button>
+                                    </div>
+                                )}
+                            </td>
+                          </tr>
+                        );
+                      }) : (
+                        <tr><td colSpan={9} className="py-8 text-center text-[#968C83] italic">No contracts match your search or filter.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </div>
           )}
 
           {/* --- BLENDS TAB --- */}
@@ -2446,6 +2944,56 @@ export default function CertificationViewer() {
                 </SectionCard>
               </div>
             </div>
+          )}
+
+          {/* --- DECLARATIONS TAB --- */}
+          {activeTab === "declarations" && (
+            <SectionCard title="Active Declarations" subtitle="Overview of all contracts with registered stock declarations.">
+              <div className="overflow-x-auto max-h-[75vh] overflow-y-auto">
+                <table className="w-full text-sm text-left whitespace-nowrap">
+                  <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
+                    <tr>
+                      <th className="py-3 px-4">Contract</th>
+                      <th className="py-3 px-4">Client</th>
+                      <th className="py-3 px-4 text-right">Weight ({unitText(unit)})</th>
+                      <th className="py-3 px-4">Ship Date</th>
+                      <th className="py-3 px-4">Declared Certs</th>
+                      <th className="py-3 px-4 text-center">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#D6D2C4]">
+                    {declaredContractsSummary.length > 0 ? declaredContractsSummary.map((c, idx) => (
+                      <tr key={c.contract_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
+                        <td className="py-3 px-4 font-bold text-[#007680]">{c.contract_number}</td>
+                        <td className="py-3 px-4 text-[#51534a]">{c.client || '-'}</td>
+                        <td className="py-3 px-4 text-right font-medium text-[#5B3427]">{formatQty(c.contract_weight, unit)}</td>
+                        <td className="py-3 px-4 text-[#968C83]">{formatDateToMonthYear(c.shipping_date)}</td>
+                        <td className="py-3 px-4">
+                            <div className="flex flex-wrap gap-1">
+                                {Array.from(c.certs).map(cert => (
+                                    <span key={cert as string} className="rounded-full bg-[#A4DBE8]/30 px-2 py-0.5 text-[10px] font-bold text-[#007680] border border-[#007680]/20">
+                                        {cert as string}
+                                    </span>
+                                ))}
+                            </div>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                            <button 
+                                onClick={() => openDeclarationView(c.contract_id, Array.from(c.certs)[0] as string || "")} 
+                                className="rounded-lg p-1.5 text-[#007680] hover:bg-[#007680]/10 transition-colors" 
+                                title="View Declarations"
+                            >
+                                <Eye size={16} />
+                            </button>
+                        </td>
+                      </tr>
+                    )) : (
+                      <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No declarations found in the database.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </SectionCard>
           )}
 
         </main>

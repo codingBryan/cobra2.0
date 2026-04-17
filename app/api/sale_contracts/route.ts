@@ -12,7 +12,8 @@ export async function GET() {
                 sc.contract_number, 
                 sc.weight_kilos, 
                 sc.shipping_date,
-                sc.quality,  -- ADD THIS LINE
+                sc.quality,
+                sc.executed,
                 MAX(cst.strategy) as strategy,
                 JSON_ARRAYAGG(c.certificate) as certifications
             FROM sale_contract sc
