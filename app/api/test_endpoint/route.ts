@@ -52,11 +52,7 @@ export async function POST(request: NextRequest) {
         // await process_sale_diff_update(file);
         await updateTradeVariablesFromCsv(file);
         // await filterAndSaveMissingInputTradeBatches(misc_file);
-<<<<<<< HEAD
         // await update_post_trade_variables_unorthodox()
-=======
-        await update_post_trade_variables_unorthodox()
->>>>>>> d222d905bc8670be38483ede0162a97cad1738ef
 
         return NextResponse.json({ 
             success: true, 

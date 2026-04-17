@@ -1678,8 +1678,6 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
                 strategy: ingRow.strategy || 'UNDEFINED',
                 outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
                 hedgeLevelUSClb: Number(row.output_hedge_level_usc_lb) || 0,
-                outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
-                hedgeLevelUSClb: Number(row.output_hedge_level_usc_lb) || 0,
                 quantityKg: Number(ingRow.input_qty)
             }));
         }
