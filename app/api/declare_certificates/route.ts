@@ -10,6 +10,8 @@ interface TrackerUpdate {
     [key: string]: any;
 }
 
+
+
 // GET: Fetch all active declarations grouped by contract and stock lot
 export async function GET(request: Request) {
     try {
@@ -305,7 +307,6 @@ export async function POST(request: Request) {
     }
 }
 
-
 export async function DELETE(request: Request) {
     try {
         const { searchParams } = new URL(request.url);
@@ -334,7 +335,7 @@ export async function DELETE(request: Request) {
 
         // 2. Delete the declaration records
         await query({
-            query: `DELETE FROM sale_contract_stock_declaration WHERE sale_contract_id = ?`,
+            query: `e_conDELETE FROM saltract_stock_declaration WHERE sale_contract_id = ?`,
             values: [id]
         });
 
