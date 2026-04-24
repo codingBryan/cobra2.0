@@ -4,7 +4,7 @@ import { query } from '@/lib/stock_movement_db';
 export const dynamic = 'force-dynamic';
 
 // Adjust this to match your Flask server URL
-const FLASK_API_URL = process.env.FLASK_API_URL || 'http://127.0.0.1:8100/api/processing_forecast';
+const FLASK_API_URL = process.env.COBRA_MICROSERVICE_URL + '/api/processing_forecast';
 
 export async function POST(request: Request) {
     try {
@@ -139,4 +139,33 @@ export async function POST(request: Request) {
         console.error("Database or Request error during Physical Positions fetch:", error);
         return NextResponse.json({ error: 'Failed to process physical positions' }, { status: 500 });
     }
+}
+
+
+
+
+export async function GET() {
+  try {
+    // Optimized to fetch the last 7 available dates with data, 
+    // instead of a strict 7-day calendar window.
+    const sql = `
+      SELECT p.id, p.stack, p.position, p.recorded_date 
+      FROM physical_position_history p
+      INNER JOIN (
+          SELECT DISTINCT recorded_date 
+          FROM physical_position_history 
+          ORDER BY recorded_date DESC 
+          LIMIT 7
+      ) AS recent_dates ON p.recorded_date = recent_dates.recorded_date
+      ORDER BY p.recorded_date ASC
+    `;
+    
+    // Pass the sql string as a property of the expected object type
+    const rows = await query({ query: sql });
+    
+    return NextResponse.json(rows);
+  } catch (error) {
+    console.error("Error fetching physical history:", error);
+    return NextResponse.json({ error: "Failed to fetch position history" }, { status: 500 });
+  }
 }

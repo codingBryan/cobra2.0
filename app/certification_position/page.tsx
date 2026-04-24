@@ -1,36 +1,31 @@
 "use client"
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { 
   ShieldCheck, 
-  Box, 
   TrendingDown, 
   TrendingUp,
-  BarChart3,
   ListChecks,
   Plus,
   X,
   CloudUpload,
   FileSpreadsheet,
-  FileText,
   Pencil,
   Check,
-  Combine,
   Users,
   Search,
-  ChevronRight,
   Download,
   FileCheck,
   Eye,
-  CheckCircle,
-  Circle
+  CheckCircle
 } from 'lucide-react';
 
 // --- Constants & Types ---
-const KG_TO_LB = 2.2046;
-const KG_TO_BAG = 60;
 type Unit = 'kg' | 'bag' | 'mt';
-type MainTab = 'physical' | 'certification' | 'tracker' | 'contracts' | 'blends' | 'declarations';
-const CERT_FILTERS = ["RFA", "CAFE", "NET ZERO", "EUDR", "AAA"] as const;
+type MainTab = 'certification' | 'tracker' | 'contracts' | 'declarations';
+
+const CERTIFICATES_LIST = ["RFA", "CAFE", "EUDR"] as const;
+const PROJECTS_LIST = ["AAA", "NET ZERO"] as const;
+const CERT_FILTERS = [...CERTIFICATES_LIST, ...PROJECTS_LIST] as const;
 const TRACKER_FILTERS = ["ALL", ...CERT_FILTERS] as const;
 
 type CertType = (typeof CERT_FILTERS)[number];
@@ -42,38 +37,6 @@ const CONTRACT_QUALITIES = [
   "AA - FAQ", "AB - FAQ", "ABC - FAQ", "PB - FAQ", 
   "REJECTS", "MBUNIS", "TRIAGE", "GRINDER BOLD", "GRINDER LIGHT"
 ];
-
-const BLEND_COMPONENTS = [
-  { key: 'finished', label: 'FINISHED' },
-  { key: 'post_natural', label: 'POST NATURAL' },
-  { key: 'post_specialty_washed', label: 'POST SPECIALTY WASHED' },
-  { key: 'post_17_up_top', label: 'POST 17 UP TOP' },
-  { key: 'post_16_top', label: 'POST 16 TOP' },
-  { key: 'post_15_top', label: 'POST 15 TOP' },
-  { key: 'post_pb_top', label: 'POST PB TOP' },
-  { key: 'post_17_up_plus', label: 'POST 17 UP PLUS' },
-  { key: 'post_16_plus', label: 'POST 16 PLUS' },
-  { key: 'post_15_plus', label: 'POST 15 PLUS' },
-  { key: 'post_14_plus', label: 'POST 14 PLUS' },
-  { key: 'post_pb_plus', label: 'POST PB PLUS' },
-  { key: 'post_17_up_faq', label: 'POST 17 UP FAQ' },
-  { key: 'post_16_faq', label: 'POST 16 FAQ' },
-  { key: 'post_15_faq', label: 'POST 15 FAQ' },
-  { key: 'post_14_faq', label: 'POST 14 FAQ' },
-  { key: 'post_pb_faq', label: 'POST PB FAQ' },
-  { key: 'post_faq_minus', label: 'POST FAQ MINUS' },
-  { key: 'post_grinder_bold', label: 'POST GRINDER BOLD' },
-  { key: 'post_grinder_light', label: 'POST GRINDER LIGHT' },
-  { key: 'post_mh', label: 'POST MH' },
-  { key: 'post_ml', label: 'POST ML' },
-  { key: 'post_rejects_s', label: 'POST REJECTS S' },
-  { key: 'post_rejects_p', label: 'POST REJECTS P' }
-];
-
-const INITIAL_BLEND_FORM = {
-  name: '', client: '', grade: '', cup_profile: '', blend_no: '',
-  ...BLEND_COMPONENTS.reduce((acc, curr) => ({ ...acc, [curr.key]: '' }), {})
-};
 
 interface CertifiedStock {
   id: number;
@@ -116,10 +79,6 @@ interface CertifiedStock {
 interface Blend {
   id: number;
   name: string;
-  client?: string;
-  grade?: string;
-  cup_profile?: string;
-  blend_no?: string;
   [key: string]: any;
 }
 
@@ -138,14 +97,7 @@ interface SaleContract {
   blend_id?: number;
   blend_name?: string;
   executed?: boolean;
-}
-
-interface PhysicalPositionRecord {
-  stack: string;
-  theoretical_volume: number;
-  months: Record<string, number>;
-  total_shorts: number;
-  net_position: number;
+  certs_declared?: boolean | number | string | { type: string, data: number[] };
 }
 
 interface DeclarationRow {
@@ -239,19 +191,32 @@ const parseCerts = (rawCerts: any): string[] => {
   return Array.isArray(certs) ? Array.from(new Set(certs.flat(Infinity).filter(Boolean).map(String))) : [];
 };
 
-const formatStackName = (key: string) => {
-  const match = BLEND_COMPONENTS.find(b => b.key === key);
-  if (match) return match.label;
-  return key.replace(/_/g, ' ').toUpperCase();
-};
-
 function asNumber(value: unknown) {
   const n = Number(String(value ?? 0).replace(/,/g, ""));
   return Number.isFinite(n) ? n : 0;
 }
 
-function bool(value: unknown) {
-  return value === true || value === 1 || value === "1" || value === "true";
+// ⚡ HIGHLY OPTIMIZED O(1) BOOLEAN/BUFFER PARSER
+function bool(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (value === true || value === 1 || value === "1" || value === "true") return true;
+  
+  if (typeof value === 'number' && value > 0) return true;
+  
+  if (typeof value === 'string') {
+    const lower = value.toLowerCase();
+    if (lower === 'true' || lower === 'yes' || lower === '1') return true;
+    if (value.charCodeAt(0) === 1) return true; // Catch BIT(1) string serialization
+  }
+  
+  // Catch generic MySQL Buffer JSON serializations from tinyint(1)/bit(1)
+  if (typeof value === 'object') {
+    const v = value as any;
+    if (v.type === 'Buffer' && Array.isArray(v.data)) return v.data[0] > 0;
+    if (Array.isArray(v)) return v[0] > 0;
+  }
+  
+  return false;
 }
 
 function displayText(value: unknown, fallback = "—") {
@@ -270,7 +235,6 @@ const certToField = (cert: string) => {
     }
 }
 
-// ⚡ OPTIMIZATION: Core helper to dynamically route volume field
 function getEffectiveWeight(stock: CertifiedStock, cert: string) {
   if (cert === 'AAA') {
       return asNumber(stock.aaa_volume != null ? stock.aaa_volume : 0);
@@ -280,11 +244,6 @@ function getEffectiveWeight(stock: CertifiedStock, cert: string) {
 
 function getAaaReservationLabelFromStock(stock: CertifiedStock) {
   return bool(stock.cafe_certified) || asNumber(stock.cafe_declared_weight) > 0 ? "AAA/CP" : "AAA";
-}
-
-function getAaaReservationLabelFromSale(sale: SaleContract) {
-  const certs = parseCerts(sale.certifications).map((c) => c.toUpperCase());
-  return certs.includes("CP") || certs.includes("CAFE") || certs.includes("AAA/CP") ? "AAA/CP" : "AAA";
 }
 
 function getTrackerCertFlags(stock: CertifiedStock) {
@@ -505,16 +464,6 @@ function toExcelHtml(title: string, rows: Record<string, any>[]) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body><table>${headers.length ? `<thead><tr>${headHtml}</tr></thead>` : ""}<tbody>${bodyHtml}</tbody></table></body></html>`;
 }
 
-function getBlendCompositionRow(blend: Blend) {
-  return BLEND_COMPONENTS
-    .map((comp) => ({
-      key: comp.key,
-      label: comp.label,
-      value: asNumber(blend?.[comp.key] ?? 0),
-    }))
-    .filter((item) => item.value > 0);
-}
-
 // --- Reusable Components ---
 const Card = ({ children, className = "", variant = "default" }: { children: React.ReactNode; className?: string, variant?: "default" | "dark" }) => {
   const bgClass = variant === "dark" ? "bg-[#51534a] text-white border-none" : "bg-white border border-[#968C83]/20";
@@ -554,9 +503,9 @@ const Chip = ({ active, children, onClick }: { active?: boolean; children?: Reac
   );
 };
 
-const FilterTabs = ({ tabs, active, onChange }: { tabs: string[], active: string, onChange: (val: any) => void }) => {
+const FilterTabs = ({ tabs, active, onChange }: { tabs: readonly string[], active: string, onChange: (val: any) => void }) => {
   return (
-    <div className="flex gap-2 pb-2">
+    <div className="flex flex-wrap gap-2">
       {tabs.map(f => (
         <button
           key={f}
@@ -711,9 +660,10 @@ function TrackerDonutChart({ data, unit }: { data: { name: string, value: number
   );
 }
 
-export default function CertificationViewer() {
-  const [activeTab, setActiveTab] = useState<MainTab>('physical');
+export default function CertificationsPage() {
+  const [activeTab, setActiveTab] = useState<MainTab>('certification');
   const [activeCert, setActiveCert] = useState<CertType>('RFA');
+  const [positionView, setPositionView] = useState<'true_position' | 'crop_year'>('true_position');
   const [unit, setUnit] = useState<Unit>('kg');
 
   const [stocks, setStocks] = useState<CertifiedStock[]>([]);
@@ -721,42 +671,38 @@ export default function CertificationViewer() {
   const [blends, setBlends] = useState<Blend[]>([]);
   const [declarations, setDeclarations] = useState<DeclarationRow[]>([]);
   
-  // Physical Data state
-  const [physicalData, setPhysicalData] = useState<{
-    gridData: PhysicalPositionRecord[],
-    months: string[],
-    kpis: { totalTheoretical: number, totalShorts: number, totalNet: number }
-  }>({ gridData: [], months: [], kpis: { totalTheoretical: 0, totalShorts: 0, totalNet: 0 } });
-  
-  const [isPhysicalLoading, setIsPhysicalLoading] = useState(false);
-  const [hasFetchedPhysical, setHasFetchedPhysical] = useState(false);
-
   const [loading, setLoading] = useState(true);
+
+  // Toast State
+  const [toast, setToast] = useState<{show: boolean, type: 'success' | 'warning' | 'error', title: string, message: string | React.ReactNode}>({ show: false, type: 'success', title: '', message: '' });
+
+  const showToast = (type: 'success' | 'warning' | 'error', title: string, message: string | React.ReactNode) => {
+      setToast({ show: true, type, title, message });
+      // Increased toast duration to 15 seconds to allow comfortable reading
+      setTimeout(() => setToast(prev => ({ ...prev, show: false })), 15000);
+  };
 
   // Modals state
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isManualSalesModalOpen, setIsManualSalesModalOpen] = useState(false);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
-  const [isAddBlendModalOpen, setIsAddBlendModalOpen] = useState(false);
-  const [isUpdatePositionsModalOpen, setIsUpdatePositionsModalOpen] = useState(false);
 
   const [isDirectSale, setIsDirectSale] = useState(true);
   const [purchaseSaleNumber, setPurchaseSaleNumber] = useState('');
 
-  // Declare Certificates loader state
-  const [isDeclaringCertId, setIsDeclaringCertId] = useState<number | null>(null);
+  // Declare Certificates Configuration Modal State
+  const [isDeclaringConfigOpen, setIsDeclaringConfigOpen] = useState(false);
+  const [declaringContractId, setDeclaringContractId] = useState<number | null>(null);
+  const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
+  const [selectedGrades, setSelectedGrades] = useState<Set<string>>(new Set());
 
-  // Physical calculation files state
-  const [stockFile, setStockFile] = useState<File | null>(null);
-  const [procFile, setProcFile] = useState<File | null>(null);
-  const [testFile, setTestFile] = useState<File | null>(null);
+  // API Loader State
+  const [isDeclaringCertId, setIsDeclaringCertId] = useState<number | null>(null);
 
   const [editingContractId, setEditingContractId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<{ quality: string, grade: string, certifications: string[], blend_id: number | '' }>({
       quality: '', grade: '', certifications: [], blend_id: ''
   });
-
-  const [blendForm, setBlendForm] = useState<Record<string, any>>(INITIAL_BLEND_FORM);
 
   const [solFile, setSolFile] = useState<File | null>(null);
   const [purchaseFile, setPurchaseFile] = useState<File | null>(null);
@@ -779,12 +725,6 @@ export default function CertificationViewer() {
   const [trackerDateEndFilter, setTrackerDateEndFilter] = useState("");
   const [downloadOpen, setDownloadOpen] = useState(false);
   const downloadWrapRef = useRef<HTMLDivElement | null>(null);
-
-  // Blend states
-  const [blendSearch, setBlendSearch] = useState("");
-  const [selectedBlendId, setSelectedBlendId] = useState<number | null>(null);
-  const [blendAllocContractId, setBlendAllocContractId] = useState<number | "">("");
-  const [blendBusy, setBlendBusy] = useState(false);
   
   // Declarations UI state
   const [viewingDeclarationContract, setViewingDeclarationContract] = useState<number | null>(null);
@@ -793,34 +733,36 @@ export default function CertificationViewer() {
   const [isDeletingDecl, setIsDeletingDecl] = useState(false);
 
   // Contracts UI View Filters
-  const [showExecutedContracts, setShowExecutedContracts] = useState(false);
   const [contractSearch, setContractSearch] = useState('');
+  const [showDeclaredContracts, setShowDeclaredContracts] = useState(false);
 
   const certOptions: CertType[] = ['RFA', 'CAFE', 'NET ZERO', 'EUDR', 'AAA'];
 
-  useEffect(() => {
-    async function fetchData() {
-      try {
-        setLoading(true);
-        const [stocksRes, salesRes, blendsRes, declarationsRes] = await Promise.all([
-          fetch('/api/certified_stocks', { cache: 'no-store' }),
-          fetch('/api/contracts', { cache: 'no-store' }),
-          fetch('/api/blends', { cache: 'no-store' }),
-          fetch('/api/declare_certificates', { cache: 'no-store' })
-        ]);
-        
-        if (stocksRes.ok) setStocks(await stocksRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
-        if (salesRes.ok) setSales(await salesRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
-        if (blendsRes.ok) setBlends(await blendsRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
-        if (declarationsRes.ok) setDeclarations(await declarationsRes.json().then(d => d.data || []));
-      } catch (error) {
-        console.error("Error fetching data:", error);
-      } finally {
-        setLoading(false);
-      }
+  // ⚡ CENTRALIZED FETCH FUNCTION FOR AUTO-UPDATING
+  const fetchData = useCallback(async (silent = false) => {
+    try {
+      if (!silent) setLoading(true);
+      const [stocksRes, salesRes, blendsRes, declarationsRes] = await Promise.all([
+        fetch('/api/certified_stocks', { cache: 'no-store' }),
+        fetch('/api/contracts', { cache: 'no-store' }),
+        fetch('/api/blends', { cache: 'no-store' }),
+        fetch('/api/declare_certificates', { cache: 'no-store' })
+      ]);
+      
+      if (stocksRes.ok) setStocks(await stocksRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
+      if (salesRes.ok) setSales(await salesRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
+      if (blendsRes.ok) setBlends(await blendsRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
+      if (declarationsRes.ok) setDeclarations(await declarationsRes.json().then(d => d.data || []));
+    } catch (error) {
+      console.error("Error fetching data:", error);
+    } finally {
+      if (!silent) setLoading(false);
     }
-    fetchData();
   }, []);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   useEffect(() => {
     function onDownloadOutside(event: MouseEvent) {
@@ -830,55 +772,45 @@ export default function CertificationViewer() {
     return () => document.removeEventListener("mousedown", onDownloadOutside);
   }, [downloadOpen]);
 
-  useEffect(() => {
-    if (!selectedBlendId && blends.length > 0) setSelectedBlendId(blends[0].id);
-  }, [blends, selectedBlendId]);
-
-  const handleFetchPhysicalPositions = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!stockFile || !procFile || !testFile) {
-        alert("All three files are required to run the position calculation.");
-        return;
-    }
-
-    try {
-      setIsPhysicalLoading(true);
-      
-      const formData = new FormData();
-      formData.append('stock', stockFile);
-      formData.append('proc', procFile);
-      formData.append('test', testFile);
-
-      const physicalRes = await fetch('/api/physical_stock_position', { 
-          method: 'POST',
-          body: formData
+  // ⚡ Extract Unique Regions and Grades in O(N) using useMemo and Set
+  const { uniqueRegions, uniqueGrades } = useMemo(() => {
+      const regions = new Set<string>();
+      const grades = new Set<string>();
+      stocks.forEach(s => {
+          if (s.county) regions.add(s.county);
+          if (s.grade) grades.add(s.grade);
       });
-      
-      if (!physicalRes.ok) {
-          const errData = await physicalRes.json().catch(() => ({}));
-          throw new Error(errData.error || "Failed to calculate positions");
-      }
-      
-      const data = await physicalRes.json();
-      setPhysicalData(data);
-      setHasFetchedPhysical(true);
-      setIsUpdatePositionsModalOpen(false);
+      return {
+          uniqueRegions: Array.from(regions).sort(),
+          uniqueGrades: Array.from(grades).sort()
+      };
+  }, [stocks]);
 
-    } catch (error: any) {
-      console.error("Error fetching physical positions:", error);
-      alert(`There was an error updating positions: ${error.message}`);
-    } finally {
-      setIsPhysicalLoading(false);
-    }
+  const openDeclarationConfig = (contractId: number) => {
+      setDeclaringContractId(contractId);
+      setSelectedRegions(new Set(uniqueRegions));
+      setSelectedGrades(new Set(uniqueGrades));
+      setIsDeclaringConfigOpen(true);
   };
 
-  const handleDeclareCertificates = async (contractId: number) => {
+  const submitDeclareCertificates = async () => {
+    if (!declaringContractId) return;
+    const contractId = declaringContractId;
+
+    setIsDeclaringConfigOpen(false);
     setIsDeclaringCertId(contractId);
+
     try {
+      const payload = { 
+          sale_contract_id: contractId,
+          regions: Array.from(selectedRegions),
+          grades: Array.from(selectedGrades)
+      };
+
       const response = await fetch('/api/declare_certificates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sale_contract_id: contractId })
+        body: JSON.stringify(payload)
       });
       
       if (!response.ok) {
@@ -886,35 +818,53 @@ export default function CertificationViewer() {
         throw new Error(errorData.error || "Failed to declare certificates");
       }
       
-      const blob = await response.blob();
-      const disposition = response.headers.get('Content-Disposition');
-      let filename = `Declaration_Contract_${contractId}.xlsx`;
+      const failedCerts = response.headers.get('X-Failed-Certificates');
+      const contentType = response.headers.get('Content-Type');
       
-      if (disposition && disposition.includes('filename=')) {
-          const matches = /filename="([^"]+)"/.exec(disposition);
-          if (matches && matches[1]) filename = matches[1];
+      if (contentType && contentType.includes('application/json')) {
+         const data = await response.json();
+         console.log("Declaration successful, JSON response received:", data);
+         showToast('success', 'Declaration logged', 'Declaration parameters successfully sent to backend!');
+      } else {
+         if (failedCerts) {
+             const details = failedCerts.split(',').map(f => {
+                 const [cert, shortfall] = f.split(':');
+                 return <li key={cert} className="ml-4 list-disc"><strong>{cert.toUpperCase()}</strong>: Short by {formatNumber(Number(shortfall))} {unitText(unit)}</li>;
+             });
+             showToast('warning', 'Partial Declaration', <div><p className="mb-1">Not enough volume for these certificates (they were skipped):</p><ul>{details}</ul></div>);
+         } else {
+             showToast('success', 'Fully Declared', 'All certificates successfully declared and report downloaded!');
+             // Instantly update local UI state to hide the fully declared contract
+             setSales(prev => prev.map(s => s.id === contractId ? { ...s, certs_declared: true } : s));
+         }
+         
+         const blob = await response.blob();
+         const disposition = response.headers.get('Content-Disposition');
+         let filename = `Declaration_Contract_${contractId}.xlsx`;
+         
+         if (disposition && disposition.includes('filename=')) {
+             const matches = /filename="([^"]+)"/.exec(disposition);
+             if (matches && matches[1]) filename = matches[1];
+         }
+         
+         const url = window.URL.createObjectURL(blob);
+         const a = document.createElement("a");
+         a.href = url;
+         a.download = filename;
+         document.body.appendChild(a);
+         a.click();
+         document.body.removeChild(a);
+         window.URL.revokeObjectURL(url);
       }
       
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      window.URL.revokeObjectURL(url);
+      // Auto update data in the background
+      await fetchData(true);
       
-      const decRes = await fetch("/api/declare_certificates", { cache: "no-store" });
-      if (decRes.ok) {
-         const d = await decRes.json();
-         setDeclarations(d.data || []);
-      }
-      
-      alert("Certificates successfully declared and report downloaded!");
     } catch (error: any) {
-      alert(`Error declaring certificates: ${error.message}`);
+      showToast('error', 'Declaration Failed', error.message);
     } finally {
       setIsDeclaringCertId(null);
+      setDeclaringContractId(null);
     }
   };
 
@@ -930,39 +880,31 @@ export default function CertificationViewer() {
       const response = await fetch(`/api/declare_certificates?id=${contractToDelete}`, { method: 'DELETE' });
       if (!response.ok) throw new Error("Failed to delete declarations");
       
+      // Optimistic updates
       setDeclarations(prev => prev.filter(d => d.contract_id !== contractToDelete));
+      setSales(prev => prev.map(s => s.id === contractToDelete ? { ...s, certs_declared: false } : s));
       setViewingDeclarationContract(null);
       setContractToDelete(null);
-      alert("Declarations reverted successfully.");
+      showToast('success', 'Reverted', 'Declarations reverted successfully.');
+      
+      // Auto update data in the background
+      await fetchData(true);
     } catch (error: any) {
-      alert(`Error deleting declarations: ${error.message}`);
+      showToast('error', 'Error deleting declarations', error.message);
     } finally {
       setIsDeletingDecl(false);
-    }
-  };
-
-  // O(1) Fetch toggle endpoint for contract execution logic
-  const toggleContractExecution = async (id: number, currentStatus: boolean) => {
-    try {
-      const response = await fetch('/api/contracts', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, executed: !currentStatus })
-      });
-      if (!response.ok) throw new Error("Failed to update status");
-      
-      setSales(prev => prev.map(sale => sale.id === id ? { ...sale, executed: !currentStatus } : sale));
-    } catch(e) {
-      alert("Failed to toggle contract execution status.");
     }
   };
 
   // ⚡ O(N) Memoization for Contracts Tab Filtering
   const filteredContracts = useMemo(() => {
     return sales.filter(sale => {
-      // Execute toggle filter
-      if (!showExecutedContracts && bool(sale.executed)) return false;
+      // ⚡ Robust fallback check for missing attributes safely utilizing the optimized bool parser
+      const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
       
+      // Certs declared filter: Hide fully declared contracts unless the "Show All Contracts" toggle is ON
+      if (!showDeclaredContracts && isDeclared) return false;
+
       // Search filter
       if (contractSearch) {
         const q = contractSearch.toLowerCase();
@@ -978,7 +920,7 @@ export default function CertificationViewer() {
       }
       return true;
     });
-  }, [sales, showExecutedContracts, contractSearch]);
+  }, [sales, contractSearch, showDeclaredContracts]);
 
   const uniqueClients = useMemo(() => {
       const clients = sales.map(s => s.client).filter(Boolean) as string[];
@@ -1016,20 +958,41 @@ export default function CertificationViewer() {
 
     const sanitizedTargetCert = String(activeCert).toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+    // ⚡ PRE-CALCULATED CROP YEAR BOUNDS (O(1) execution outside loop)
+    // Coffee Season: September 1st to August 31st
+    const today = new Date();
+    const currentMonth = today.getMonth(); // 0 is Jan, 8 is Sept
+    const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
+    const seasonStartDate = new Date(startYear, 8, 1).getTime();
+    const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
+
     stocks.forEach(stock => {
       const isCertified = stock[flag] === 1 || stock[flag] === true || stock[flag] === '1';
       
       if (isCertified) {
+        // Crop Year Date Filtering
+        if (positionView === 'crop_year') {
+           if (!stock.recorded_date) return;
+           const recTime = new Date(stock.recorded_date).getTime();
+           if (Number.isNaN(recTime) || recTime < seasonStartDate || recTime > seasonEndDate) return;
+        }
+
         const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
         if (isDual && activeCert === 'AAA') return; 
+
+        // Calculate Balance Instead of Total Purchased Weight
+        const rawWeight = getEffectiveWeight(stock, activeCert); 
+        const declaredField = certToField(activeCert) as keyof CertifiedStock;
+        const declaredWeight = asNumber(stock[declaredField]);
+        const weight = Math.max(0, rawWeight - declaredWeight); 
+        
+        // ⚡ OPTIMIZATION: Instantly skip allocation evaluation if volume is depleted
+        if (weight <= 0) return; 
 
         const strat = stock.strategy || 'Unassigned';
         if (!strategyMap.has(strat)) strategyMap.set(strat, { strategy: strat, available: 0, shipmentsByMonth: {}, totalShipment: 0 });
         
         const record = strategyMap.get(strat)!;
-        const rawWeight = getEffectiveWeight(stock, activeCert); 
-        const weight = Math.abs(rawWeight || 0); 
-        
         record.available += weight;
         totalStockKg += weight;
 
@@ -1043,8 +1006,9 @@ export default function CertificationViewer() {
     });
 
     sales.forEach(sale => {
-      // EXCLUDE Executed Contracts from Position Computations unconditionally
-      if (bool(sale.executed)) return;
+      // Only deduct volumes for contracts that have NOT been fully declared
+      const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
+      if (isDeclared) return;
 
       const certList = parseCerts(sale.certifications).map(c => c.toUpperCase().replace(/[^A-Z0-9]/g, ''));
       const isMatch = certList.includes(sanitizedTargetCert);
@@ -1088,82 +1052,7 @@ export default function CertificationViewer() {
         net: totalStockKg - totalShortsKg
       }
     };
-  }, [activeCert, stocks, sales]); 
-
-  // ⚡ O(N) Physical Positions Grid Complete Construction:
-  // Dynamically fills in 0s for missing BLEND_COMPONENTS and accurately calculates missing shorts for unexecuted contracts.
-  const physicalGridView = useMemo(() => {
-    if (!hasFetchedPhysical || !physicalData.gridData) return { data: [], months: [], kpis: { totalTheoretical: 0, totalShorts: 0, totalNet: 0 } };
-    
-    const gridMap = new Map(physicalData.gridData.map(row => [row.stack, row]));
-    const missingShorts = new Map<string, { total: number, months: Record<string, number> }>();
-    const monthSet = new Set<string>(physicalData.months || []);
-    const blendMap = new Map(blends.map(b => [b.id, b]));
-
-    let extraShortsTotal = 0;
-
-    // O(N) pass to deduct shorts for zero-volume stacks dynamically
-    sales.forEach(sale => {
-        if (bool(sale.executed) || !sale.blend_id) return;
-        const blend = blendMap.get(Number(sale.blend_id));
-        if (!blend) return;
-
-        const monthKey = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
-        const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
-
-        BLEND_COMPONENTS.forEach(comp => {
-            if (!gridMap.has(comp.key)) {
-                const compPercent = asNumber(blend[comp.key]) / 100;
-                if (compPercent > 0) {
-                    const shortVol = weight * compPercent;
-                    if (!missingShorts.has(comp.key)) {
-                        missingShorts.set(comp.key, { total: 0, months: {} });
-                    }
-                    const record = missingShorts.get(comp.key)!;
-                    record.total += shortVol;
-                    record.months[monthKey] = (record.months[monthKey] || 0) + shortVol;
-                    monthSet.add(monthKey);
-                    extraShortsTotal += shortVol;
-                }
-            }
-        });
-    });
-    
-    const result = BLEND_COMPONENTS.map(comp => {
-        const existing = gridMap.get(comp.key);
-        if (existing) {
-            gridMap.delete(comp.key); 
-            return existing;
-        }
-        
-        const shorts = missingShorts.get(comp.key);
-        return {
-            stack: comp.key,
-            theoretical_volume: 0,
-            months: shorts ? shorts.months : {},
-            total_shorts: shorts ? shorts.total : 0,
-            net_position: shorts ? -shorts.total : 0
-        };
-    });
-    
-    gridMap.forEach(val => result.push(val));
-    
-    const sortedMonths = Array.from(monthSet).sort((a, b) => {
-        if (a === 'Unscheduled') return 1;
-        if (b === 'Unscheduled') return -1;
-        return new Date(a).getTime() - new Date(b).getTime();
-    });
-
-    return { 
-        data: result, 
-        months: sortedMonths, 
-        kpis: {
-            totalTheoretical: physicalData.kpis.totalTheoretical,
-            totalShorts: physicalData.kpis.totalShorts + extraShortsTotal,
-            totalNet: physicalData.kpis.totalNet - extraShortsTotal
-        }
-    };
-  }, [physicalData, hasFetchedPhysical, sales, blends]);
+  }, [activeCert, stocks, sales, positionView]); 
 
   // --- TRACKER TAB MEMOS ---
   const trackerVisibleStocks = useMemo(() => {
@@ -1230,10 +1119,6 @@ export default function CertificationViewer() {
     return result;
   }, [trackerVisibleStocks, trackerCert]);
 
-  const trackerVisibleTotalKg = useMemo(
-    () => trackerVisibleStocks.reduce((sum, stock) => sum + getEffectiveWeight(stock, trackerCert), 0),
-    [trackerVisibleStocks, trackerCert]
-  );
 
   const trackerVisibleRecordCount = trackerVisibleStocks.length;
   const trackerVisibleDateLabel = formatRangeLabel(trackerDateStartFilter, trackerDateEndFilter);
@@ -1264,7 +1149,6 @@ export default function CertificationViewer() {
     });
 
     sales.forEach(sale => {
-      // NOTE: We historically keep tracking connected declarations and cert lists regardless of execution logic.
       const certs = parseCerts(sale.certifications).map(c => c.toUpperCase());
       if (certs.includes('RFA')) summary.RFA.contractCount++;
       if (certs.includes('CAFE')) summary.CAFE.contractCount++;
@@ -1308,27 +1192,6 @@ export default function CertificationViewer() {
     </div>
   );
 
-  const visibleBlends = useMemo(() => {
-    const q = blendSearch.trim().toLowerCase();
-    return blends.map((blend) => ({ blend, composition: getBlendCompositionRow(blend), linkedContracts: sales.filter((sale) => Number(sale.blend_id) === blend.id) }))
-      .filter(({ blend }) => !q || [blend.name, blend.client, blend.grade, blend.cup_profile, blend.blend_no].filter(Boolean).join(" ").toLowerCase().includes(q));
-  }, [blends, sales, blendSearch]);
-
-  const selectedBlendData = useMemo(() => {
-    const blend = selectedBlendId ? blends.find((b) => b.id === selectedBlendId) ?? null : blends[0] ?? null;
-    if (!blend) return null;
-    return { blend, composition: getBlendCompositionRow(blend), linkedContracts: sales.filter((sale) => Number(sale.blend_id) === blend.id) };
-  }, [blends, sales, selectedBlendId]);
-
-  const blendCompositionTotal = useMemo(() => BLEND_COMPONENTS.reduce((sum, comp) => sum + asNumber(blendForm[comp.key]), 0), [blendForm]);
-
-  const blendValidationMessage = useMemo(() => {
-    const entered = BLEND_COMPONENTS.some((comp) => asNumber(blendForm[comp.key]) > 0);
-    if (!isAddBlendModalOpen || !entered) return "";
-    if (Math.abs(blendCompositionTotal - 100) < 0.01) return "";
-    return blendCompositionTotal > 100 ? `Blend composition is over 100% (${blendCompositionTotal.toFixed(2)}%). Reduce one or more components.` : `Blend composition is below 100% (${blendCompositionTotal.toFixed(2)}%). Add the remaining percentage before saving.`;
-  }, [isAddBlendModalOpen, blendCompositionTotal, blendForm]);
-
   const declaredContractsSummary = useMemo(() => {
     const map = new Map<number, {
        contract_id: number; contract_number: string; client: string; contract_weight: number;
@@ -1364,7 +1227,7 @@ export default function CertificationViewer() {
     formData.append('sol_file', solFile);
 
     try {
-      const response = await fetch('http://localhost:8100/api/upload_sol_report', {
+      const response = await fetch(process.env.COBRA_MICROSERVICE_URL+'/api/upload_sol_report', {
           method: 'POST',
           body: formData, 
       });
@@ -1377,7 +1240,8 @@ export default function CertificationViewer() {
       alert("SOL Report uploaded successfully!");
       setSolFile(null);
       setIsAddModalOpen(false);
-      window.location.reload(); 
+      // Auto update data in the background
+      await fetchData(true);
       
     } catch (error: any) {
       console.error("Upload error:", error);
@@ -1394,7 +1258,7 @@ export default function CertificationViewer() {
     if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
 
     try {
-      const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
+      const response = await fetch(process.env.COBRA_MICROSERVICE_URL+'/api/xbs_purchase_upload', { method: 'POST', body: formData });
       if (!response.ok) throw new Error("Failed to upload purchases.");
       
       alert("Purchases uploaded successfully!");
@@ -1403,6 +1267,9 @@ export default function CertificationViewer() {
       setPurchaseFile(null);
       setPurchaseSaleNumber('');
       setIsDirectSale(true);
+      
+      // Auto update data in the background
+      await fetchData(true);
     } catch (error) {
       alert("Error uploading file. Please try again.");
     }
@@ -1420,12 +1287,16 @@ export default function CertificationViewer() {
       if (!response.ok) throw new Error("Failed to save sale.");
       const data = await response.json();
       
+      // Optimistic update
       if (data.success && data.sale) {
         setSales(prev => [...prev, data.sale]);
       }
       
       setIsManualSalesModalOpen(false);
       setManualSaleForm({ contractNumber: '', client: '', weight: '', quality: '', grade: '', shippingDate: '', certifications: [] });
+      
+      // Auto update data in the background
+      await fetchData(true);
     } catch (error) {
       alert("Failed to save manual sale.");
     }
@@ -1459,6 +1330,7 @@ export default function CertificationViewer() {
           
           const selectedBlend = blends.find(b => b.id === Number(editForm.blend_id));
           
+          // Optimistic update
           setSales(prev => prev.map(sale => 
               sale.id === id ? { 
                   ...sale, 
@@ -1470,84 +1342,14 @@ export default function CertificationViewer() {
               } : sale
           ));
           setEditingContractId(null);
+          showToast('success', 'Updated', 'Contract updated successfully');
+          
+          // Auto update data in the background
+          await fetchData(true);
       } catch (e) {
-          alert("Failed to update contract");
+          showToast('error', 'Error', 'Failed to update contract');
       }
   };
-
-  async function updateContractBlend(contractId: number, blendId: number | null) {
-    const contract = sales.find((sale) => sale.id === contractId);
-    if (!contract) return;
-    const response = await fetch("/api/contracts", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: contractId,
-        quality: contract.quality || contract.strategy || "",
-        grade: contract.grade || "",
-        certifications: parseCerts(contract.certifications),
-        blend_id: blendId
-      }),
-    });
-    if (!response.ok) throw new Error("Failed to update contract");
-    const selected = blends.find((b) => b.id === blendId);
-    setSales((prev) => prev.map((sale) => (sale.id === contractId ? { ...sale, blend_id: blendId ?? undefined, blend_name: selected?.name ?? undefined } : sale)));
-  }
-
-  const handleCreateBlendSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
-    const payload = Object.fromEntries(
-        Object.entries(blendForm).filter(([_, v]) => v !== '')
-    );
-
-    try {
-      const response = await fetch('/api/blends', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Failed to create blend");
-      
-      if (data.success) {
-        setBlends(prev => [{ id: data.id, ...payload } as Blend, ...prev]);
-        setIsAddBlendModalOpen(false);
-        setBlendForm(INITIAL_BLEND_FORM);
-      }
-    } catch (error: any) {
-      alert(error.message);
-    }
-  };
-
-  async function deleteBlend(blendId: number) {
-    const linked = sales.filter((sale) => Number(sale.blend_id) === blendId);
-    try {
-      await Promise.allSettled(
-        linked.map(async (sale) => {
-          try { await updateContractBlend(sale.id, null); } catch (error) {}
-        })
-      );
-      
-      const response = await fetch(`/api/blends?id=${blendId}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        throw new Error("Backend database deletion failed");
-      }
-
-      setBlends((prev) => prev.filter((blend) => blend.id !== blendId));
-      if (selectedBlendId === blendId) setSelectedBlendId(null);
-      setSales((prev) => prev.map((sale) => (Number(sale.blend_id) === blendId ? { ...sale, blend_id: undefined, blend_name: undefined } : sale)));
-
-      alert("Blend deleted successfully.");
-    } catch (error) {
-      console.error(error);
-      alert("Failed to delete blend.");
-    }
-  }
 
   function downloadTrackerView(format: "csv" | "excel") {
     const columns = getTrackerColumns(trackerCert, unit);
@@ -1588,7 +1390,7 @@ export default function CertificationViewer() {
           <path className="steam-2" d="M32 22C32 18 36 18 36 14" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
           <path className="steam-3" d="M40 20C40 16 44 16 44 12" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
         </svg>
-        <div>Brewing Position Data...</div>
+        <div>Brewing Certification Data...</div>
       </div>
     );
   }
@@ -1596,6 +1398,22 @@ export default function CertificationViewer() {
   return (
     <div className="min-h-screen bg-[#D6D2C4] font-sans text-[#51534a] md:p-1 relative">
       
+      {/* --- TOAST NOTIFICATION --- */}
+      <div className={`fixed bottom-6 right-6 z-[100] transition-all duration-300 transform ${toast.show ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0 pointer-events-none'}`}>
+        <div className={`bg-white border-l-4 shadow-xl rounded-lg p-4 max-w-sm w-full flex gap-3 items-start ${toast.type === 'success' ? 'border-[#007680]' : toast.type === 'warning' ? 'border-[#B9975B]' : 'border-red-500'}`}>
+          <div className={`mt-0.5 ${toast.type === 'success' ? 'text-[#007680]' : toast.type === 'warning' ? 'text-[#B9975B]' : 'text-red-500'}`}>
+            {toast.type === 'success' ? <CheckCircle size={18} /> : toast.type === 'warning' ? <ShieldCheck size={18} /> : <X size={18} />}
+          </div>
+          <div className="flex-1">
+            <h4 className="text-sm font-bold text-[#51534a]">{toast.title}</h4>
+            <div className="text-xs text-[#968C83] mt-1">{toast.message}</div>
+          </div>
+          <button onClick={() => setToast(prev => ({ ...prev, show: false }))} className="text-[#968C83] hover:text-[#51534a]">
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+
       {/* --- MODALS --- */}
       {isAddModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -1690,57 +1508,129 @@ export default function CertificationViewer() {
         </div>
       )}
 
-      {/* --- UPDATE POSITIONS MODAL --- */}
-      {isUpdatePositionsModalOpen && (
+      {/* --- DECLARATION CONFIGURATION MODAL --- */}
+      {isDeclaringConfigOpen && (() => {
+        const declaringContract = sales.find(s => s.id === declaringContractId);
+        return (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="bg-white w-full max-w-lg rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-[#D6D2C4] bg-[#F5F5F3]">
-              <h3 className="font-bold text-[#51534a]">Update Physical Positions</h3>
-              <button onClick={() => setIsUpdatePositionsModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1 rounded-full hover:bg-[#D6D2C4]/50">
-                <X size={16} />
+          <div className="bg-[#F5F5F3] w-full max-w-3xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
+              <div>
+                 <h3 className="font-bold text-[#51534a] text-lg">Declaration: {declaringContract?.contract_number}</h3>
+                 <div className="flex items-center gap-2 mt-1">
+                    <span className="text-xs font-medium text-[#007680] bg-[#007680]/10 px-2 py-0.5 rounded">
+                        {declaringContract?.quality || declaringContract?.strategy || 'Unassigned Quality'}
+                    </span>
+                    {parseCerts(declaringContract?.certifications).map(cert => (
+                        <span key={cert} className="text-[10px] font-bold text-[#51534a] bg-[#D6D2C4]/30 border border-[#D6D2C4] px-1.5 py-0.5 rounded-sm">
+                            {cert}
+                        </span>
+                    ))}
+                    {parseCerts(declaringContract?.certifications).length === 0 && (
+                        <span className="text-[10px] italic text-[#968C83]">Uncertified</span>
+                    )}
+                 </div>
+              </div>
+              <button onClick={() => setIsDeclaringConfigOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/50">
+                <X size={20} />
               </button>
             </div>
             
-            <form onSubmit={handleFetchPhysicalPositions} className="p-5 flex flex-col gap-4">
-              <p className="text-xs text-[#968C83] mb-2">Upload the required reports to calculate theoretical blend allocations. The backend processing script will automatically exclude executed contracts from computations.</p>
-              <div className="space-y-4">
-                  <FileDropZone 
-                    label="Current Stock (CSV)" 
-                    accept=".csv" 
-                    file={stockFile}
-                    onFileAdded={setStockFile}
-                    onRemoveFile={() => setStockFile(null)}
-                  />
-                  <FileDropZone 
-                    label="Processing Analysis (XLS/XLSX)" 
-                    accept=".xls,.xlsx" 
-                    file={procFile}
-                    onFileAdded={setProcFile}
-                    onRemoveFile={() => setProcFile(null)}
-                  />
-                  <FileDropZone 
-                    label="Test Details Summary (XLS/XLSX)" 
-                    accept=".xls,.xlsx" 
-                    file={testFile}
-                    onFileAdded={setTestFile}
-                    onRemoveFile={() => setTestFile(null)}
-                  />
+            <div className="p-5 flex flex-col sm:flex-row gap-5">
+              {/* Region Section */}
+              <div className="flex-1 bg-white border border-[#D6D2C4] rounded-xl flex flex-col overflow-hidden shadow-sm">
+                 <div className="px-4 py-3 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
+                    <h4 className="font-bold text-[#51534a] text-sm">Region (County)</h4>
+                    <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-2 py-0.5 rounded text-[#007680]">{selectedRegions.size} Selected</span>
+                 </div>
+                 <div className="p-3 max-h-[35vh] overflow-y-auto">
+                    {uniqueRegions.length > 0 ? (
+                       <div className="grid grid-cols-2 gap-2">
+                          {uniqueRegions.map(region => (
+                             <label key={region} className="flex items-start gap-2 p-2 hover:bg-[#F5F5F3] rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[#D6D2C4]/50">
+                                <input 
+                                   type="checkbox" 
+                                   className="w-4 h-4 mt-0.5 text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                   checked={selectedRegions.has(region)}
+                                   onChange={(e) => {
+                                      const newSet = new Set(selectedRegions);
+                                      if (e.target.checked) newSet.add(region);
+                                      else newSet.delete(region);
+                                      setSelectedRegions(newSet);
+                                   }}
+                                />
+                                <span className="text-sm font-medium text-[#51534a] leading-tight">{region}</span>
+                             </label>
+                          ))}
+                       </div>
+                    ) : <div className="p-4 text-xs text-[#968C83] italic text-center">No region data available</div>}
+                 </div>
+                 <div className="border-t border-[#D6D2C4] p-3 bg-[#F5F5F3] flex justify-end">
+                    <button 
+                       type="button" 
+                       className="text-[10px] font-bold uppercase tracking-wider text-[#007680] hover:text-[#005a61] transition-colors flex items-center gap-1 bg-white px-3 py-1.5 rounded border border-[#D6D2C4] shadow-sm"
+                       onClick={() => setSelectedRegions(selectedRegions.size === uniqueRegions.length ? new Set() : new Set(uniqueRegions))}
+                    >
+                       {selectedRegions.size === uniqueRegions.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                 </div>
               </div>
-              
-              <div className="pt-4 mt-2 border-t border-[#D6D2C4] flex justify-end gap-2">
-                <button type="button" onClick={() => setIsUpdatePositionsModalOpen(false)} className="px-4 py-2 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
-                <button 
-                  type="submit" 
-                  disabled={!stockFile || !procFile || !testFile || isPhysicalLoading}
-                  className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center min-w-[140px]"
-                >
-                  {isPhysicalLoading ? 'Calculating...' : 'Run Calculation'}
-                </button>
+
+              {/* Grade Section */}
+              <div className="flex-1 bg-white border border-[#D6D2C4] rounded-xl flex flex-col overflow-hidden shadow-sm">
+                 <div className="px-4 py-3 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
+                    <h4 className="font-bold text-[#51534a] text-sm">Grade</h4>
+                    <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-2 py-0.5 rounded text-[#007680]">{selectedGrades.size} Selected</span>
+                 </div>
+                 <div className="p-3 max-h-[35vh] overflow-y-auto">
+                    {uniqueGrades.length > 0 ? (
+                       <div className="grid grid-cols-2 gap-2">
+                          {uniqueGrades.map(grade => (
+                             <label key={grade} className="flex items-start gap-2 p-2 hover:bg-[#F5F5F3] rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[#D6D2C4]/50">
+                                <input 
+                                   type="checkbox" 
+                                   className="w-4 h-4 mt-0.5 text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                   checked={selectedGrades.has(grade)}
+                                   onChange={(e) => {
+                                      const newSet = new Set(selectedGrades);
+                                      if (e.target.checked) newSet.add(grade);
+                                      else newSet.delete(grade);
+                                      setSelectedGrades(newSet);
+                                   }}
+                                />
+                                <span className="text-sm font-medium text-[#51534a] leading-tight">{grade}</span>
+                             </label>
+                          ))}
+                       </div>
+                    ) : <div className="p-4 text-xs text-[#968C83] italic text-center">No grade data available</div>}
+                 </div>
+                 <div className="border-t border-[#D6D2C4] p-3 bg-[#F5F5F3] flex justify-end">
+                    <button 
+                       type="button" 
+                       className="text-[10px] font-bold uppercase tracking-wider text-[#007680] hover:text-[#005a61] transition-colors flex items-center gap-1 bg-white px-3 py-1.5 rounded border border-[#D6D2C4] shadow-sm"
+                       onClick={() => setSelectedGrades(selectedGrades.size === uniqueGrades.length ? new Set() : new Set(uniqueGrades))}
+                    >
+                       {selectedGrades.size === uniqueGrades.length ? 'Deselect All' : 'Select All'}
+                    </button>
+                 </div>
               </div>
-            </form>
+            </div>
+
+            <div className="p-5 border-t border-[#D6D2C4] bg-white flex justify-end gap-3">
+              <button type="button" onClick={() => setIsDeclaringConfigOpen(false)} className="px-5 py-2.5 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
+              <button 
+                 type="button" 
+                 onClick={submitDeclareCertificates}
+                 disabled={selectedRegions.size === 0 && selectedGrades.size === 0}
+                 className="bg-[#007680] text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50"
+              >
+                 Confirm Declaration
+              </button>
+            </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* --- MANUAL ADD SALES MODAL --- */}
       {isManualSalesModalOpen && (
@@ -1842,7 +1732,7 @@ export default function CertificationViewer() {
                   <option value="" disabled>Select Certification(s)</option>
                   <option value="UNCERTIFIED" className="text-[#B9975B] font-bold">Uncertified (Clear All)</option>
                   {certOptions.map(cert => (
-                    <option key={cert} value={cert} disabled={manualSaleForm.certifications.includes(cert)}>
+                    <option key={cert} value={cert} disabled={manualSaleForm.certifications.includes(cert as CertType)}>
                       {cert}
                     </option>
                   ))}
@@ -1914,93 +1804,6 @@ export default function CertificationViewer() {
                 <button type="submit" className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm">Confirm & Upload</button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {/* --- CREATE BLEND MODAL --- */}
-      {isAddBlendModalOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="bg-white w-full max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-in zoom-in-95 duration-200 my-8">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
-              <div>
-                <div className="text-lg font-bold text-[#51534a]">Create New Blend</div>
-                <div className="text-xs text-[#968C83]">Composition must equal exactly 100%</div>
-              </div>
-              <button onClick={() => setIsAddBlendModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/30 transition-all">
-                <X size={18} />
-              </button>
-            </div>
-            
-            <div className="max-h-[calc(90vh-72px)] overflow-y-auto p-5">
-              {blendValidationMessage ? (
-                <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700 shadow-sm">
-                  {blendValidationMessage}
-                </div>
-              ) : null}
-
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                <input 
-                  type="text" placeholder="Blend Name *"
-                  className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
-                  value={blendForm.name || ''}
-                  onChange={(e) => setBlendForm({...blendForm, name: e.target.value})}
-                />
-                <input 
-                  type="text" placeholder="Client"
-                  className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
-                  value={blendForm.client || ''}
-                  onChange={(e) => setBlendForm({...blendForm, client: e.target.value})}
-                />
-                <input 
-                  type="text" placeholder="Blend No."
-                  className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
-                  value={blendForm.blend_no || ''}
-                  onChange={(e) => setBlendForm({...blendForm, blend_no: e.target.value})}
-                />
-                <input 
-                  type="text" placeholder="Grade"
-                  className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
-                  value={blendForm.grade || ''}
-                  onChange={(e) => setBlendForm({...blendForm, grade: e.target.value})}
-                />
-                <input 
-                  type="text" placeholder="Cup Profile"
-                  className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680] md:col-span-2 xl:col-span-4"
-                  value={blendForm.cup_profile || ''}
-                  onChange={(e) => setBlendForm({...blendForm, cup_profile: e.target.value})}
-                />
-              </div>
-
-              <div className="mt-5 rounded-2xl border border-[#D6D2C4] bg-white p-4">
-                <div className="flex items-center justify-between">
-                  <div className="font-bold text-[#51534a]">Composition</div>
-                  <div className={Math.abs(blendCompositionTotal - 100) < 0.01 ? "font-bold text-[#007680]" : blendCompositionTotal > 100 ? "font-bold text-red-600" : "font-bold text-[#B9975B]"}>{blendCompositionTotal.toFixed(2)}%</div>
-                </div>
-                <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#D6D2C4]">
-                  <div className="h-full rounded-full bg-[#007680]" style={{ width: `${Math.min(100, blendCompositionTotal)}%` }} />
-                </div>
-                <div className="mt-2 text-xs text-[#968C83]">Composition must equal exactly 100% before saving.</div>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {BLEND_COMPONENTS.map((comp) => (
-                    <div key={comp.key}>
-                      <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[#968C83]">{comp.label}</label>
-                      <input 
-                        type="number" min="0" max="100" step="0.01" placeholder="0.00"
-                        className="w-full rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]"
-                        value={blendForm[comp.key] || ''}
-                        onChange={(e) => setBlendForm({...blendForm, [comp.key]: e.target.value})}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="mt-5 flex items-center justify-end gap-2">
-                <button type="button" onClick={() => setIsAddBlendModalOpen(false)} className="rounded-lg border border-[#D6D2C4] bg-white px-4 py-2 text-sm font-bold text-[#51534a]">Cancel</button>
-                <button type="button" onClick={handleCreateBlendSubmit} disabled={!blendForm.name.trim() || Math.abs(blendCompositionTotal - 100) > 0.01} className="rounded-lg bg-[#007680] px-5 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50">Save Blend</button>
-              </div>
-            </div>
           </div>
         </div>
       )}
@@ -2141,9 +1944,9 @@ export default function CertificationViewer() {
               <div className="w-8 h-8 bg-[#007680] rounded-lg flex items-center justify-center text-white">
                 <ShieldCheck size={18} />
               </div>
-              Positions
+              Certification Positions
             </h1>
-            <p className="text-[#968C83] text-sm mt-1">Physical, Certification Tracker, Contracts, Blends & Declarations</p>
+            <p className="text-[#968C83] text-sm mt-1">Certification, Tracker, Contracts & Declarations</p>
           </div>
           
           <div className="flex items-center gap-2">
@@ -2174,14 +1977,6 @@ export default function CertificationViewer() {
         {/* --- MAIN NAVIGATION --- */}
         <div className="flex gap-2 border-b border-[#968C83]/30 overflow-x-auto">
           <button
-            onClick={() => setActiveTab('physical')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'physical' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
-            }`}
-          >
-            <Box size={16} /> Physical
-          </button>
-          <button
             onClick={() => setActiveTab('certification')}
             className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
               activeTab === 'certification' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
@@ -2195,7 +1990,7 @@ export default function CertificationViewer() {
               activeTab === 'tracker' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
             }`}
           >
-            <Users size={16} /> Certification Tracker
+            <Users size={16} /> Certified Stock Tracker
           </button>
           <button
             onClick={() => setActiveTab('contracts')}
@@ -2204,14 +1999,6 @@ export default function CertificationViewer() {
             }`}
           >
             <FileSpreadsheet size={16} /> Contracts
-          </button>
-          <button
-            onClick={() => setActiveTab('blends')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'blends' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
-            }`}
-          >
-            <Combine size={16} /> Blends
           </button>
           <button
             onClick={() => setActiveTab('declarations')}
@@ -2228,23 +2015,58 @@ export default function CertificationViewer() {
           
           {/* Sub Navigation (Only for Certification Tab) */}
           {activeTab === 'certification' && (
-            <div className="flex justify-between items-end">
-              <FilterTabs tabs={CERT_FILTERS as unknown as string[]} active={activeCert} onChange={setActiveCert} />
-              <div className="text-xs text-[#968C83] pb-2 italic">Showing {activeCert} strategies</div>
+            <div className="flex flex-col gap-4 pb-4 border-b border-[#968C83]/20">
+              <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-end gap-4 sm:gap-6">
+                  <div className="flex flex-col gap-2">
+                     <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Certificates</span>
+                     <FilterTabs tabs={CERTIFICATES_LIST} active={activeCert} onChange={setActiveCert} />
+                  </div>
+                  <div className="hidden sm:block w-px h-8 bg-[#D6D2C4] mb-1"></div>
+                  <div className="flex flex-col gap-2">
+                     <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Projects</span>
+                     <FilterTabs tabs={PROJECTS_LIST} active={activeCert} onChange={setActiveCert} />
+                  </div>
+                </div>
+
+                {/* View Mode Toggle */}
+                <div className="flex bg-[#F5F5F3] p-1 rounded-lg border border-[#D6D2C4] shadow-sm">
+                  <button
+                    onClick={() => setPositionView('true_position')}
+                    className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
+                      positionView === 'true_position' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
+                    }`}
+                  >
+                    True Position
+                  </button>
+                  <button
+                    onClick={() => setPositionView('crop_year')}
+                    className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
+                      positionView === 'crop_year' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
+                    }`}
+                  >
+                    Crop Year
+                  </button>
+                </div>
+              </div>
+              
+              <div className="text-xs text-[#968C83] italic">
+                Showing {positionView === 'crop_year' ? 'Current Season' : 'All-Time'} undeclared balances for {activeCert} {PROJECTS_LIST.includes(activeCert as any) ? 'project' : 'certificate'} strategies.
+              </div>
             </div>
           )}
 
-          {/* --- KPI CARDS (Physical & Certifications) --- */}
-          {(activeTab === 'certification' || (activeTab === 'physical' && hasFetchedPhysical)) && (
+          {/* --- KPI CARDS (Certifications) --- */}
+          {activeTab === 'certification' && (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card className="p-4 border-l-4 border-l-[#007680]">
                 <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
-                  {activeTab === 'certification' ? `${activeCert} TOTAL STOCK` : 'PHYSICAL THEORETICAL STOCK'}
+                  {activeCert} TOTAL STOCK
                 </div>
                 <div className="text-2xl font-bold text-[#51534a] mt-1">
-                  {formatNumber(convertQty(activeTab === 'certification' ? kpis.stock : physicalGridView.kpis.totalTheoretical, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
+                  {formatNumber(convertQty(kpis.stock, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
                 </div>
-                {activeTab === 'certification' && (['RFA', 'CAFE', 'EUDR'].includes(activeCert)) && (
+                {(['RFA', 'CAFE', 'EUDR'].includes(activeCert)) && (
                   <div className="text-[10px] text-[#007680] mt-1.5 font-bold bg-[#A4DBE8]/30 border border-[#007680]/10 inline-block px-1.5 py-0.5 rounded">
                      Supply Chain (Kenyacof): {formatNumber(convertQty(kpis.supplyChainStock, unit))} {unitText(unit)}
                   </div>
@@ -2252,111 +2074,22 @@ export default function CertificationViewer() {
               </Card>
               <Card className="p-4 border-l-4 border-l-[#5B3427]">
                 <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
-                   {activeTab === 'certification' ? `${activeCert} TOTAL SHORTS` : 'PHYSICAL TOTAL BLEND SHORTS'}
+                   {activeCert} TOTAL SHORTS
                 </div>
                 <div className="text-2xl font-bold text-[#5B3427] mt-1 flex items-center gap-2">
-                  {formatNumber(convertQty(activeTab === 'certification' ? kpis.shorts : physicalGridView.kpis.totalShorts, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
+                  {formatNumber(convertQty(kpis.shorts, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
                   <TrendingDown size={18} className="text-[#B9975B]" />
                 </div>
               </Card>
               <Card className="p-4 border-l-4 border-l-[#007680]">
                 <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
-                   {activeTab === 'certification' ? `${activeCert} NET POSITION` : 'PHYSICAL NET POSITION'}
+                   {activeCert} NET POSITION
                 </div>
-                <div className={`text-2xl font-bold mt-1 flex items-center gap-2 ${(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet) >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                  {(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet) > 0 ? '+' : ''}{formatNumber(convertQty(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
-                  {(activeTab === 'certification' ? kpis.net : physicalGridView.kpis.totalNet) >= 0 ? <TrendingUp size={18} className="text-[#97D700]" /> : <TrendingDown size={18} />}
+                <div className={`text-2xl font-bold mt-1 flex items-center gap-2 ${kpis.net >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                  {kpis.net > 0 ? '+' : ''}{formatNumber(convertQty(kpis.net, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
+                  {kpis.net >= 0 ? <TrendingUp size={18} className="text-[#97D700]" /> : <TrendingDown size={18} />}
                 </div>
               </Card>
-            </div>
-          )}
-
-          {/* --- POSITION TABLE (Physical Tab) --- */}
-          {activeTab === 'physical' && (
-            <div className="space-y-4">
-              <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-[#968C83]/20">
-                <div>
-                  <h3 className="font-bold text-[#51534a]">Physical Positions</h3>
-                  <p className="text-xs text-[#968C83]">Calculate theoretical vs actual blend allocations</p>
-                </div>
-                <button 
-                  onClick={() => setIsUpdatePositionsModalOpen(true)} 
-                  disabled={isPhysicalLoading}
-                  className="flex items-center gap-2 bg-[#007680] text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50"
-                >
-                  {isPhysicalLoading ? 'Calculating...' : 'Update Positions'}
-                </button>
-              </div>
-
-              {hasFetchedPhysical ? (
-                <Card className="overflow-hidden border-none shadow-md">
-                  <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
-                    <table className="w-full text-sm text-left whitespace-nowrap">
-                      <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
-                        <tr>
-                          <th className="py-2 px-4 w-1/4">Post Stack</th>
-                          <th className="py-2 px-4 text-right">Theoretical Volume ({unit})</th>
-                          {physicalGridView.months.map(month => (
-                            <th key={month} className="py-2 px-4 text-right bg-[#5B3427]">{month}</th>
-                          ))}
-                          <th className="py-2 px-4 text-right bg-[#B9975B]/20 border-l border-white/10">Total Shorts</th>
-                          <th className="py-2 px-4 text-right bg-[#007680] border-l border-white/10">Net Position</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#D6D2C4]">
-                        {physicalGridView.data.length > 0 ? physicalGridView.data.map((row) => (
-                          <tr key={row.stack} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                            <td className="py-1.5 px-4 font-medium text-[#007680]">{formatStackName(row.stack)}</td>
-                            <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">
-                                {formatNumber(convertQty(row.theoretical_volume, unit))}
-                            </td>
-                            {physicalGridView.months.map(month => {
-                              const val = row.months[month] || 0;
-                              return (
-                                <td key={month} className="py-1.5 px-4 text-right text-[#968C83]">
-                                  {Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}
-                                </td>
-                              );
-                            })}
-                            <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">
-                                {formatNumber(convertQty(row.total_shorts, unit))}
-                            </td>
-                            <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.net_position >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                              {row.net_position > 0 ? '+' : ''}{formatNumber(convertQty(row.net_position, unit))}
-                            </td>
-                          </tr>
-                        )) : (
-                          <tr><td colSpan={physicalGridView.months.length + 4} className="py-8 text-center text-[#968C83] italic">No physical positions data found.</td></tr>
-                        )}
-                      </tbody>
-                      {physicalGridView.data.length > 0 && (
-                         <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
-                            <tr>
-                               <td className="py-2 px-4">TOTALS</td>
-                               <td className="py-2 px-4 text-right">{formatNumber(convertQty(physicalGridView.kpis.totalTheoretical, unit))}</td>
-                               {physicalGridView.months.map(month => {
-                                  const monthTotal = physicalGridView.data.reduce((sum, row) => sum + (row.months[month] || 0), 0);
-                                  return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
-                               })}
-                               <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(physicalGridView.kpis.totalShorts, unit))}</td>
-                               <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${physicalGridView.kpis.totalNet >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                                  {physicalGridView.kpis.totalNet > 0 ? '+' : ''}{formatNumber(convertQty(physicalGridView.kpis.totalNet, unit))}
-                               </td>
-                            </tr>
-                         </tfoot>
-                      )}
-                    </table>
-                  </div>
-                </Card>
-              ) : (
-                <div className="flex flex-col items-center justify-center p-12 text-[#968C83] border-2 border-dashed border-[#D6D2C4] rounded-xl bg-white/50">
-                    <Box size={48} className="mb-4 opacity-30 text-[#007680]" />
-                    <h3 className="text-lg font-bold text-[#51534a]">Ready to Calculate</h3>
-                    <p className="text-sm mt-2 text-center max-w-md">
-                        Click the "Update Positions" button above to run the calculations for physical blend allocations based on unexecuted contracts.
-                    </p>
-                </div>
-              )}
             </div>
           )}
 
@@ -2377,23 +2110,55 @@ export default function CertificationViewer() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#D6D2C4]">
-                    {tableData.length > 0 ? tableData.map((row) => (
-                      <tr key={row.strategy} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                        <td className="py-1.5 px-4 font-medium text-[#007680]">{row.strategy}</td>
-                        <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
-                        {uniqueMonths.map(month => {
-                          const val = row.shipmentsByMonth[month] || 0;
-                          return <td key={month} className="py-1.5 px-4 text-right text-[#968C83]">{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
-                        })}
-                        <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
-                        <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                          {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
-                        </td>
-                      </tr>
-                    )) : (
+                    {tableData.length > 0 ? tableData.map((row) => {
+                      let runningAvailable = row.available; // Initialize running balance for inline deduction
+                      
+                      return (
+                        <tr key={row.strategy} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
+                          <td className="py-1.5 px-4 font-medium text-[#007680]">{row.strategy}</td>
+                          <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
+                          {uniqueMonths.map(month => {
+                            const val = row.shipmentsByMonth[month] || 0;
+                            let colorClass = "text-[#968C83]";
+                            
+                            if (Math.abs(val) > 0.01) {
+                              // Recursively deduct and assign colors based on availability
+                              if (runningAvailable >= val) {
+                                colorClass = "text-[#007680] font-medium"; // Green (Enough stock)
+                              } else {
+                                colorClass = "text-red-500 font-bold"; // Red (Not enough stock)
+                              }
+                              runningAvailable -= val;
+                            }
+                            
+                            return <td key={month} className={`py-1.5 px-4 text-right ${colorClass}`}>{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
+                          })}
+                          <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
+                          <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                            {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
+                          </td>
+                        </tr>
+                      );
+                    }) : (
                       <tr><td colSpan={uniqueMonths.length + 4} className="py-8 text-center text-[#968C83] italic">No {activeCert} positions found.</td></tr>
                     )}
                   </tbody>
+                  {tableData.length > 0 && (
+                     <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
+                        <tr>
+                           <td className="py-2 px-4">TOTALS</td>
+                           <td className="py-2 px-4 text-right">{formatNumber(convertQty(kpis.stock, unit))}</td>
+                           {uniqueMonths.map(month => {
+                              const monthTotal = tableData.reduce((sum, row) => sum + (row.shipmentsByMonth[month] || 0), 0);
+                              return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
+                           })}
+                           <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(kpis.shorts, unit))}</td>
+                           <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${kpis.net >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                              {kpis.net > 0 ? '+' : ''}{formatNumber(convertQty(kpis.net, unit))}
+                           </td>
+                        </tr>
+                     </tfoot>
+                  )}
                   {tableData.length > 0 && (
                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
                         <tr>
@@ -2421,13 +2186,27 @@ export default function CertificationViewer() {
               <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                   <div>
-                    <div className="whitespace-nowrap text-sm font-bold text-[#51534a]">Certification:</div>
-                    <div className="mt-2 flex min-w-max flex-wrap gap-2">
-                      {TRACKER_FILTERS.map((cert) => (
-                        <Chip key={cert} active={trackerCert === cert} onClick={() => setTrackerCert(cert)}>
-                          {cert}
-                        </Chip>
-                      ))}
+                    <div className="whitespace-nowrap text-sm font-bold text-[#51534a]">View Segment:</div>
+                    <div className="mt-3 flex min-w-max flex-wrap items-center gap-4">
+                      <Chip active={trackerCert === "ALL"} onClick={() => setTrackerCert("ALL")}>ALL</Chip>
+                      
+                      <div className="flex items-center gap-2 bg-[#F5F5F3] p-1.5 rounded-full border border-[#D6D2C4]/50">
+                        <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider pl-2 pr-1">Certificates</span>
+                        {CERTIFICATES_LIST.map((cert) => (
+                          <Chip key={cert} active={trackerCert === cert} onClick={() => setTrackerCert(cert)}>
+                            {cert}
+                          </Chip>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-2 bg-[#F5F5F3] p-1.5 rounded-full border border-[#D6D2C4]/50">
+                        <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider pl-2 pr-1">Projects</span>
+                        {PROJECTS_LIST.map((cert) => (
+                          <Chip key={cert} active={trackerCert === cert} onClick={() => setTrackerCert(cert)}>
+                            {cert}
+                          </Chip>
+                        ))}
+                      </div>
                     </div>
                   </div>
 
@@ -2533,9 +2312,7 @@ export default function CertificationViewer() {
                         <div className="flex justify-between gap-3"><span>Next expiry date</span><span className="font-bold">{trackerExpirySummary.nextExpiryLabel}</span></div>
                         <div className="flex justify-between gap-3"><span>Next expiry status</span><span className="font-bold">{trackerExpirySummary.nextExpiryDays === null ? "—" : trackerExpirySummary.nextExpiryDays < 0 ? "Expired" : `${trackerExpirySummary.nextExpiryDays} days`}</span></div>
                         <div className="flex justify-between gap-3"><span>Average expiry days</span><span className="font-bold">{trackerExpirySummary.averageDays === null ? "—" : `${trackerExpirySummary.averageDays} days`}</span></div>
-                        <div className="rounded-xl bg-white p-3 text-xs text-[#007680]">
-                          Use the certification chips to switch views, or clear the date range to view the full tracker again.
-                        </div>
+                        
                         {trackerExpirySummary.totalWithExpiry === 0 ? (
                           <div className="rounded-xl bg-white p-3 text-xs text-[#968C83]">
                             No expiry dates are available for this view. AAA allocations are tracked separately from the certificate expiry fields.
@@ -2640,11 +2417,11 @@ export default function CertificationViewer() {
                   <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-2 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] transition-colors shadow-sm">
                       <input 
                           type="checkbox" 
-                          checked={showExecutedContracts}
-                          onChange={(e) => setShowExecutedContracts(e.target.checked)}
+                          checked={showDeclaredContracts}
+                          onChange={(e) => setShowDeclaredContracts(e.target.checked)}
                           className="w-4 h-4 text-[#007680] rounded focus:ring-[#007680]"
                       />
-                      <span className="text-sm font-bold text-[#51534a]">Show Executed Contracts</span>
+                      <span className="text-sm font-bold text-[#51534a]">Show All Contracts</span>
                   </label>
               </div>
 
@@ -2668,13 +2445,17 @@ export default function CertificationViewer() {
                       {filteredContracts.length > 0 ? filteredContracts.map((sale) => {
                         const isEditing = editingContractId === sale.id;
                         const displayCerts = parseCerts(sale.certifications);
-                        const isExecuted = bool(sale.executed);
+                        const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
 
                         return (
-                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isExecuted ? 'opacity-60' : ''}`}>
+                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isDeclared ? 'opacity-60' : ''}`}>
                             <td className="py-3 px-4 font-bold text-[#51534a]">
                                 <div className="flex items-center gap-2">
-                                  {isExecuted && <CheckCircle size={14} className="text-[#007680]" />}
+                                  {isDeclared && (
+                                     <span className="flex items-center justify-center text-[#007680]" title="Fully Declared">
+                                         <CheckCircle size={14} />
+                                     </span>
+                                  )}
                                   {sale.contract_number}
                                 </div>
                             </td>
@@ -2791,21 +2572,11 @@ export default function CertificationViewer() {
                                     </div>
                                 ) : (
                                     <div className="flex items-center justify-center gap-2">
-                                        <button 
-                                            onClick={() => toggleContractExecution(sale.id, isExecuted)}
-                                            title={isExecuted ? "Mark as Unexecuted" : "Mark as Executed"}
-                                            className={`p-1.5 rounded transition-colors ${isExecuted ? 'text-[#007680] hover:bg-[#A4DBE8]/30' : 'text-[#968C83] hover:text-[#51534a] hover:bg-[#D6D2C4]/50'}`}
-                                        >
-                                            {isExecuted ? <CheckCircle size={14} /> : <Circle size={14} />}
-                                        </button>
                                         <button onClick={() => handleEditClick(sale)} title="Edit Contract" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
                                             <Pencil size={14} />
                                         </button>
-                                        <button onClick={() => handleEditClick(sale)} title="Allocate Blend" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
-                                            <Combine size={14} />
-                                        </button>
                                         <button 
-                                            onClick={() => handleDeclareCertificates(sale.id)} 
+                                            onClick={() => openDeclarationConfig(sale.id)} 
                                             title="Declare Certificates" 
                                             disabled={isDeclaringCertId === sale.id}
                                             className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors disabled:opacity-50"
@@ -2824,125 +2595,6 @@ export default function CertificationViewer() {
                   </table>
                 </div>
               </Card>
-            </div>
-          )}
-
-          {/* --- BLENDS TAB --- */}
-          {activeTab === 'blends' && (
-            <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
-              <SectionCard title="Blend Directory" subtitle="Only non-zero post stacks are shown in the summary" right={<button onClick={() => setIsAddBlendModalOpen(true)} className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"><Plus size={16} className="mr-2 inline-block" />Create Blend</button>}>
-                <div className="relative mb-4">
-                  <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
-                  <input value={blendSearch} onChange={(e) => setBlendSearch(e.target.value)} placeholder="Search blends by name, client, grade, blend no." className="w-full rounded-lg border border-[#D6D2C4] bg-white py-2 pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-[#007680]" />
-                </div>
-                <div className="max-h-[70vh] space-y-2 overflow-y-auto pr-1">
-                  {visibleBlends.length > 0 ? visibleBlends.map(({ blend, composition, linkedContracts }) => {
-                    const selected = selectedBlendData?.blend.id === blend.id;
-                    const totalComp = composition.reduce((sum, c) => sum + c.value, 0);
-                    return (
-                      <button key={blend.id} type="button" onClick={() => setSelectedBlendId(blend.id)} className={`w-full rounded-2xl border p-4 text-left transition ${selected ? "border-[#007680] bg-[#EAF8FA]" : "border-[#D6D2C4] bg-white hover:border-[#007680]/30"}`}>
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="flex items-center gap-2 font-bold text-[#007680]"><ChevronRight size={14} className={selected ? "rotate-90 transition" : "transition"} />{blend.name}</div>
-                            <div className="mt-1 text-xs text-[#968C83]">{blend.client || "-"} · {blend.blend_no || "-"} · {blend.grade || "-"}</div>
-                            <div className="mt-1 text-xs text-[#51534a]">{blend.cup_profile || "No cup profile"}</div>
-                          </div>
-                          <div className="text-right text-xs">
-                            <div className="font-bold text-[#51534a]">{linkedContracts.length} contracts</div>
-                            <div className="text-[#968C83]">{composition.length} non-zero components</div>
-                            <div className={Math.abs(totalComp - 100) < 0.01 ? "font-bold text-[#007680]" : totalComp > 100 ? "font-bold text-red-600" : "font-bold text-[#B9975B]"}>{totalComp.toFixed(2)}%</div>
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  }) : <div className="py-8 text-center text-sm italic text-[#968C83]">No blends found.</div>}
-                </div>
-              </SectionCard>
-
-              <div className="space-y-4">
-                <SectionCard title="Blend Composition" subtitle="Only non-zero post stacks are shown here">
-                  {selectedBlendData ? (
-                    <div className="space-y-4">
-                      <div className="grid gap-2 text-sm">
-                        <div className="flex justify-between"><span>Blend name</span><span className="font-bold">{selectedBlendData.blend.name}</span></div>
-                        <div className="flex justify-between"><span>Client</span><span className="font-bold">{selectedBlendData.blend.client || "-"}</span></div>
-                        <div className="flex justify-between"><span>Blend no.</span><span className="font-bold">{selectedBlendData.blend.blend_no || "-"}</span></div>
-                        <div className="flex justify-between"><span>Linked contracts</span><span className="font-bold">{selectedBlendData.linkedContracts.length}</span></div>
-                      </div>
-
-                      <div className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
-                        <div className="flex items-center justify-between">
-                          <div className="font-bold text-[#51534a]">Composition total</div>
-                          <div className={Math.abs(selectedBlendData.composition.reduce((s, c) => s + c.value, 0) - 100) < 0.01 ? "font-bold text-[#007680]" : selectedBlendData.composition.reduce((s, c) => s + c.value, 0) > 100 ? "font-bold text-red-600" : "font-bold text-[#B9975B]"}>{selectedBlendData.composition.reduce((s, c) => s + c.value, 0).toFixed(2)}%</div>
-                        </div>
-                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#D6D2C4]"><div className="h-full rounded-full bg-[#007680]" style={{ width: `${Math.min(100, selectedBlendData.composition.reduce((s, c) => s + c.value, 0))}%` }} /></div>
-                        <div className="mt-2 text-xs text-[#968C83]">Only non-zero post stacks are listed.</div>
-                      </div>
-
-                      <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                        {selectedBlendData.composition.length > 0 ? selectedBlendData.composition.map((comp) => (
-                          <div key={comp.key} className="rounded-xl border border-[#D6D2C4] bg-white px-3 py-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div>
-                                <div className="text-sm font-bold text-[#007680]">{comp.label}</div>
-                                <div className="text-xs text-[#968C83]">Post stack</div>
-                              </div>
-                              <div className="text-right"><div className="text-sm font-bold text-[#51534a]">{comp.value.toFixed(2)}%</div></div>
-                            </div>
-                          </div>
-                        )) : <div className="text-sm italic text-[#968C83]">No non-zero post stacks in this blend.</div>}
-                      </div>
-
-                      <div className="rounded-2xl border border-[#D6D2C4] bg-white p-4">
-                        <div className="mb-2 text-xs font-bold uppercase tracking-wider text-[#968C83]">Linked contracts</div>
-                        <div className="max-h-[220px] space-y-2 overflow-y-auto pr-1">
-                          {selectedBlendData.linkedContracts.length > 0 ? selectedBlendData.linkedContracts.map((sale) => (
-                            <div key={sale.id} className="rounded-xl border border-[#D6D2C4] bg-[#F5F5F3] px-3 py-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <div>
-                                  <div className="text-sm font-bold text-[#007680]">{sale.contract_number}</div>
-                                  <div className="text-xs text-[#968C83]">{sale.client || "-"} · {sale.strategy || sale.quality || "Unassigned"}</div>
-                                </div>
-                                <div className="text-xs font-bold text-[#51534a]">{formatQty(asNumber(sale.weight_kilos), unit)} {unitText(unit)}</div>
-                              </div>
-                            </div>
-                          )) : <div className="text-sm italic text-[#968C83]">No contracts allocated to this blend.</div>}
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <button type="button" onClick={() => selectedBlendData && deleteBlend(selectedBlendData.blend.id)} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-bold text-red-600 hover:bg-red-50">Delete Blend</button>
-                        <div className="flex items-center gap-2">
-                          <select value={blendAllocContractId} onChange={(e) => setBlendAllocContractId(e.target.value ? Number(e.target.value) : "")} className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]">
-                            <option value="">Select contract</option>
-                            {sales.filter((s) => !s.blend_id || Number(s.blend_id) !== selectedBlendData.blend.id).map((sale) => <option key={sale.id} value={sale.id}>{sale.contract_number}</option>)}
-                          </select>
-                          <button
-                            onClick={async () => {
-                              if (blendAllocContractId !== "") {
-                                setBlendBusy(true);
-                                try {
-                                  await updateContractBlend(Number(blendAllocContractId), selectedBlendData.blend.id);
-                                  setBlendAllocContractId("");
-                                  alert("Contract successfully allocated to blend.");
-                                } catch {
-                                  alert("Failed to allocate contract to blend.");
-                                } finally {
-                                  setBlendBusy(false);
-                                }
-                              }
-                            }}
-                            className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50"
-                            disabled={blendAllocContractId === "" || blendBusy}
-                          >
-                            Allocate
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : <div className="text-sm italic text-[#968C83]">Select a blend to see its composition.</div>}
-                </SectionCard>
-              </div>
             </div>
           )}
 

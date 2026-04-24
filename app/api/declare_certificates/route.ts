@@ -1,16 +1,6 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/stock_movement_db';
 import * as xlsx from 'xlsx';
-import * as path from 'path';
-import * as fs from 'fs/promises';
-
-// Define the interface for tracker updates to ensure TypeScript safety
-interface TrackerUpdate {
-    id: number;
-    [key: string]: any;
-}
-
-
 
 // GET: Fetch all active declarations grouped by contract and stock lot
 export async function GET(request: Request) {
@@ -50,7 +40,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
     try {
         const body = await request.json();
-        const { sale_contract_id } = body;
+        const { sale_contract_id, regions = [], grades = [] } = body;
 
         if (!sale_contract_id) {
             return NextResponse.json({ error: 'sale_contract_id is required' }, { status: 400 });
@@ -101,104 +91,97 @@ export async function POST(request: Request) {
             rawCerts.map(c => c.toLowerCase().replace(/\s/g, ''))
         ));
 
-        // 2. Initialize the tracking object
         const volume_declaration: Record<string, number> = {};
-        certificates_to_declare.forEach(cert => {
-            volume_declaration[`certificate_${cert}_volume`] = 0;
-        });
 
-        // 3. Fetch Stock
+        // 3. Construct the Dynamic Stock Query (Pushing Filter Logic to SQL Engine)
         let stockQuery = 'SELECT * FROM certified_stock_tracker WHERE 1=1';
+        const queryValues: any[] = [];
+
+        if (regions && regions.length > 0) {
+            stockQuery += ` AND county IN (${regions.map(() => '?').join(',')})`;
+            queryValues.push(...regions);
+        } else {
+            stockQuery += ` AND 1=0`; // If no regions allowed, match nothing
+        }
         
-        // ⚡ OPTIMIZATION: Exclude stock that is BOTH aaa and cafe UNLESS both are declared
+        if (grades && grades.length > 0) {
+            stockQuery += ` AND grade IN (${grades.map(() => '?').join(',')})`;
+            queryValues.push(...grades);
+        } else {
+            stockQuery += ` AND 1=0`; // If no grades allowed, match nothing
+        }
+
+        // Dual-Certification priority optimization
         const requiresBoth = certificates_to_declare.includes('aaa') && certificates_to_declare.includes('cafe');
         if (!requiresBoth) {
             stockQuery += ' AND NOT (aaa_project = 1 AND cafe_certified = 1)';
         }
         
-        const allStocks = await query({ query: stockQuery }) as any[];
-        let certified_purchases_to_declare = allStocks;
+        const allStocks = await query({ query: stockQuery, values: queryValues }) as any[];
 
         // Trackers for bulk database updates
         const trackerUpdatesMap = new Map<number, any>();
         const declarationInsertsMap = new Map<number, any>();
-        
-        // Data tracker for the Excel report
         const excelReportData: Record<string, any[]> = {};
+        
+        const successfulCertificates: string[] = [];
+        const failedCertificates: string[] = [];
 
-        // 4. Core Allocation Loop
+        // 4. Core Transactional Allocation Loop
         for (const cert of certificates_to_declare) {
-            excelReportData[cert] = [];
-
             const isProject = cert === 'aaa' || cert === 'netzero';
             const certField = isProject ? `${cert}_project` : `${cert}_certified`;
             const declaredField = `${cert}_declared_weight`;
             const baseVolumeField = cert === 'aaa' ? 'aaa_volume' : 'purchased_weight';
 
-            // Filter for applicable stock
-            const applicableStocks = certified_purchases_to_declare.filter(s => 
+            // Filter for applicable stock with available capacity
+            const applicableStocks = allStocks.filter(s => 
                 s[certField] == 1 && 
                 parseFloat(s[declaredField] || 0) < parseFloat(s[baseVolumeField] || 0)
             );
 
             // OPTIMIZATION: Prioritize Kenyacof holders first, then Dual-Certified lots (if applicable)
             applicableStocks.sort((a, b) => {
-                // Tier 1: Kenyacof Priority
                 const aHolder = String(a[`${cert}_certificate_holder`] || a['cafe_certificate_holder'] || '').toLowerCase();
                 const bHolder = String(b[`${cert}_certificate_holder`] || b['cafe_certificate_holder'] || '').toLowerCase();
                 
                 const aIsKenyacof = aHolder.includes('kenyacof') ? 1 : 0;
                 const bIsKenyacof = bHolder.includes('kenyacof') ? 1 : 0;
                 
-                if (aIsKenyacof !== bIsKenyacof) {
-                    return bIsKenyacof - aIsKenyacof; // 1 (Kenyacof) comes before 0 (Other)
-                }
+                if (aIsKenyacof !== bIsKenyacof) return bIsKenyacof - aIsKenyacof;
 
-                // Tier 2: Dual-Certification Priority (ONLY if contract requires both)
                 if (requiresBoth) {
                     const aIsDual = (a.aaa_project == 1 && a.cafe_certified == 1) ? 1 : 0;
                     const bIsDual = (b.aaa_project == 1 && b.cafe_certified == 1) ? 1 : 0;
-                    return bIsDual - aIsDual; // 1 (Dual-Certified) comes before 0 (Single-Certified)
+                    return bIsDual - aIsDual; 
                 }
 
-                return 0; // Keep original order if ties
+                return 0;
             });
 
+            // Transactional Dry Run (O(N))
+            let currentAllocated = 0;
+            const tempTrackerUpdates = new Map<number, any>();
+            const tempDeclarationInserts = new Map<number, any>();
+            const tempExcelRows: any[] = [];
+
             for (const stock of applicableStocks) {
-                const requiredVolumeKey = `certificate_${cert}_volume`;
-                
-                if (volume_declaration[requiredVolumeKey] >= volume_to_declare) break;
+                if (currentAllocated >= volume_to_declare) break;
 
                 const baseVolume = parseFloat(stock[baseVolumeField] || 0);
                 const alreadyDeclared = parseFloat(stock[declaredField] || 0);
                 const difference = baseVolume - alreadyDeclared;
 
-                const remainingNeeded = volume_to_declare - volume_declaration[requiredVolumeKey];
+                const remainingNeeded = volume_to_declare - currentAllocated;
                 const amountToAllocate = Math.min(difference, remainingNeeded);
 
-                // Increment Tracking
-                volume_declaration[requiredVolumeKey] += amountToAllocate;
+                currentAllocated += amountToAllocate;
                 
-                // Mutate memory to allow cascading allocation
-                stock[declaredField] = alreadyDeclared + amountToAllocate; 
+                // Track proposed changes
+                tempTrackerUpdates.set(stock.id, { [declaredField]: alreadyDeclared + amountToAllocate });
+                tempDeclarationInserts.set(stock.id, { [declaredField]: amountToAllocate });
 
-                // Queue for Tracker DB Update
-                if (!trackerUpdatesMap.has(stock.id)) {
-                    trackerUpdatesMap.set(stock.id, { id: stock.id });
-                }
-                trackerUpdatesMap.get(stock.id)![declaredField] = stock[declaredField];
-
-                // Queue for Declaration DB Update
-                if (!declarationInsertsMap.has(stock.id)) {
-                    declarationInsertsMap.set(stock.id, { 
-                        sale_contract_id, 
-                        stock_tracker_id: stock.id
-                    });
-                }
-                declarationInsertsMap.get(stock.id)![declaredField] = amountToAllocate;
-
-                // Push to Excel array
-                excelReportData[cert].push({
+                tempExcelRows.push({
                     'Certified Stock ID': stock.id,
                     'Season': stock.season || 'N/A',
                     'Sale Type': stock.sale_type || 'N/A',
@@ -212,14 +195,45 @@ export async function POST(request: Request) {
                     'Grower Code': stock.grower_code || 'N/A',
                     'Base Volume': baseVolume,
                     'Amount Allocated': amountToAllocate,
-                    'Total Declared After': stock[declaredField]
+                    'Total Declared After': alreadyDeclared + amountToAllocate
                 });
+            }
+
+            // Check if Dry Run Succeeded (Account for minor float precision)
+            if (currentAllocated >= volume_to_declare - 0.01) {
+                successfulCertificates.push(cert);
+                volume_declaration[`certificate_${cert}_volume`] = currentAllocated;
+                excelReportData[cert] = tempExcelRows;
+
+                // Merge temporary maps into main transaction maps
+                for (const [id, update] of tempTrackerUpdates.entries()) {
+                    if (!trackerUpdatesMap.has(id)) trackerUpdatesMap.set(id, { id });
+                    Object.assign(trackerUpdatesMap.get(id), update);
+                    
+                    // Update the in-memory array reference so subsequent independent certificates 
+                    // see the latest reality if they check the exact same lot.
+                    const stockRef = allStocks.find(s => s.id === id);
+                    if (stockRef) stockRef[declaredField] = update[declaredField];
+                }
+                
+                for (const [id, insert] of tempDeclarationInserts.entries()) {
+                    if (!declarationInsertsMap.has(id)) declarationInsertsMap.set(id, { sale_contract_id, stock_tracker_id: id });
+                    Object.assign(declarationInsertsMap.get(id), insert);
+                }
+            } else {
+                // Record the exact shortfall amount for the toast message
+                failedCertificates.push(`${cert}:${(volume_to_declare - currentAllocated).toFixed(2)}`);
             }
         }
 
-        // 5. O(1) Database Sync (Batch Updates)
-        
-        // Update: certified_stock_tracker
+        // Check for complete failure
+        if (successfulCertificates.length === 0) {
+             return NextResponse.json({ 
+                 error: `Insufficient volume to fulfill contract. The requested certificates have been skipped. Allocation aborted.` 
+             }, { status: 400 });
+        }
+
+        // 5. O(1) Database Sync (Batch Updates for Successful Certificates Only)
         const trackerValues = Array.from(trackerUpdatesMap.values());
         if (trackerValues.length > 0) {
             for (const update of trackerValues) {
@@ -234,10 +248,8 @@ export async function POST(request: Request) {
             }
         }
 
-        // Insert/Update: sale_contract_stock_declaration
         const declValues = Array.from(declarationInsertsMap.values());
         if (declValues.length > 0) {
-            // Build dynamic columns based on actual certificates modified
             const allPossibleCols = ['rfa_declared_weight', 'eudr_declared_weight', 'cafe_declared_weight', 'impact_declared_weight', 'aaa_declared_weight', 'netzero_declared_weight'];
             
             for (const decl of declValues) {
@@ -271,13 +283,19 @@ export async function POST(request: Request) {
             }
         }
 
-        // 6. Generate Excel File
+        // Update certs_declared status based on success
+        const isFullyDeclared = successfulCertificates.length === certificates_to_declare.length && certificates_to_declare.length > 0;
+        await query({
+            query: `UPDATE sale_contract SET certs_declared = ? WHERE id = ?`,
+            values: [isFullyDeclared ? 1 : 0, sale_contract_id]
+        });
+
+        // 6. Generate Excel File (For Successful Certs Only)
         const workbook = xlsx.utils.book_new();
 
         Object.keys(excelReportData).forEach(cert => {
             const data = excelReportData[cert];
-            const wsData = data.length > 0 ? data : [{'Status': `No allocation needed or available for ${cert}`}];
-            const worksheet = xlsx.utils.json_to_sheet(wsData);
+            const worksheet = xlsx.utils.json_to_sheet(data);
             
             worksheet['!cols'] = [
                 { wch: 18 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 25 }, 
@@ -288,7 +306,6 @@ export async function POST(request: Request) {
             xlsx.utils.book_append_sheet(workbook, worksheet, cert.toUpperCase());
         });
 
-        // 7. O(1) Memory Generation: Generate Buffer directly in memory
         const fileName = `Declaration_Contract_${sale_contract_id}_${Date.now()}.xlsx`;
         const fileBuffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
 
@@ -297,7 +314,8 @@ export async function POST(request: Request) {
             headers: {
                 'Content-Disposition': `attachment; filename="${fileName}"`,
                 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'X-Allocation-Data': JSON.stringify(volume_declaration)
+                'X-Allocation-Data': JSON.stringify(volume_declaration),
+                'X-Failed-Certificates': failedCertificates.join(',')
             }
         });
 
@@ -335,7 +353,13 @@ export async function DELETE(request: Request) {
 
         // 2. Delete the declaration records
         await query({
-            query: `e_conDELETE FROM saltract_stock_declaration WHERE sale_contract_id = ?`,
+            query: `DELETE FROM sale_contract_stock_declaration WHERE sale_contract_id = ?`,
+            values: [id]
+        });
+
+        // 3. Reset certs_declared status
+        await query({
+            query: `UPDATE sale_contract SET certs_declared = 0 WHERE id = ?`,
             values: [id]
         });
 
@@ -345,5 +369,3 @@ export async function DELETE(request: Request) {
         return NextResponse.json({ error: 'Failed to delete declaration' }, { status: 500 });
     }
 }
-
-

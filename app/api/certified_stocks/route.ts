@@ -39,7 +39,8 @@ export async function GET() {
                 aaa_declared_weight,
                 netzero_project,
                 netzero_declared_weight,
-                fully_declared
+                fully_declared,
+                recorded_date
             FROM certified_stock_tracker
         `;
         

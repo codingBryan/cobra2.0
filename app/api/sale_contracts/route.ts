@@ -14,6 +14,7 @@ export async function GET() {
                 sc.shipping_date,
                 sc.quality,
                 sc.executed,
+                sc.certs_declared,
                 MAX(cst.strategy) as strategy,
                 JSON_ARRAYAGG(c.certificate) as certifications
             FROM sale_contract sc

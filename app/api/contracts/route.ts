@@ -19,6 +19,7 @@ export async function GET() {
                 MAX(sc.quality) as quality,
                 MAX(sc.grade) as grade,
                 MAX(sc.blend_id) as blend_id,
+                MAX(sc.certs_declared) as certs_declared,
                 MAX(sc.executed) as executed,
                 MAX(b.name) as blend_name,
                 MAX(cst.strategy) as strategy,
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
 
         // O(1) Defensive casting and certs_declared synchronization
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
-        const certsDeclared = uniqueCerts.length > 0 ? 1 : 0;
+        const certsDeclared = 0;
 
         const insertSaleQuery = `
             INSERT INTO sale_contract (contract_number, client, weight_kilos, quality, grade, shipping_date, certs_declared, executed)
@@ -132,7 +133,7 @@ export async function PUT(request: Request) {
         
         // Strict fallback logic to guarantee processing
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
-        const certsDeclared = uniqueCerts.length > 0 ? 1 : 0;
+        const certsDeclared = 0;
 
         await query({
             query: `UPDATE sale_contract SET quality = ?, grade = ?, blend_id = ?, certs_declared = ? WHERE id = ?`,
