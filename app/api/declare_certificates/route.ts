@@ -23,6 +23,7 @@ export async function GET(request: Request) {
                 scsd.eudr_declared_weight,
                 scsd.cafe_declared_weight,
                 scsd.impact_declared_weight,
+                scsd.aaa_rs_declared_weight,
                 scsd.aaa_declared_weight,
                 scsd.netzero_declared_weight
             FROM sale_contract sc
@@ -57,6 +58,7 @@ export async function POST(request: Request) {
                     cst.cafe_declared_weight = GREATEST(0, COALESCE(cst.cafe_declared_weight, 0) - COALESCE(scsd.cafe_declared_weight, 0)),
                     cst.impact_declared_weight = GREATEST(0, COALESCE(cst.impact_declared_weight, 0) - COALESCE(scsd.impact_declared_weight, 0)),
                     cst.aaa_declared_weight = GREATEST(0, COALESCE(cst.aaa_declared_weight, 0) - COALESCE(scsd.aaa_declared_weight, 0)),
+                    cst.aaa_rs_declared_weight = GREATEST(0, COALESCE(cst.aaa_rs_declared_weight, 0) - COALESCE(scsd.aaa_rs_declared_weight, 0)),
                     cst.netzero_declared_weight = GREATEST(0, COALESCE(cst.netzero_declared_weight, 0) - COALESCE(scsd.netzero_declared_weight, 0))
                 WHERE scsd.sale_contract_id = ?
             `,
@@ -129,16 +131,51 @@ export async function POST(request: Request) {
 
         // 4. Core Transactional Allocation Loop
         for (const cert of certificates_to_declare) {
-            const isProject = cert === 'aaa' || cert === 'netzero';
-            const certField = isProject ? `${cert}_project` : `${cert}_certified`;
-            const declaredField = `${cert}_declared_weight`;
-            const baseVolumeField = cert === 'aaa' ? 'aaa_volume' : 'purchased_weight';
+            
+            // ⚡ O(1) EXPLICIT COLUMN MAPPING
+            let certField = '';
+            let declaredField = '';
+            let baseVolumeField = 'purchased_weight';
+
+            switch (cert) {
+                case 'aaa':
+                    certField = 'aaa_project';
+                    declaredField = 'aaa_declared_weight';
+                    baseVolumeField = 'aaa_volume';
+                    break;
+                case 'aaa-rs':
+                case 'aaars':
+                    certField = 'aaa_rs_volume'; // Identity purely reliant on volume presence
+                    declaredField = 'aaa_rs_declared_weight';
+                    baseVolumeField = 'aaa_rs_volume';
+                    break;
+                case 'netzero':
+                    certField = 'netzero_project';
+                    declaredField = 'netzero_declared_weight';
+                    break;
+                default:
+                    // Fallback for standard certs (rfa, cafe, eudr, impact)
+                    certField = `${cert}_certified`;
+                    declaredField = `${cert}_declared_weight`;
+                    break;
+            }
 
             // Filter for applicable stock with available capacity
-            const applicableStocks = allStocks.filter(s => 
-                s[certField] == 1 && 
-                parseFloat(s[declaredField] || 0) < parseFloat(s[baseVolumeField] || 0)
-            );
+            const applicableStocks = allStocks.filter(s => {
+                const baseVol = parseFloat(s[baseVolumeField] || 0);
+                const declaredVol = parseFloat(s[declaredField] || 0);
+                
+                // 1. O(1) FAST FILTER: MUST HAVE AVAILABLE CAPACITY
+                if (declaredVol >= baseVol) return false;
+                
+                // 2. IDENTITY CHECK
+                if (cert === 'aaa-rs' || cert === 'aaars') {
+                    return baseVol > 0; // Purely checks if aaa_rs_volume > 0
+                }
+                
+                // Normal flags check
+                return s[certField] == 1;
+            });
 
             // OPTIMIZATION: Prioritize Kenyacof holders first, then Dual-Certified lots (if applicable)
             applicableStocks.sort((a, b) => {
@@ -250,7 +287,7 @@ export async function POST(request: Request) {
 
         const declValues = Array.from(declarationInsertsMap.values());
         if (declValues.length > 0) {
-            const allPossibleCols = ['rfa_declared_weight', 'eudr_declared_weight', 'cafe_declared_weight', 'impact_declared_weight', 'aaa_declared_weight', 'netzero_declared_weight'];
+            const allPossibleCols = ['rfa_declared_weight', 'eudr_declared_weight', 'cafe_declared_weight', 'impact_declared_weight', 'aaa_declared_weight', 'aaa_rs_declared_weight', 'netzero_declared_weight'];
             
             for (const decl of declValues) {
                 const insertCols = ['sale_contract_id', 'stock_tracker_id'];
@@ -345,6 +382,7 @@ export async function DELETE(request: Request) {
                     cst.cafe_declared_weight = GREATEST(0, COALESCE(cst.cafe_declared_weight, 0) - COALESCE(scsd.cafe_declared_weight, 0)),
                     cst.impact_declared_weight = GREATEST(0, COALESCE(cst.impact_declared_weight, 0) - COALESCE(scsd.impact_declared_weight, 0)),
                     cst.aaa_declared_weight = GREATEST(0, COALESCE(cst.aaa_declared_weight, 0) - COALESCE(scsd.aaa_declared_weight, 0)),
+                    cst.aaa_rs_declared_weight = GREATEST(0, COALESCE(cst.aaa_rs_declared_weight, 0) - COALESCE(scsd.aaa_rs_declared_weight, 0)),
                     cst.netzero_declared_weight = GREATEST(0, COALESCE(cst.netzero_declared_weight, 0) - COALESCE(scsd.netzero_declared_weight, 0))
                 WHERE scsd.sale_contract_id = ?
             `,

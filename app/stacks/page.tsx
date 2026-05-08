@@ -22,7 +22,7 @@ import {
   FileSpreadsheet,
   File as FileIcon,
   Trash2,
-  Ban, // Icon for Blocked Lots
+  Ban, 
   Filter,
   DollarSign,
   Pencil,
@@ -31,7 +31,6 @@ import {
   CalendarClock
 } from 'lucide-react';
 import { Batch, LastUpdateDates, SaleRecord, StrategyAggregate } from '@/custom_utilities/custom_types';
-import * as XLSX from 'xlsx';
 import { useRouter } from 'next/navigation';
 
 
@@ -149,10 +148,9 @@ function convertDateToTradeMonth(dateValue: string | number | null): string | nu
     let date: Date;
 
     if (typeof dateValue === 'number') {
-        try {
-            const parsedDate = XLSX.SSF.parse_date_code(dateValue);
-            date = new Date(parsedDate.y, parsedDate.m - 1, parsedDate.d);
-        } catch (e) { return null; }
+        // Highly Optimized: Native JS math instead of heavy XLSX.SSF processing
+        const excelEpoch = new Date(1899, 11, 30);
+        date = new Date(excelEpoch.getTime() + Math.round(dateValue * 86400000));
     } else if (typeof dateValue === 'string') {
         const parts = dateValue.split('.');
         if (parts.length < 3) return null;
@@ -177,7 +175,7 @@ function readFileAsArrayBuffer(file: File): Promise<Uint8Array> {
     });
 }
 
-function processPurchaseFileContent(excelFileArrayBuffer: Uint8Array, fileName: string): ProcessedPurchaseFile {
+function processPurchaseFileContent(excelFileArrayBuffer: Uint8Array, fileName: string, XLSX: any): ProcessedPurchaseFile {
     const workbook = XLSX.read(excelFileArrayBuffer, { type: 'array' });
     const processedFile: ProcessedPurchaseFile = { ds_sheets: [], database_sheet: null };
 
@@ -254,7 +252,7 @@ function processPurchaseFileContent(excelFileArrayBuffer: Uint8Array, fileName: 
     return processedFile;
 }
 
-function processCatalogueSummary(excelFileArrayBuffer: Uint8Array, fileName: string, processedPurchaseData: ProcessedPurchaseFile): CatalogueRecord[] {
+function processCatalogueSummary(excelFileArrayBuffer: Uint8Array, fileName: string, processedPurchaseData: ProcessedPurchaseFile, XLSX: any): CatalogueRecord[] {
     const workbook = XLSX.read(excelFileArrayBuffer, { type: 'array' });
     const records: CatalogueRecord[] = [];
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -263,7 +261,7 @@ function processCatalogueSummary(excelFileArrayBuffer: Uint8Array, fileName: str
     const rawData: any[] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: null });
     if (rawData.length === 0) return records;
 
-    const headerRow = (rawData[0] as string[]).map(h => (h && typeof h === 'string' ? h.trim() : h));
+    const headerRow = (rawData[0] as string[]).map((h: string) => (h && typeof h === 'string' ? h.trim() : h));
     const dataRows = rawData.slice(1);
     const colIndices: any = {};
     const COL_MAP: any = {
@@ -669,6 +667,8 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
     setIsProcessingCatalogue(true);
 
     try {
+        // HIGHLY OPTIMIZED: Dynamically load the heavy 1MB+ XLSX library ONLY when needed
+        const XLSX = await import('xlsx');
         let processedPurchaseData: ProcessedPurchaseFile = { ds_sheets: [], database_sheet: null };
 
         // 1. Process Purchase Sheets
@@ -677,7 +677,7 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
                 if (!file.name.match(/\.xls(x)?$/)) continue;
                 try {
                     const buffer = await readFileAsArrayBuffer(file);
-                    const fileData = processPurchaseFileContent(buffer, file.name);
+                    const fileData = processPurchaseFileContent(buffer, file.name, XLSX);
                     processedPurchaseData.ds_sheets.push(...fileData.ds_sheets);
                     if (!processedPurchaseData.database_sheet && fileData.database_sheet) {
                         processedPurchaseData.database_sheet = fileData.database_sheet;
@@ -691,7 +691,7 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
         if (catalogueFiles.length > 0) {
             for (const file of catalogueFiles) {
                 const buffer = await readFileAsArrayBuffer(file);
-                const fileRecords = processCatalogueSummary(buffer, file.name, processedPurchaseData);
+                const fileRecords = processCatalogueSummary(buffer, file.name, processedPurchaseData, XLSX);
                 recordsToInsert.push(...fileRecords);
             }
         }
@@ -763,11 +763,6 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
         formData.append("summary_id", summary_id.toString());
         formData.append("targetDate", since_date.toISOString());
         
-        // formData.append("last_adjustment_date", last_update_dates.last_sta.toString());      
-        // formData.append("last_outbound_date", last_update_dates.last_outbound.toString());  
-           
-        // formData.append("last_processing_date", last_update_dates.last_process.toString());      
- 
         if (last_update_dates.last_sta) {
           formData.append("last_adjustment_date", last_update_dates.last_sta.toString()); 
         } 
@@ -1247,55 +1242,48 @@ export default function EffectivePriceTool() {
     loadData();
   }, []);
   
-  // Data Processing (Aggregates)
+  // Highly Optimized O(N) Single-Pass Memory Mapping
   const processedData = useMemo(() => {
-    const grouped: Record<string, ExtendedBatch[]> = {};
-    
-    activeBatches.forEach(item => {
-      // --- OPTIMIZATION: STRICT ACTIVE FILTER ---
-      if (item.status !== 'active') return;
+    const stratMap = new Map<string, any>();
 
-      const strat = item.strategy || 'Unassigned';
-      if (!grouped[strat]) grouped[strat] = [];
-      grouped[strat].push(item);
-    });
+    for (let i = 0; i < activeBatches.length; i++) {
+        const b = activeBatches[i];
+        if (b.status !== 'active') continue;
 
-    const aggregates: StrategyAggregate[] = Object.keys(grouped).map(strategyName => {
-      const batches = grouped[strategyName];
-      const totalKg = batches.reduce((sum, b) => sum + b.quantityKg, 0);
-      
-      let totalValueUSClb = 0;
-      let totalHedgeVal = 0;
-      let totalPricedKg = 0; // NEW: Weight for batches that have a valid price
-
-      batches.forEach(b => {
-        const valUSClb = toUSClb(b.outrightPrice50kg);
+        const stratName = b.strategy || 'Unassigned';
+        let agg = stratMap.get(stratName);
         
-        // Only include in average price calculation if price exists and is > 0
-        if (b.outrightPrice50kg && b.outrightPrice50kg > 0) {
-            totalValueUSClb += valUSClb * b.quantityKg;
-            totalHedgeVal += b.hedgeLevelUSClb * b.quantityKg;
-            totalPricedKg += b.quantityKg;
+        if (!agg) {
+            agg = { name: stratName, totalKg: 0, batches: [], _valUSC: 0, _hedgeUSC: 0, _pricedKg: 0 };
+            stratMap.set(stratName, agg);
         }
-      });
 
-      // Divide by totalPricedKg instead of totalKg for price averages
-      // This prevents unpriced batches from dragging the average down to 0
-      const wAvgOutrightUSClb = totalPricedKg ? totalValueUSClb / totalPricedKg : 0;
-      const wAvgHedgeUSClb = totalPricedKg ? totalHedgeVal / totalPricedKg : 0;
-      
-      const wAvgDiffUSClb = wAvgOutrightUSClb - wAvgHedgeUSClb;
-      const wAvgOutright50kg = to50kg(wAvgOutrightUSClb);
+        agg.batches.push(b);
+        agg.totalKg += b.quantityKg;
 
-      return {
-        name: strategyName,
-        totalKg, 
-        wAvgOutright50kg,
-        wAvgHedgeUSClb,
-        wAvgDiffUSClb,
-        batches: batches as Batch[] 
-      };
-    });
+        if (b.outrightPrice50kg && b.outrightPrice50kg > 0) {
+            const valUSClb = (b.outrightPrice50kg / 50 / KG_TO_LB) * 100;
+            agg._valUSC += valUSClb * b.quantityKg;
+            agg._hedgeUSC += b.hedgeLevelUSClb * b.quantityKg;
+            agg._pricedKg += b.quantityKg;
+        }
+    }
+
+    const aggregates: StrategyAggregate[] = [];
+    for (const agg of stratMap.values()) {
+        const pricedKg = agg._pricedKg;
+        const wAvgOutrightUSClb = pricedKg ? agg._valUSC / pricedKg : 0;
+        const wAvgHedgeUSClb = pricedKg ? agg._hedgeUSC / pricedKg : 0;
+
+        aggregates.push({
+            name: agg.name,
+            totalKg: agg.totalKg,
+            batches: agg.batches,
+            wAvgOutright50kg: wAvgOutrightUSClb ? (wAvgOutrightUSClb / 100 * KG_TO_LB) * 50 : 0,
+            wAvgHedgeUSClb: wAvgHedgeUSClb,
+            wAvgDiffUSClb: wAvgOutrightUSClb - wAvgHedgeUSClb
+        });
+    }
 
     return aggregates;
   }, [activeBatches]);
@@ -2610,22 +2598,24 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
     const [loading, setLoading] = useState(true);
     // State for editing
     const [editingId, setEditingId] = useState<string | null>(null);
-    // State for the edited value
     const [editedDiff, setEditedDiff] = useState<number | string>('');
 
     const [selectedClients, setSelectedClients] = useState<string[]>([]);
     const [selectedSalesRefs, setSelectedSalesRefs] = useState<string[]>([]);
     const [selectedStrategies, setSelectedStrategies] = useState<string[]>([]); 
     
-    // New Date Range State
+    // Date Range State
     const [startDate, setStartDate] = useState<string>('');
     const [endDate, setEndDate] = useState<string>('');
+    const [showUnhedgeable, setShowUnhedgeable] = useState(false);
     
-    // Manual Fobbing Cost
-    const [fobbingCost, setFobbingCost] = useState<number>(0);
-
     // Sorting State
     const [sortConfig, setSortConfig] = useState<{ key: keyof SaleRecord | 'pnlTotal' | null, direction: 'asc' | 'desc' }>({ key: 'date', direction: 'desc' });
+
+    // Financial Config States
+    const [globalVars, setGlobalVars] = useState({ financingRate: 0, financedCostPct: 0, fixedFobbing: 0 });
+    const [editVars, setEditVars] = useState({ financingRate: 0, financedCostPct: 0, fixedFobbing: 0 });
+    const [isEditingVars, setIsEditingVars] = useState(false);
 
     // Fetch Data
     const fetchSales = async () => {
@@ -2644,34 +2634,89 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         }
     };
 
+    const fetchVariables = async () => {
+        try {
+            const res = await fetch('/api/variables');
+            if (res.ok) {
+                const data = await res.json();
+                let fRate = 0, fCost = 0, fFob = 0;
+                data.forEach((v: any) => {
+                    if (v.name === 'Financing Rate per Annum') fRate = Number(v.value);
+                    if (v.name === 'Financed cost percentage') fCost = Number(v.value);
+                    if (v.name === 'Fixed Fobbing Costs') fFob = Number(v.value);
+                });
+                const vars = { financingRate: fRate, financedCostPct: fCost, fixedFobbing: fFob };
+                setGlobalVars(vars);
+                setEditVars(vars);
+            }
+        } catch (e) { console.error(e); }
+    };
+
     useEffect(() => {
         fetchSales();
+        fetchVariables();
     }, []);
+
+    const handleSaveVariables = async () => {
+        try {
+            const res = await fetch('/api/variables', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(editVars)
+            });
+            if (res.ok) {
+                setGlobalVars(editVars);
+                setIsEditingVars(false);
+            } else {
+                alert("Failed to update variables");
+            }
+        } catch (e) {
+            alert("Error saving variables");
+        }
+    };
 
     // Extract unique options from loaded data
     const clients = useMemo(() => Array.from(new Set(salesData.map(s => s.client))), [salesData]);
-    const salesRefs = useMemo(() => Array.from(new Set(salesData.map(s => s.contract_number))), [salesData]); // Changed to contract_number (sale_ref)
+    const salesRefs = useMemo(() => Array.from(new Set(salesData.map(s => s.contract_number))), [salesData]);
     const strategies = useMemo(() => Array.from(new Set(salesData.map(s => s.strategy))), [salesData]);
 
     const filteredData = useMemo(() => {
+        const startTimestamp = startDate ? new Date(startDate).getTime() : null;
+        const endTimestamp = endDate ? new Date(endDate).getTime() : null;
+
         return salesData.filter(item => {
-            const matchClient = selectedClients.length === 0 || selectedClients.includes(item.client);
-            const matchSalesRef = selectedSalesRefs.length === 0 || selectedSalesRefs.includes(item.contract_number);
-            const matchStrat = selectedStrategies.length === 0 || selectedStrategies.includes(item.strategy);
+            const h = (item as any).hedgeable;
             
-            // Date Filter Logic
-            const itemDate = new Date(item.date);
-            let matchDate = true;
-            if (startDate) {
-                matchDate = matchDate && itemDate >= new Date(startDate);
-            }
-            if (endDate) {
-                matchDate = matchDate && itemDate <= new Date(endDate);
+            // OPTIMIZED: Hyper-resilient O(1) check. Safely handles standard primitive types, 
+            // Node.js MySQL Buffers {type: 'Buffer', data: [1]}, and raw bit strings.
+            const isHedgeable = 
+                h === 1 || 
+                h === '1' || 
+                h === true || 
+                h === 'true' || 
+                (h && typeof h === 'object' && h.data && h.data[0] === 1) ||
+                (typeof h === 'string' && h.charCodeAt(0) === 1);
+            
+            // Hide record IF the toggle is OFF AND the record is NOT hedgeable
+            if (!showUnhedgeable && !isHedgeable) {
+                return false;
             }
 
-            return matchClient && matchSalesRef && matchStrat && matchDate;
+            // OPTIMIZED: Sequential early returns prevents unnecessary array scanning and date parsing
+            if (selectedClients.length > 0 && !selectedClients.includes(item.client)) return false;
+            if (selectedSalesRefs.length > 0 && !selectedSalesRefs.includes(item.contract_number)) return false;
+            if (selectedStrategies.length > 0 && !selectedStrategies.includes(item.strategy)) return false;
+
+            // OPTIMIZED: Date validation using pre-computed timestamps outside the O(n) filter loop
+            if (startTimestamp || endTimestamp) {
+                const itemTime = new Date(item.date).getTime();
+                if (startTimestamp && itemTime < startTimestamp) return false;
+                if (endTimestamp && itemTime > endTimestamp) return false;
+            }
+
+            return true;
         });
-    }, [salesData, selectedClients, selectedSalesRefs, selectedStrategies, startDate, endDate]);
+    }, [salesData, selectedClients, selectedSalesRefs, selectedStrategies, startDate, endDate, showUnhedgeable]);
 
     // Sorting Logic
     const sortedData = useMemo(() => {
@@ -2681,34 +2726,26 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                 let aValue: any = a[sortConfig.key as keyof SaleRecord];
                 let bValue: any = b[sortConfig.key as keyof SaleRecord];
 
-                // Handle calculated P&L sorting dynamically based on fobbing cost
                 if (sortConfig.key === 'pnl_total') {
-                    // Margin = Sale Diff - Cost Diff - Fobbing
-                    const marginA = (a.is_sale_diff_null ? 0 : a.sale_fob_diff) - a.cost_diff - fobbingCost;
-                    const marginB = (b.is_sale_diff_null ? 0 : b.sale_fob_diff) - b.cost_diff - fobbingCost;
-                    // Note: This logic uses the dynamic margin, effectively overriding the pnl_total from backend for sorting purposes
+                    const marginA = (a.is_sale_diff_null ? 0 : a.sale_fob_diff) - a.cost_diff - (a.fixed_fobbing + a.dynamic_fobbing);
+                    const marginB = (b.is_sale_diff_null ? 0 : b.sale_fob_diff) - b.cost_diff - (b.fixed_fobbing + b.dynamic_fobbing);
                     aValue = (marginA / 100) * (a.quantity * KG_TO_LB);
                     bValue = (marginB / 100) * (b.quantity * KG_TO_LB);
                 } 
-                // Handle Margin sorting dynamically
                 else if (sortConfig.key === 'pnl_per_lb') {
                      const valA = a.is_sale_diff_null ? 0 : a.sale_fob_diff;
                      const valB = b.is_sale_diff_null ? 0 : b.sale_fob_diff;
-                     aValue = valA - a.cost_diff - fobbingCost;
-                     bValue = valB - b.cost_diff - fobbingCost;
+                     aValue = valA - a.cost_diff - (a.fixed_fobbing + a.dynamic_fobbing);
+                     bValue = valB - b.cost_diff - (b.fixed_fobbing + b.dynamic_fobbing);
                 }
 
-                if (aValue < bValue) {
-                    return sortConfig.direction === 'asc' ? -1 : 1;
-                }
-                if (aValue > bValue) {
-                    return sortConfig.direction === 'asc' ? 1 : -1;
-                }
+                if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+                if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
                 return 0;
             });
         }
         return sortableItems;
-    }, [filteredData, sortConfig, fobbingCost]);
+    }, [filteredData, sortConfig]);
 
     const requestSort = (key: keyof SaleRecord | 'pnlTotal') => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -2725,10 +2762,9 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         return null;
     };
     
-    // Handle Edit Start
     const handleEditClick = (record: SaleRecord) => {
         if (editingId === record.id) {
-            setEditingId(null); // Cancel
+            setEditingId(null);
             setEditedDiff('');
         } else {
             setEditingId(record.id);
@@ -2736,7 +2772,6 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         }
     };
 
-    // Handle Save Logic
     const handleSaveSaleDiff = async (id: string) => {
         if (editedDiff === '' || isNaN(Number(editedDiff))) {
             alert("Please enter a valid number for Sale Differential");
@@ -2746,16 +2781,13 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         try {
             const response = await fetch('/api/sale_records', {
                 method: 'PUT',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id, sale_differential: Number(editedDiff) }),
             });
 
             if (response.ok) {
-                // Success - Refresh Data or Update Locally
                 setEditingId(null);
-                fetchSales(); // Reload data to reflect changes and re-calcs
+                fetchSales(); 
             } else {
                 alert("Failed to update sale differential");
             }
@@ -2765,7 +2797,6 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         }
     };
 
-    // Aggregate KPI
     const summary = useMemo(() => {
         let totalKg = 0;
         let totalPnLUSD = 0;
@@ -2774,15 +2805,9 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         filteredData.forEach(item => {
             totalKg += item.quantity;
             
-            // Re-calculate P&L with dynamic Fobbing Cost
-            // Margin = Sale Diff - Cost Diff - Fobbing
-            // If sale diff is null, treat sale diff as 0 for calculation (or margin as 0 depending on business logic)
-            // Here assuming sale_fob_diff is 0 if null based on mapper
-            
-            // --- NEW: Only calc margin/pnl if NOT NULL ---
             if (!item.is_sale_diff_null) {
                  const saleDiff = item.sale_fob_diff;
-                 const margin = saleDiff - item.cost_diff - fobbingCost;
+                 const margin = saleDiff - item.cost_diff - (item.fixed_fobbing + item.dynamic_fobbing);
                  const pnlUSD = (margin / 100) * (item.quantity * KG_TO_LB);
                  
                  totalPnLUSD += pnlUSD;
@@ -2793,7 +2818,7 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
         const wAvgMargin = totalKg ? totalMarginVal / totalKg : 0;
 
         return { totalKg, totalPnLUSD, wAvgMargin, count: filteredData.length };
-    }, [filteredData, fobbingCost]);
+    }, [filteredData]);
 
     if (loading) {
         return <div className="p-8 text-center text-[#968C83]">Loading Sales Data...</div>;
@@ -2817,16 +2842,65 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                         <span className="text-[#968C83]">-</span>
                         <input type="date" className="bg-white border border-[#D6D2C4] rounded px-2 py-1 text-xs outline-none focus:border-[#007680] text-[#51534a] h-8" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
                     </div>
-                    <div className="flex items-center gap-2 border-l border-[#D6D2C4] pl-4 w-full md:w-auto">
-                        <span className="text-xs text-[#968C83] uppercase font-bold whitespace-nowrap">Fobbing (c/lb):</span>
-                        <div className="flex items-center bg-white border border-[#D6D2C4] rounded px-2 py-1 w-24 h-8">
-                            <DollarSign size={10} className="text-[#968C83]" />
-                            <input type="number" className="w-full text-xs outline-none text-[#51534a] font-medium text-right" placeholder="0.00" value={fobbingCost || ''} onChange={(e) => setFobbingCost(parseFloat(e.target.value) || 0)} />
-                        </div>
-                    </div>
                 </div>
                 <div className="text-xs text-[#968C83] whitespace-nowrap self-end xl:self-center">
                     Showing {summary.count} records
+                </div>
+            </Card>
+
+            {/* Financial Config Card */}
+            <Card className="p-4 flex items-center justify-between border border-[#007680]/20 bg-white">
+                <div className="flex flex-col md:flex-row md:items-center gap-4 md:gap-8 w-full">
+                    <div className="text-xs text-[#968C83] uppercase font-bold tracking-wider flex items-center gap-2 shrink-0">
+                        <DollarSign size={14} className="text-[#007680]"/> Financial Configuration
+                    </div>
+                    
+                    <div className="flex flex-wrap items-center gap-6 flex-1">
+                        <div className="flex items-center gap-2">
+                            <span className="text-[10px] uppercase text-[#968C83] font-bold">Financing Rate:</span>
+                            {isEditingVars ? (
+                                <input type="number" className="w-16 border border-[#007680] rounded px-1.5 py-0.5 text-sm font-bold text-[#007680] outline-none bg-[#007680]/5" value={editVars.financingRate} onChange={e => setEditVars({...editVars, financingRate: parseFloat(e.target.value) || 0})} />
+                            ) : (
+                                <span className="font-bold text-[#007680] text-sm">{globalVars.financingRate}%</span>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[10px] uppercase text-[#968C83] font-bold">Financed Cost:</span>
+                            {isEditingVars ? (
+                                <input type="number" className="w-16 border border-[#007680] rounded px-1.5 py-0.5 text-sm font-bold text-[#007680] outline-none bg-[#007680]/5" value={editVars.financedCostPct} onChange={e => setEditVars({...editVars, financedCostPct: parseFloat(e.target.value) || 0})} />
+                            ) : (
+                                <span className="font-bold text-[#007680] text-sm">{globalVars.financedCostPct}%</span>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-[10px] uppercase text-[#968C83] font-bold">Fixed Fobbing:</span>
+                            {isEditingVars ? (
+                                <input type="number" className="w-16 border border-[#007680] rounded px-1.5 py-0.5 text-sm font-bold text-[#007680] outline-none bg-[#007680]/5" value={editVars.fixedFobbing} onChange={e => setEditVars({...editVars, fixedFobbing: parseFloat(e.target.value) || 0})} />
+                            ) : (
+                                <span className="font-bold text-[#007680] text-sm">{globalVars.fixedFobbing} c/lb</span>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="shrink-0 flex items-center justify-end gap-3">
+                        {isEditingVars ? (
+                            <div className="flex items-center gap-2">
+                                <button onClick={() => { setIsEditingVars(false); setEditVars(globalVars); }} className="text-xs px-3 py-1.5 rounded bg-[#F5F5F3] text-[#51534a] font-bold hover:bg-[#D6D2C4] transition-colors">Cancel</button>
+                                <button onClick={handleSaveVariables} className="text-xs px-3 py-1.5 rounded bg-[#007680] text-white font-bold hover:bg-[#007680]/90 shadow-sm transition-colors flex items-center gap-1"><Check size={12}/> Save</button>
+                            </div>
+                        ) : (
+                            <button onClick={() => setIsEditingVars(true)} className="text-xs px-3 py-1.5 rounded bg-[#F5F5F3] text-[#51534a] font-bold hover:bg-[#D6D2C4] transition-colors flex items-center gap-1 border border-[#D6D2C4]"><Pencil size={12}/> Edit Config</button>
+                        )}
+                        
+                        {/* Unhedgeable Records Toggle */}
+                        <div className="flex items-center gap-2 border-l border-[#D6D2C4] pl-3">
+                            <span className="text-[10px] uppercase text-[#968C83] font-bold">Include Unhedgeable</span>
+                            <label className="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" className="sr-only peer" checked={showUnhedgeable} onChange={(e) => setShowUnhedgeable(e.target.checked)} />
+                                <div className="w-7 h-4 bg-[#D6D2C4] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-[#D6D2C4] after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-[#007680]"></div>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </Card>
 
@@ -2863,9 +2937,10 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                                 <th className="py-3 px-4 cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('client')}>Client {getSortIcon('client')}</th>
                                 <th className="py-3 px-4">Strategy</th>
                                 <th className="py-3 px-4 text-right cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('quantity')}>Vol ({unit}) {getSortIcon('quantity')}</th>
-                                <th className="py-3 px-4 text-right bg-[#5B3427]">Hedge (c/lb)</th>
                                 <th className="py-3 px-4 text-right bg-[#5B3427]">Cost Outright ($/50kg)</th>
                                 <th className="py-3 px-4 text-right bg-[#5B3427]">Cost Diff (c/lb)</th>
+                                <th className="py-3 px-2 text-right bg-[#5B3427] w-16">Fix. Fob</th>
+                                <th className="py-3 px-2 text-right bg-[#5B3427] w-16">Dyn. Fob</th>
                                 <th className="py-3 px-4 text-right bg-[#007680]">Sale Diff (c/lb)</th>
                                 <th className="py-3 px-4 text-right font-bold text-[#97D700] bg-[#51534a] cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('pnl_per_lb')}>Margin (c/lb) {getSortIcon('pnl_per_lb')}</th>
                                 <th className="py-3 px-4 text-right font-bold text-white bg-[#51534a] cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('pnlTotal')}>Total P&L ($) {getSortIcon('pnlTotal')}</th>
@@ -2876,7 +2951,7 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                             {sortedData.map((row) => {
                                 const isNull = row.is_sale_diff_null;
                                 const saleDiff = isNull ? 0 : row.sale_fob_diff;
-                                const margin = saleDiff - row.cost_diff - fobbingCost;
+                                const margin = saleDiff - row.cost_diff - (row.fixed_fobbing + row.dynamic_fobbing);
                                 const pnlUSD = (margin / 100) * (row.quantity * KG_TO_LB);
                                 const isEditing = editingId === row.id;
 
@@ -2887,9 +2962,10 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                                         <td className="py-3 px-4 text-[#51534a] font-medium text-xs max-w-60 truncate" title={row.client}>{row.client}</td>
                                         <td className="py-3 px-4 text-[#51534a] text-xs">{row.strategy}</td>
                                         <td className="py-3 px-4 text-right text-[#51534a] font-mono text-xs">{formatNumber(convertQty(row.quantity, unit), 0)}</td>
-                                        <td className="py-3 px-4 text-right text-[#968C83] font-mono text-xs bg-[#D6D2C4]/10 border-l border-[#D6D2C4]">{formatNumber(row.hedge_level)}</td>
                                         <td className="py-3 px-4 text-right text-[#51534a] font-mono text-xs bg-[#D6D2C4]/10">${formatNumber(row.cost_usd_50)}</td>
                                         <td className="py-3 px-4 text-right text-[#51534a] font-mono text-xs bg-[#D6D2C4]/10">{formatNumber(row.cost_diff)}</td>
+                                        <td className="py-3 px-2 text-right text-[#968C83] font-mono text-xs bg-[#D6D2C4]/10 border-l border-white/50">{formatNumber(row.fixed_fobbing)}</td>
+                                        <td className="py-3 px-2 text-right text-[#968C83] font-mono text-xs bg-[#D6D2C4]/10">{formatNumber(row.dynamic_fobbing)}</td>
                                         <td className="py-3 px-4 text-right text-[#007680] font-mono text-xs font-bold bg-[#A4DBE8]/10 border-l border-[#D6D2C4]">
                                             {isEditing ? (
                                                 <input 
@@ -2921,7 +2997,7 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                             })}
                             {sortedData.length === 0 && (
                                 <tr>
-                                    <td colSpan={12} className="py-8 text-center text-[#968C83] italic">No sales records found matching filters.</td>
+                                    <td colSpan={13} className="py-8 text-center text-[#968C83] italic">No sales records found matching filters.</td>
                                 </tr>
                             )}
                         </tbody>

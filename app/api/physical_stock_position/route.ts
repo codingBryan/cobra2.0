@@ -114,13 +114,13 @@ export async function POST(request: Request) {
             query: `DELETE FROM physical_position_history WHERE recorded_date = CURDATE()`
         });
 
-        // Perform a single batch insert for all calculated stacks
+        // Perform a single batch insert for all calculated stacks including theoretical_volume
         if (gridData.length > 0) {
-            const insertPlaceholders = gridData.map(() => '(?, ?, CURDATE())').join(', ');
-            const insertValues = gridData.flatMap(row => [row.stack, row.net_position]);
+            const insertPlaceholders = gridData.map(() => '(?, ?, ?, CURDATE())').join(', ');
+            const insertValues = gridData.flatMap(row => [row.stack, row.net_position, row.theoretical_volume]);
             
             await query({
-                query: `INSERT INTO physical_position_history (stack, position, recorded_date) VALUES ${insertPlaceholders}`,
+                query: `INSERT INTO physical_position_history (stack, position, theoretical_volume, recorded_date) VALUES ${insertPlaceholders}`,
                 values: insertValues
             });
         }
@@ -142,14 +142,12 @@ export async function POST(request: Request) {
 }
 
 
-
-
 export async function GET() {
   try {
     // Optimized to fetch the last 7 available dates with data, 
     // instead of a strict 7-day calendar window.
     const sql = `
-      SELECT p.id, p.stack, p.position, p.recorded_date 
+      SELECT p.id, p.stack, p.position, p.theoretical_volume, p.recorded_date 
       FROM physical_position_history p
       INNER JOIN (
           SELECT DISTINCT recorded_date 

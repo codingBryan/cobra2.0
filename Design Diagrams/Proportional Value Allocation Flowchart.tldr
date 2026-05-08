@@ -7,25 +7,26 @@
 			"com.tldraw.asset": 1,
 			"com.tldraw.camera": 1,
 			"com.tldraw.document": 2,
-			"com.tldraw.instance": 25,
+			"com.tldraw.instance": 26,
 			"com.tldraw.instance_page_state": 5,
 			"com.tldraw.page": 1,
 			"com.tldraw.instance_presence": 6,
 			"com.tldraw.pointer": 1,
 			"com.tldraw.shape": 4,
-			"com.tldraw.asset.bookmark": 2,
-			"com.tldraw.asset.image": 5,
+			"com.tldraw.user": 1,
+			"com.tldraw.asset.image": 6,
 			"com.tldraw.asset.video": 5,
+			"com.tldraw.asset.bookmark": 2,
 			"com.tldraw.shape.group": 0,
-			"com.tldraw.shape.text": 3,
+			"com.tldraw.shape.text": 4,
 			"com.tldraw.shape.bookmark": 2,
-			"com.tldraw.shape.draw": 2,
-			"com.tldraw.shape.geo": 10,
-			"com.tldraw.shape.note": 9,
+			"com.tldraw.shape.draw": 4,
+			"com.tldraw.shape.geo": 11,
+			"com.tldraw.shape.note": 12,
 			"com.tldraw.shape.line": 5,
 			"com.tldraw.shape.frame": 1,
-			"com.tldraw.shape.arrow": 7,
-			"com.tldraw.shape.highlight": 1,
+			"com.tldraw.shape.arrow": 8,
+			"com.tldraw.shape.highlight": 3,
 			"com.tldraw.shape.embed": 4,
 			"com.tldraw.shape.image": 5,
 			"com.tldraw.shape.video": 4,
@@ -71,12 +72,12 @@
 			"typeName": "shape"
 		},
 		{
+			"x": 0,
+			"y": 0,
+			"lastActivityTimestamp": 0,
+			"meta": {},
 			"id": "pointer:pointer",
-			"typeName": "pointer",
-			"x": 1266.744292909158,
-			"y": -2356.762744481635,
-			"lastActivityTimestamp": 1763707844241,
-			"meta": {}
+			"typeName": "pointer"
 		},
 		{
 			"x": 979.5043986289068,
@@ -486,9 +487,9 @@
 			"typeName": "shape"
 		},
 		{
-			"x": 3461.5894703117087,
-			"y": 3372.9859252184137,
-			"z": 0.18991891117861706,
+			"x": 157.502225054797,
+			"y": 3248.564471173178,
+			"z": 1.091904005838811,
 			"meta": {},
 			"id": "camera:page:page",
 			"typeName": "camera"
@@ -1020,10 +1021,8 @@
 		{
 			"editingShapeId": null,
 			"croppingShapeId": null,
-			"selectedShapeIds": [
-				"shape:m1_vZGBuYSccaU1fIK26T"
-			],
-			"hoveredShapeId": "shape:wnuR410u47COvkVrW2y-D",
+			"selectedShapeIds": [],
+			"hoveredShapeId": null,
 			"erasingShapeIds": [],
 			"hintingShapeIds": [],
 			"focusedGroupId": null,
@@ -1362,6 +1361,14 @@
 			"typeName": "shape"
 		},
 		{
+			"name": "",
+			"color": "#02B1CC",
+			"imageUrl": "",
+			"meta": {},
+			"id": "user:VTw_vHOj8vwifkqRMyuIg",
+			"typeName": "user"
+		},
+		{
 			"x": 930,
 			"y": -1585.0819258609376,
 			"rotation": 0,
@@ -1585,8 +1592,8 @@
 			"typeName": "shape"
 		},
 		{
-			"x": 49.5,
-			"y": -1993.2580978635422,
+			"x": 48.70465159248374,
+			"y": -1994.8487946785744,
 			"rotation": 0,
 			"isLocked": false,
 			"opacity": 1,
@@ -2349,8 +2356,8 @@
 			"screenBounds": {
 				"x": 0,
 				"y": 0,
-				"w": 1602,
-				"h": 452
+				"w": 1032,
+				"h": 1758
 			},
 			"insets": [
 				false,
@@ -2373,6 +2380,7 @@
 			"isReadonly": false,
 			"meta": {},
 			"duplicateProps": null,
+			"cameraState": "idle",
 			"id": "instance:instance",
 			"currentPageId": "page:page",
 			"typeName": "instance"

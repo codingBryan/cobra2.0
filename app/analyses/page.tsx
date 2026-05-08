@@ -48,7 +48,7 @@ export default function AnalysisDashboard() {
     setSelectedAnalysis(analysis);
     setDetailsLoading(true);
     try {
-      const res = await fetch(`/api/batches/analyses/analysis_details/${analysis.id}/details`);
+      const res = await fetch(`/api/batches/analyses/analysis_details/${analysis.id}`);
       const json = await res.json();
       
       // Transform class data for stacked line chart

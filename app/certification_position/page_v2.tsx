@@ -21,10 +21,10 @@ import {
 
 // --- Constants & Types ---
 type Unit = 'kg' | 'bag' | 'mt';
-type MainTab = 'position' | 'tracker' | 'contracts' | 'declarations';
+type MainTab = 'certification' | 'tracker' | 'contracts' | 'declarations';
 
 const CERTIFICATES_LIST = ["RFA", "CAFE", "EUDR"] as const;
-const PROJECTS_LIST = ["AAA", "AAA-RS", "NET ZERO"] as const;
+const PROJECTS_LIST = ["AAA", "NET ZERO"] as const;
 const CERT_FILTERS = [...CERTIFICATES_LIST, ...PROJECTS_LIST] as const;
 const TRACKER_FILTERS = ["ALL", ...CERT_FILTERS] as const;
 
@@ -74,9 +74,6 @@ interface CertifiedStock {
   grower_code?: string;
   fully_declared?: boolean;
   recorded_date?: string;
-  aaa_rs_project?: boolean;
-  aaa_rs_volume?: number;
-  aaa_rs_declared_weight?: number;
 }
 
 interface Blend {
@@ -122,7 +119,6 @@ interface DeclarationRow {
   impact_declared_weight: number;
   aaa_declared_weight: number;
   netzero_declared_weight: number;
-  aaa_rs_declared_weight?: number;
 }
 
 type TrackerColumn = {
@@ -155,7 +151,7 @@ const formatQty = (value: number, unit: Unit, decimals?: number) => {
 };
 
 const unitText = (unit: Unit) => {
-  return unit === "bag" ? "Bags" : unit.toUpperCase();
+  return unit === "bag" ? "BAGS" : unit.toUpperCase();
 };
 
 const formatDateToMonthYear = (dateStr: string) => {
@@ -213,6 +209,7 @@ function bool(value: unknown): boolean {
     if (value.charCodeAt(0) === 1) return true; // Catch BIT(1) string serialization
   }
   
+  // Catch generic MySQL Buffer JSON serializations from tinyint(1)/bit(1)
   if (typeof value === 'object') {
     const v = value as any;
     if (v.type === 'Buffer' && Array.isArray(v.data)) return v.data[0] > 0;
@@ -226,7 +223,6 @@ function displayText(value: unknown, fallback = "—") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
-// ⚡ Explicit string mapping (removed regex replacements)
 const certToField = (cert: string) => {
     switch(cert) {
         case 'RFA': return 'rfa_declared_weight';
@@ -234,26 +230,16 @@ const certToField = (cert: string) => {
         case 'CAFE': return 'cafe_declared_weight';
         case 'Impact': return 'impact_declared_weight';
         case 'AAA': return 'aaa_declared_weight';
-        case 'AAA-RS': return 'aaa_rs_declared_weight';
         case 'NET ZERO': return 'netzero_declared_weight';
         default: return '';
     }
 }
 
 function getEffectiveWeight(stock: CertifiedStock, cert: string) {
-  if (cert === 'AAA') return asNumber(stock.aaa_volume);
-  if (cert === 'AAA-RS') return asNumber(stock.aaa_rs_volume);
+  if (cert === 'AAA') {
+      return asNumber(stock.aaa_volume != null ? stock.aaa_volume : 0);
+  }
   return asNumber(stock.purchased_weight);
-}
-
-// ⚡ O(1) Short-Circuit logic for distinguishing Pure AAA
-function isPureAAA(stock: CertifiedStock): boolean {
-  if (!bool(stock.aaa_project)) return false;
-  if (asNumber(stock.aaa_volume) > 0) return true;
-  const g = stock.grade;
-  if (!g) return false;
-  const upper = g.toUpperCase().trim();
-  return upper === 'AA' || upper === 'AB' || upper === 'C';
 }
 
 function getAaaReservationLabelFromStock(stock: CertifiedStock) {
@@ -266,8 +252,7 @@ function getTrackerCertFlags(stock: CertifiedStock) {
     CAFE: bool(stock.cafe_certified),
     EUDR: bool(stock.eudr_certified),
     "NET ZERO": bool(stock.netzero_project),
-    AAA: isPureAAA(stock),
-    "AAA-RS": asNumber(stock.aaa_rs_volume) > 0,
+    AAA: bool(stock.aaa_project),
   } as const;
 }
 
@@ -278,8 +263,7 @@ function matchesTrackerCert(stock: CertifiedStock, cert: TrackerCertType) {
     case "CAFE": return bool(stock.cafe_certified);
     case "EUDR": return bool(stock.eudr_certified);
     case "NET ZERO": return bool(stock.netzero_project);
-    case "AAA": return isPureAAA(stock);
-    case "AAA-RS": return asNumber(stock.aaa_rs_volume) > 0;
+    case "AAA": return bool(stock.aaa_project);
   }
   return false;
 }
@@ -358,9 +342,6 @@ function buildTrackerRow(stock: CertifiedStock, cert: TrackerCertType) {
     aaa_volume: stock.aaa_volume == null ? null : asNumber(stock.aaa_volume),
     geodata_available: bool(stock.geodata_available),
     aaa_declared_weight: stock.aaa_declared_weight == null ? null : asNumber(stock.aaa_declared_weight),
-    aaa_rs_project: certFlags["AAA-RS"], // Displays Yes when volume > 0
-    aaa_rs_volume: stock.aaa_rs_volume == null ? null : asNumber(stock.aaa_rs_volume),
-    aaa_rs_declared_weight: stock.aaa_rs_declared_weight == null ? null : asNumber(stock.aaa_rs_declared_weight),
     netzero_project: certFlags["NET ZERO"],
     netzero_declared_weight: stock.netzero_declared_weight == null ? null : asNumber(stock.netzero_declared_weight),
     fully_declared: bool(stock.fully_declared),
@@ -387,8 +368,6 @@ function formatRangeLabel(start: string, end: string) {
 }
 
 function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
-  const weightLabel = cert === 'AAA' ? "Volume (AAA)" : cert === 'AAA-RS' ? "Volume (AAA-RS)" : "Purchased";
-
   const common: TrackerColumn[] = [
     { key: "season", label: "Season", align: "left", render: (row) => row.season, exportValue: (row) => row.season },
     { key: "sale_type", label: "Sale Type", align: "left", render: (row) => row.sale_type, exportValue: (row) => row.sale_type },
@@ -400,7 +379,7 @@ function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
     { key: "county", label: "County", align: "left", render: (row) => row.county, exportValue: (row) => row.county },
     { key: "grade", label: "Grade", align: "left", render: (row) => row.grade, exportValue: (row) => row.grade },
     { key: "grower_code", label: "Grower", align: "left", render: (row) => row.grower_code, exportValue: (row) => row.grower_code },
-    { key: "effective_weight", label: weightLabel, align: "right", render: (row) => `${formatQty(row.effective_weight, unit)} ${unitText(unit)}`, exportValue: (row) => formatQty(row.effective_weight, unit) },
+    { key: "effective_weight", label: cert === 'AAA' ? "Volume (AAA)" : "Purchased", align: "right", render: (row) => `${formatQty(row.effective_weight, unit)} ${unitText(unit)}`, exportValue: (row) => formatQty(row.effective_weight, unit) },
   ];
 
   const certColumns: Record<TrackerCertType, TrackerColumn[]> = {
@@ -424,9 +403,6 @@ function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
       { key: "aaa_volume", label: "AAA Vol.", align: "right", render: (row) => (row.aaa_volume != null ? `${formatQty(row.aaa_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_volume != null ? formatQty(row.aaa_volume, unit) : "") },
       { key: "geodata_available", label: "Geo", align: "center", render: (row) => (row.geodata_available ? "Yes" : "No"), exportValue: (row) => (row.geodata_available ? "Yes" : "No") },
       { key: "aaa_declared_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_declared_weight != null ? `${formatQty(row.aaa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_declared_weight != null ? formatQty(row.aaa_declared_weight, unit) : "") },
-      { key: "aaa_rs_project", label: "AAA-RS", align: "center", render: (row) => (row.aaa_rs_project ? "Yes" : "No"), exportValue: (row) => (row.aaa_rs_project ? "Yes" : "No") },
-      { key: "aaa_rs_volume", label: "AAA-RS Vol.", align: "right", render: (row) => (row.aaa_rs_volume != null ? `${formatQty(row.aaa_rs_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_volume != null ? formatQty(row.aaa_rs_volume, unit) : "") },
-      { key: "aaa_rs_declared_weight", label: "AAA-RS Decl.", align: "right", render: (row) => (row.aaa_rs_declared_weight != null ? `${formatQty(row.aaa_rs_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_declared_weight != null ? formatQty(row.aaa_rs_declared_weight, unit) : "") },
       { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
       { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
       { key: "fully_declared", label: "Fully Declared", align: "center", render: (row) => (row.fully_declared ? "Yes" : "No"), exportValue: (row) => (row.fully_declared ? "Yes" : "No") },
@@ -458,11 +434,6 @@ function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
     "NET ZERO": [
       { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
       { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
-    ],
-    "AAA-RS": [
-      { key: "aaa_rs_project", label: "AAA-RS", align: "center", render: (row) => (row.aaa_rs_project ? "Yes" : "No"), exportValue: (row) => (row.aaa_rs_project ? "Yes" : "No") },
-      { key: "aaa_rs_volume", label: "AAA-RS Vol.", align: "right", render: (row) => (row.aaa_rs_volume != null ? `${formatQty(row.aaa_rs_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_volume != null ? formatQty(row.aaa_rs_volume, unit) : "") },
-      { key: "aaa_rs_declared_weight", label: "AAA-RS Decl.", align: "right", render: (row) => (row.aaa_rs_declared_weight != null ? `${formatQty(row.aaa_rs_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_declared_weight != null ? formatQty(row.aaa_rs_declared_weight, unit) : "") },
     ],
   };
 
@@ -690,7 +661,7 @@ function TrackerDonutChart({ data, unit }: { data: { name: string, value: number
 }
 
 export default function CertificationsPage() {
-  const [activeTab, setActiveTab] = useState<MainTab>('position');
+  const [activeTab, setActiveTab] = useState<MainTab>('certification');
   const [activeCert, setActiveCert] = useState<CertType>('RFA');
   const [positionView, setPositionView] = useState<'true_position' | 'crop_year'>('true_position');
   const [unit, setUnit] = useState<Unit>('kg');
@@ -707,6 +678,7 @@ export default function CertificationsPage() {
 
   const showToast = (type: 'success' | 'warning' | 'error', title: string, message: string | React.ReactNode) => {
       setToast({ show: true, type, title, message });
+      // Increased toast duration to 15 seconds to allow comfortable reading
       setTimeout(() => setToast(prev => ({ ...prev, show: false })), 15000);
   };
 
@@ -724,6 +696,7 @@ export default function CertificationsPage() {
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
   const [selectedGrades, setSelectedGrades] = useState<Set<string>>(new Set());
 
+  // API Loader State
   const [isDeclaringCertId, setIsDeclaringCertId] = useState<number | null>(null);
 
   const [editingContractId, setEditingContractId] = useState<number | null>(null);
@@ -749,6 +722,8 @@ export default function CertificationsPage() {
   const toggleTrackerCert = useCallback((cert: CertType) => {
     setTrackerCerts(prev => prev.includes(cert) ? prev.filter(c => c !== cert) : [...prev, cert]);
   }, []);
+  // Primary cert used when downstream helpers need a single cert.
+  // If exactly one cert is selected, use it; otherwise fall back to "ALL" view.
   const trackerPrimaryCert: TrackerCertType = trackerCerts.length === 1 ? (trackerCerts[0] as TrackerCertType) : "ALL";
   const [trackerDateStartDraft, setTrackerDateStartDraft] = useState("");
   const [trackerDateEndDraft, setTrackerDateEndDraft] = useState("");
@@ -767,8 +742,8 @@ export default function CertificationsPage() {
   const [contractSearch, setContractSearch] = useState('');
   const [showDeclaredContracts, setShowDeclaredContracts] = useState(false);
 
-  const certOptions: CertType[] = ['RFA', 'CAFE', 'NET ZERO', 'EUDR', 'AAA', 'AAA-RS'];
-  
+  const certOptions: CertType[] = ['RFA', 'CAFE', 'NET ZERO', 'EUDR', 'AAA'];
+
   // ⚡ CENTRALIZED FETCH FUNCTION FOR AUTO-UPDATING
   const fetchData = useCallback(async (silent = false) => {
     try {
@@ -803,52 +778,11 @@ export default function CertificationsPage() {
     return () => document.removeEventListener("mousedown", onDownloadOutside);
   }, [downloadOpen]);
 
-  // ⚡ O(N) ENHANCED STOCKS RECONCILIATION
-  // Fixes missing declared weights by hydrating stocks directly from the active declarations array.
-  // This absolutely guarantees that the available volume everywhere reflects active frontend declarations perfectly.
-  const enhancedStocks = useMemo(() => {
-      const declMap = new Map<number, any>();
-      declarations.forEach(d => {
-          if (!declMap.has(d.stock_id)) {
-              declMap.set(d.stock_id, {
-                  aaa_rs: 0, aaa: 0, rfa: 0, cafe: 0, eudr: 0, netzero: 0, impact: 0
-              });
-          }
-          const s = declMap.get(d.stock_id);
-          s.aaa_rs += asNumber(d.aaa_rs_declared_weight);
-          s.aaa += asNumber(d.aaa_declared_weight);
-          s.rfa += asNumber(d.rfa_declared_weight);
-          s.cafe += asNumber(d.cafe_declared_weight);
-          s.eudr += asNumber(d.eudr_declared_weight);
-          s.netzero += asNumber(d.netzero_declared_weight);
-          s.impact += asNumber(d.impact_declared_weight);
-      });
-
-      return stocks.map(stock => {
-          const decls = declMap.get(stock.id);
-          if (decls) {
-              const safeDecl = (frontendVal: number, backendVal: any) => frontendVal > 0 ? frontendVal : asNumber(backendVal);
-              return {
-                  ...stock,
-                  aaa_rs_declared_weight: safeDecl(decls.aaa_rs, stock.aaa_rs_declared_weight),
-                  aaa_declared_weight: safeDecl(decls.aaa, stock.aaa_declared_weight),
-                  rfa_declared_weight: safeDecl(decls.rfa, stock.rfa_declared_weight),
-                  cafe_declared_weight: safeDecl(decls.cafe, stock.cafe_declared_weight),
-                  eudr_declared_weight: safeDecl(decls.eudr, stock.eudr_declared_weight),
-                  netzero_declared_weight: safeDecl(decls.netzero, stock.netzero_declared_weight),
-                  impact_declared_weight: safeDecl(decls.impact, stock.impact_declared_weight)
-              };
-          }
-          return stock;
-      });
-  }, [stocks, declarations]);
-
-
   // ⚡ Extract Unique Regions and Grades in O(N) using useMemo and Set
   const { uniqueRegions, uniqueGrades } = useMemo(() => {
       const regions = new Set<string>();
       const grades = new Set<string>();
-      enhancedStocks.forEach(s => {
+      stocks.forEach(s => {
           if (s.county) regions.add(s.county);
           if (s.grade) grades.add(s.grade);
       });
@@ -856,7 +790,7 @@ export default function CertificationsPage() {
           uniqueRegions: Array.from(regions).sort(),
           uniqueGrades: Array.from(grades).sort()
       };
-  }, [enhancedStocks]);
+  }, [stocks]);
 
   const openDeclarationConfig = (contractId: number) => {
       setDeclaringContractId(contractId);
@@ -999,133 +933,13 @@ export default function CertificationsPage() {
       return Array.from(new Set(clients)).sort();
   }, [sales]);
 
-  // ⚡ O(N) EXECUTIVE SUMMARY AGGREGATION
-  const executiveSummary = useMemo(() => {
-    const summaryMap = new Map<string, {
-      combo: string;
-      sold: number;
-      declared: number;
-      pending: number;
-      available: number;
-    }>();
-
-    // 1. Process Contracts FIRST to explicitly define the allowed table rows
-    sales.forEach(sale => {
-      const certs = parseCerts(sale.certifications)
-        .map(c => c.toUpperCase().trim())
-        .filter(c => c !== 'UNCERTIFIED'); 
-      
-      const combo = certs.length > 0 ? certs.sort().join(', ') : 'UNCERTIFIED';
-      
-      // Skip uncertified contracts from the Executive Certificates Summary
-      if (combo === 'UNCERTIFIED') return;
-
-      if (!summaryMap.has(combo)) {
-        summaryMap.set(combo, { combo, sold: 0, declared: 0, pending: 0, available: 0 });
-      }
-
-      const record = summaryMap.get(combo)!;
-      const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
-      const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
-
-      record.sold += weight;
-      if (isDeclared) {
-        record.declared += weight;
-      } else {
-        record.pending += weight;
-      }
-    });
-
-    // Extract the allowed combos to cleanly evaluate subsets
-    const allowedCombos = Array.from(summaryMap.values()).map(row => ({
-      combo: row.combo,
-      requiredCerts: row.combo.split(', ')
-    }));
-
-    // 2. Process Stocks
-    const today = new Date();
-    const currentMonth = today.getMonth(); 
-    const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
-    const seasonStartDate = new Date(startYear, 8, 1).getTime();
-    const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
-
-    enhancedStocks.forEach(stock => {
-      // Filter stocks by crop year if toggle is active
-      if (positionView === 'crop_year') {
-         if (!stock.recorded_date) return;
-         const recTime = new Date(stock.recorded_date).getTime();
-         if (Number.isNaN(recTime) || recTime < seasonStartDate || recTime > seasonEndDate) return;
-      }
-
-      // Collect the active certificates for this stock lot using an O(1) Set lookup
-      const stockCerts = new Set<string>();
-      if (isPureAAA(stock)) stockCerts.add('AAA');
-      if (asNumber(stock.aaa_rs_volume) > 0) stockCerts.add('AAA-RS');
-      if (bool(stock.cafe_certified)) stockCerts.add('CAFE');
-      if (bool(stock.eudr_certified)) stockCerts.add('EUDR');
-      if (bool(stock.netzero_project)) stockCerts.add('NET ZERO');
-      if (bool(stock.rfa_certified)) stockCerts.add('RFA');
-      
-      if (stockCerts.size === 0) return;
-
-      // ⚡ FAST SUBSET MATCHING ALGORITHM
-      allowedCombos.forEach(({ combo, requiredCerts }) => {
-          const canSatisfyCombo = requiredCerts.every(cert => stockCerts.has(cert));
-          
-          if (canSatisfyCombo) {
-              let minComboBalance = Infinity;
-              
-              requiredCerts.forEach(cert => {
-                  let baseVolume = 0;
-                  let declaredVolume = 0;
-                  
-                  if (cert === 'AAA') {
-                      baseVolume = asNumber(stock.aaa_volume);
-                      declaredVolume = asNumber(stock.aaa_declared_weight);
-                  } else if (cert === 'AAA-RS') {
-                      baseVolume = asNumber(stock.aaa_rs_volume);
-                      declaredVolume = asNumber(stock.aaa_rs_declared_weight);
-                  } else {
-                      baseVolume = asNumber(stock.purchased_weight);
-                      
-                      const c = cert.replace(/[^A-Z0-9-]/g, '');
-                      let fieldName = '';
-                      if (c === 'NETZERO') fieldName = 'netzero_declared_weight';
-                      else fieldName = `${c.toLowerCase()}_declared_weight`;
-                      
-                      declaredVolume = asNumber(stock[fieldName as keyof CertifiedStock]);
-                  }
-                  
-                  const certBalance = Math.max(0, baseVolume - declaredVolume);
-                  if (certBalance < minComboBalance) {
-                      minComboBalance = certBalance;
-                  }
-              });
-
-              if (minComboBalance > 0 && minComboBalance !== Infinity) {
-                  summaryMap.get(combo)!.available += minComboBalance;
-              }
-          }
-      });
-    });
-
-    return Array.from(summaryMap.values())
-      .map(r => ({
-        ...r,
-        net: r.available - r.pending
-      }))
-      .sort((a, b) => a.combo.localeCompare(b.combo));
-  }, [sales, enhancedStocks, positionView]);
-
-
   const { tableData, uniqueMonths, kpis } = useMemo(() => {
     const certFlagMap: Record<CertType, keyof CertifiedStock> = {
       'RFA': 'rfa_certified',
       'CAFE': 'cafe_certified',
       'NET ZERO': 'netzero_project',
       'EUDR': 'eudr_certified',
-      'AAA': 'aaa_project',
-      'AAA-RS': 'aaa_rs_volume'
+      'AAA': 'aaa_project'
     };
     const flag = certFlagMap[activeCert];
 
@@ -1148,21 +962,21 @@ export default function CertificationsPage() {
     let totalSupplyChainKg = 0; 
     const monthsSet = new Set<string>();
 
-    // ⚡ PRE-CALCULATED CROP YEAR BOUNDS
+    const sanitizedTargetCert = String(activeCert).toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+    // ⚡ PRE-CALCULATED CROP YEAR BOUNDS (O(1) execution outside loop)
+    // Coffee Season: September 1st to August 31st
     const today = new Date();
-    const currentMonth = today.getMonth();
+    const currentMonth = today.getMonth(); // 0 is Jan, 8 is Sept
     const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
     const seasonStartDate = new Date(startYear, 8, 1).getTime();
     const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
 
-    enhancedStocks.forEach(stock => {
-      // ⚡ STRICT EVALUATION without Regex replacements
-      let isCertified = false;
-      if (activeCert === 'AAA') isCertified = isPureAAA(stock);
-      else if (activeCert === 'AAA-RS') isCertified = asNumber(stock.aaa_rs_volume) > 0;
-      else isCertified = bool(stock[flag]);
+    stocks.forEach(stock => {
+      const isCertified = stock[flag] === 1 || stock[flag] === true || stock[flag] === '1';
       
       if (isCertified) {
+        // Crop Year Date Filtering
         if (positionView === 'crop_year') {
            if (!stock.recorded_date) return;
            const recTime = new Date(stock.recorded_date).getTime();
@@ -1172,25 +986,13 @@ export default function CertificationsPage() {
         const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
         if (isDual && activeCert === 'AAA') return; 
 
-        // ⚡ EXPLICIT BASE vs DECLARED MAPPING (Guarantees Total Stock captures differences)
-        let rawWeight = 0;
-        let declaredWeight = 0;
-        
-        if (activeCert === 'AAA') {
-            rawWeight = asNumber(stock.aaa_volume);
-            declaredWeight = asNumber(stock.aaa_declared_weight);
-        } else if (activeCert === 'AAA-RS') {
-            rawWeight = asNumber(stock.aaa_rs_volume);
-            declaredWeight = asNumber(stock.aaa_rs_declared_weight);
-        } else {
-            rawWeight = asNumber(stock.purchased_weight);
-            const field = certToField(activeCert);
-            declaredWeight = field ? asNumber(stock[field as keyof CertifiedStock]) : 0;
-        }
-
+        // Calculate Balance Instead of Total Purchased Weight
+        const rawWeight = getEffectiveWeight(stock, activeCert); 
+        const declaredField = certToField(activeCert) as keyof CertifiedStock;
+        const declaredWeight = asNumber(stock[declaredField]);
         const weight = Math.max(0, rawWeight - declaredWeight); 
         
-        // Skip allocation evaluation if volume is fully depleted
+        // ⚡ OPTIMIZATION: Instantly skip allocation evaluation if volume is depleted
         if (weight <= 0) return; 
 
         const strat = stock.strategy || 'Unassigned';
@@ -1198,7 +1000,7 @@ export default function CertificationsPage() {
         
         const record = strategyMap.get(strat)!;
         record.available += weight;
-        totalStockKg += weight; // Total Stock precisely tracks the isolated difference logic
+        totalStockKg += weight;
 
         if (holderFlag && stock[holderFlag]) {
           const holderName = String(stock[holderFlag]).toLowerCase();
@@ -1214,8 +1016,8 @@ export default function CertificationsPage() {
       const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
       if (isDeclared) return;
 
-      const certList = parseCerts(sale.certifications);
-      const isMatch = certList.includes(activeCert);
+      const certList = parseCerts(sale.certifications).map(c => c.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+      const isMatch = certList.includes(sanitizedTargetCert);
 
       if (isMatch) {
         const strat = sale.quality || sale.strategy || 'Unassigned'; 
@@ -1224,8 +1026,8 @@ export default function CertificationsPage() {
         if (!strategyMap.has(strat)) strategyMap.set(strat, { strategy: strat, available: 0, shipmentsByMonth: {}, totalShipment: 0 });
         
         const record = strategyMap.get(strat)!;
-        const rawSaleWeight = String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '');
-        const weight = Math.abs(Number(rawSaleWeight) || 0); 
+        const rawWeight = String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '');
+        const weight = Math.abs(Number(rawWeight) || 0); 
         
         record.shipmentsByMonth[monthKey] = (record.shipmentsByMonth[monthKey] || 0) + weight;
         record.totalShipment += weight;
@@ -1256,22 +1058,25 @@ export default function CertificationsPage() {
         net: totalStockKg - totalShortsKg
       }
     };
-  }, [activeCert, enhancedStocks, sales, positionView]); 
+  }, [activeCert, stocks, sales, positionView]); 
 
   // --- TRACKER TAB MEMOS ---
   const trackerVisibleStocks = useMemo(() => {
-    return enhancedStocks
+    return stocks
       .filter((stock) => {
+         // Empty selection = ALL (show everything)
          if (trackerCerts.length === 0) return true;
+         // Multi-select INTERSECTION (AND): include stock only if it matches ALL selected certs
          return trackerCerts.every(c => matchesTrackerCert(stock, c as TrackerCertType));
       })
       .filter((stock) => {
          const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
+         // Exclude AAA+CAFE duals from the AAA bucket unless CAFE is also explicitly selected
          if (isDual && trackerCerts.includes('AAA') && !trackerCerts.includes('CAFE')) return false;
          return true;
       })
       .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true));
-  }, [enhancedStocks, trackerCerts, trackerDateStartFilter, trackerDateEndFilter]);
+  }, [stocks, trackerCerts, trackerDateStartFilter, trackerDateEndFilter]);
 
   const trackerTableColumns = useMemo(() => getTrackerColumns(trackerPrimaryCert, unit), [trackerPrimaryCert, unit]);
 
@@ -1326,11 +1131,69 @@ export default function CertificationsPage() {
     return result;
   }, [trackerVisibleStocks, trackerPrimaryCert]);
 
+
   const trackerVisibleRecordCount = trackerVisibleStocks.length;
   const trackerVisibleDateLabel = formatRangeLabel(trackerDateStartFilter, trackerDateEndFilter);
-  const trackerSelectedLabel = trackerCerts.length === 0 ? "All certifications" : trackerCerts.join(", ");
+  const trackerSelectedLabel = trackerCerts.length === 0
+    ? "All certifications"
+    : trackerCerts.join(", ");
   const trackerVisibleRows = useMemo(() => trackerVisibleStocks.map((stock) => buildTrackerRow(stock, trackerPrimaryCert)), [trackerVisibleStocks, trackerPrimaryCert]);
 
+  const allocationSummary = useMemo(() => {
+    const summary: Record<string, { label: string, lotKg: number, lotCount: number, contractCount: number, declaredKg: number, balanceKg: number }> = {
+      RFA: { label: "RFA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      CAFE: { label: "CAFE", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      "NET ZERO": { label: "NET ZERO", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      EUDR: { label: "EUDR", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      AAA: { label: "AAA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+      "AAA/CP": { label: "AAA/CP", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+    };
+
+    stocks.forEach(stock => {
+      const aaa = bool(stock.aaa_project);
+      const cafe = bool(stock.cafe_certified);
+      if (bool(stock.rfa_certified)) { summary.RFA.lotCount++; summary.RFA.lotKg += getEffectiveWeight(stock, 'RFA'); }
+      if (cafe) { summary.CAFE.lotCount++; summary.CAFE.lotKg += getEffectiveWeight(stock, 'CAFE'); }
+      if (bool(stock.netzero_project)) { summary["NET ZERO"].lotCount++; summary["NET ZERO"].lotKg += getEffectiveWeight(stock, 'NET ZERO'); }
+      if (bool(stock.eudr_certified)) { summary.EUDR.lotCount++; summary.EUDR.lotKg += getEffectiveWeight(stock, 'EUDR'); }
+      if (aaa) {
+         if (cafe) { summary["AAA/CP"].lotCount++; summary["AAA/CP"].lotKg += getEffectiveWeight(stock, 'AAA'); }
+         else { summary.AAA.lotCount++; summary.AAA.lotKg += getEffectiveWeight(stock, 'AAA'); }
+      }
+    });
+
+    sales.forEach(sale => {
+      const certs = parseCerts(sale.certifications).map(c => c.toUpperCase());
+      if (certs.includes('RFA')) summary.RFA.contractCount++;
+      if (certs.includes('CAFE')) summary.CAFE.contractCount++;
+      if (certs.includes('NET ZERO')) summary["NET ZERO"].contractCount++;
+      if (certs.includes('EUDR')) summary.EUDR.contractCount++;
+      if (certs.includes('AAA') || certs.includes('AAA/CP') || certs.includes('CP')) {
+          if (certs.includes('AAA/CP') || certs.includes('CAFE') || certs.includes('CP')) summary["AAA/CP"].contractCount++;
+          else summary.AAA.contractCount++;
+      }
+    });
+
+    declarations.forEach(decl => {
+       summary.RFA.declaredKg += asNumber(decl.rfa_declared_weight);
+       summary.CAFE.declaredKg += asNumber(decl.cafe_declared_weight);
+       summary["NET ZERO"].declaredKg += asNumber(decl.netzero_declared_weight);
+       summary.EUDR.declaredKg += asNumber(decl.eudr_declared_weight);
+       
+       if (asNumber(decl.aaa_declared_weight) > 0) {
+           if (asNumber(decl.cafe_declared_weight) > 0) summary["AAA/CP"].declaredKg += asNumber(decl.aaa_declared_weight);
+           else summary.AAA.declaredKg += asNumber(decl.aaa_declared_weight);
+       }
+    });
+
+    (Object.keys(summary) as Array<keyof typeof summary>).forEach(k => {
+       summary[k].balanceKg = summary[k].lotKg - summary[k].declaredKg;
+    });
+
+    return summary;
+  }, [stocks, sales, declarations]);
+
+  // Filter-aware allocation summary: reflects only lots visible under the current tracker multi-select
   const trackerAllocationSummary = useMemo(() => {
     const summary: Record<string, { label: string, lotKg: number, lotCount: number, contractCount: number, declaredKg: number, balanceKg: number }> = {
       RFA: { label: "RFA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
@@ -1339,43 +1202,38 @@ export default function CertificationsPage() {
       EUDR: { label: "EUDR", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
       AAA: { label: "AAA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
       "AAA/CP": { label: "AAA/CP", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      "AAA-RS": { label: "AAA-RS", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
     };
 
     const visibleStockIds = new Set(trackerVisibleStocks.map(s => s.id));
 
     trackerVisibleStocks.forEach(stock => {
+      const aaa = bool(stock.aaa_project);
       const cafe = bool(stock.cafe_certified);
       if (bool(stock.rfa_certified)) { summary.RFA.lotCount++; summary.RFA.lotKg += getEffectiveWeight(stock, 'RFA'); }
       if (cafe) { summary.CAFE.lotCount++; summary.CAFE.lotKg += getEffectiveWeight(stock, 'CAFE'); }
       if (bool(stock.netzero_project)) { summary["NET ZERO"].lotCount++; summary["NET ZERO"].lotKg += getEffectiveWeight(stock, 'NET ZERO'); }
       if (bool(stock.eudr_certified)) { summary.EUDR.lotCount++; summary.EUDR.lotKg += getEffectiveWeight(stock, 'EUDR'); }
-      
-      if (asNumber(stock.aaa_rs_volume) > 0) {
-         summary["AAA-RS"].lotCount++; 
-         summary["AAA-RS"].lotKg += asNumber(stock.aaa_rs_volume); 
-      }
-      
-      if (isPureAAA(stock)) {
+      if (aaa) {
          if (cafe) { summary["AAA/CP"].lotCount++; summary["AAA/CP"].lotKg += getEffectiveWeight(stock, 'AAA'); }
          else { summary.AAA.lotCount++; summary.AAA.lotKg += getEffectiveWeight(stock, 'AAA'); }
       }
     });
 
+    // Only declarations tied to the visible lots
     declarations.forEach(decl => {
        if (!visibleStockIds.has(decl.stock_id)) return;
        summary.RFA.declaredKg += asNumber(decl.rfa_declared_weight);
        summary.CAFE.declaredKg += asNumber(decl.cafe_declared_weight);
        summary["NET ZERO"].declaredKg += asNumber(decl.netzero_declared_weight);
        summary.EUDR.declaredKg += asNumber(decl.eudr_declared_weight);
-       summary["AAA-RS"].declaredKg += asNumber(decl.aaa_rs_declared_weight);
-       
+
        if (asNumber(decl.aaa_declared_weight) > 0) {
            if (asNumber(decl.cafe_declared_weight) > 0) summary["AAA/CP"].declaredKg += asNumber(decl.aaa_declared_weight);
            else summary.AAA.declaredKg += asNumber(decl.aaa_declared_weight);
        }
     });
 
+    // Only contracts linked (via declarations) to the visible lots
     const visibleContractIds = new Set(
       declarations.filter(d => visibleStockIds.has(d.stock_id)).map(d => d.contract_id)
     );
@@ -1383,7 +1241,6 @@ export default function CertificationsPage() {
       if (!visibleContractIds.has(sale.id)) return;
       const certs = parseCerts(sale.certifications).map(c => c.toUpperCase());
       if (certs.includes('RFA')) summary.RFA.contractCount++;
-      if (certs.includes('AAA-RS')) summary["AAA-RS"].contractCount++;
       if (certs.includes('CAFE')) summary.CAFE.contractCount++;
       if (certs.includes('NET ZERO')) summary["NET ZERO"].contractCount++;
       if (certs.includes('EUDR')) summary.EUDR.contractCount++;
@@ -1400,22 +1257,24 @@ export default function CertificationsPage() {
     return summary;
   }, [trackerVisibleStocks, sales, declarations]);
 
+  // Combined intersection card: used only when 2+ certs are selected.
+  // Shows one aggregate card for the set of lots satisfying ALL selected certs.
   const trackerIntersectionCard = useMemo((): { label: string; lotKg: number; lotCount: number; contractCount: number; declaredKg: number; balanceKg: number } | null => {
     if (trackerCerts.length < 2) return null;
 
     const visibleStockIds = new Set(trackerVisibleStocks.map(s => s.id));
 
-    const useAaaVolume = trackerCerts.includes("AAA") || trackerCerts.includes("AAA-RS");
-
     let lotKg = 0;
     const lotCount = trackerVisibleStocks.length;
     trackerVisibleStocks.forEach(stock => {
-      lotKg += useAaaVolume ? asNumber(stock.aaa_volume) : asNumber(stock.purchased_weight);
+      // Use purchased_weight as the physical lot weight for the combined view
+      lotKg += asNumber(stock.purchased_weight);
     });
 
     let declaredKg = 0;
     declarations.forEach(decl => {
       if (!visibleStockIds.has(decl.stock_id)) return;
+      // Sum declared volumes across every selected cert for these visible lots
       trackerCerts.forEach(cert => {
         const field = certToField(cert);
         if (field) declaredKg += asNumber((decl as any)[field]);
@@ -1478,7 +1337,6 @@ export default function CertificationsPage() {
        if (asNumber(row.cafe_declared_weight) > 0) c.certs.add('CAFE');
        if (asNumber(row.impact_declared_weight) > 0) c.certs.add('Impact');
        if (asNumber(row.aaa_declared_weight) > 0) c.certs.add('AAA');
-       if (asNumber(row.aaa_rs_declared_weight) > 0) c.certs.add('AAA-RS');
        if (asNumber(row.netzero_declared_weight) > 0) c.certs.add('NET ZERO');
     });
     
@@ -1492,7 +1350,7 @@ export default function CertificationsPage() {
     formData.append('sol_file', solFile);
 
     try {
-      const response = await fetch('http://localhost:8100/api/upload_sol_report', {
+      const response = await fetch(process.env.COBRA_MICROSERVICE_URL+'/api/upload_sol_report', {
           method: 'POST',
           body: formData, 
       });
@@ -1523,7 +1381,7 @@ export default function CertificationsPage() {
     if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
 
     try {
-      const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
+      const response = await fetch(process.env.COBRA_MICROSERVICE_URL+'/api/xbs_purchase_upload', { method: 'POST', body: formData });
       if (!response.ok) throw new Error("Failed to upload purchases.");
       
       alert("Purchases uploaded successfully!");
@@ -2110,10 +1968,10 @@ export default function CertificationsPage() {
                           {Array.from(contract.certs).map(cert => (
                               <button 
                                   key={cert}
-                                  onClick={() => setDeclarationModalCert(cert as string)}
+                                  onClick={() => setDeclarationModalCert(cert)}
                                   className={`px-4 py-3 text-sm font-bold border-b-2 transition-colors ${declarationModalCert === cert ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a]'}`}
                               >
-                                  {cert as string}
+                                  {cert}
                               </button>
                           ))}
                           {contract.certs.size === 0 && (
@@ -2242,12 +2100,12 @@ export default function CertificationsPage() {
         {/* --- MAIN NAVIGATION --- */}
         <div className="flex gap-2 border-b border-[#968C83]/30 overflow-x-auto">
           <button
-            onClick={() => setActiveTab('position')}
+            onClick={() => setActiveTab('certification')}
             className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'position' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
+              activeTab === 'certification' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
             }`}
           >
-            <ListChecks size={16} /> Positions
+            <ListChecks size={16} /> Certification
           </button>
           <button
             onClick={() => setActiveTab('tracker')}
@@ -2278,85 +2136,51 @@ export default function CertificationsPage() {
         {/* --- TAB CONTENT --- */}
         <main className="space-y-6">
           
-          {/* Sub Navigation (Only for Position Tab) */}
-          {activeTab === 'position' && (
-            <>
-              {/* Executive Position Summary */}
-              <SectionCard title="Executive Summary" subtitle="Aggregated overview of active certificate combinations">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm text-left whitespace-nowrap">
-                    <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
-                      <tr>
-                        <th className="py-3 px-4">Contract Certificates</th>
-                        <th className="py-3 px-4 text-right">Sold volume ({unitText(unit)})</th>
-                        <th className="py-3 px-4 text-right">Declared</th>
-                        <th className="py-3 px-4 text-right">Pending Declaration</th>
-                        <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">Available volume</th>
-                        <th className="py-3 px-4 text-right bg-[#B9975B] border-l border-white/10">Net position</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#D6D2C4]">
-                      {executiveSummary.length > 0 ? executiveSummary.map((row, idx) => (
-                        <tr key={row.combo} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
-                          <td className="py-2 px-4 font-bold text-[#007680]">{row.combo}</td>
-                          <td className="py-2 px-4 text-right text-[#51534a]">{formatQty(row.sold, unit)}</td>
-                          <td className="py-2 px-4 text-right text-[#968C83]">{formatQty(row.declared, unit)}</td>
-                          <td className="py-2 px-4 text-right text-[#5B3427] font-medium">{formatQty(row.pending, unit)}</td>
-                          <td className="py-2 px-4 text-right font-bold text-[#007680] bg-[#A4DBE8]/10 border-l border-[#D6D2C4]/50">{formatQty(row.available, unit)}</td>
-                          <td className={`py-2 px-4 text-right font-bold border-l border-[#D6D2C4]/50 ${row.net >= 0 ? 'text-[#97D700]' : 'text-red-500'}`}>{formatQty(row.net, unit)}</td>
-                        </tr>
-                      )) : (
-                        <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No executive position data found.</td></tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </SectionCard>
-
-              <div className="flex flex-col gap-4 pb-4 border-b border-[#968C83]/20">
-                <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-                  <div className="flex flex-col sm:flex-row sm:items-end gap-4 sm:gap-6">
-                    <div className="flex flex-col gap-2">
-                       <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Certificates</span>
-                       <FilterTabs tabs={CERTIFICATES_LIST} active={activeCert} onChange={setActiveCert} />
-                    </div>
-                    <div className="hidden sm:block w-px h-8 bg-[#D6D2C4] mb-1"></div>
-                    <div className="flex flex-col gap-2">
-                       <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Projects</span>
-                       <FilterTabs tabs={PROJECTS_LIST} active={activeCert} onChange={setActiveCert} />
-                    </div>
+          {/* Sub Navigation (Only for Certification Tab) */}
+          {activeTab === 'certification' && (
+            <div className="flex flex-col gap-4 pb-4 border-b border-[#968C83]/20">
+              <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-end gap-4 sm:gap-6">
+                  <div className="flex flex-col gap-2">
+                     <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Certificates</span>
+                     <FilterTabs tabs={CERTIFICATES_LIST} active={activeCert} onChange={setActiveCert} />
                   </div>
-
-                  {/* View Mode Toggle */}
-                  <div className="flex bg-[#F5F5F3] p-1 rounded-lg border border-[#D6D2C4] shadow-sm">
-                    <button
-                      onClick={() => setPositionView('true_position')}
-                      className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
-                        positionView === 'true_position' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
-                      }`}
-                    >
-                      True Position
-                    </button>
-                    <button
-                      onClick={() => setPositionView('crop_year')}
-                      className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
-                        positionView === 'crop_year' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
-                      }`}
-                    >
-                      Crop Year
-                    </button>
+                  <div className="hidden sm:block w-px h-8 bg-[#D6D2C4] mb-1"></div>
+                  <div className="flex flex-col gap-2">
+                     <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Projects</span>
+                     <FilterTabs tabs={PROJECTS_LIST} active={activeCert} onChange={setActiveCert} />
                   </div>
                 </div>
-                
-                <div className="text-xs text-[#968C83] italic">
-                  Showing {positionView === 'crop_year' ? 'Current Season' : 'All-Time'} undeclared balances for {activeCert} {PROJECTS_LIST.includes(activeCert as any) ? 'project' : 'certificate'} strategies.
+
+                {/* View Mode Toggle */}
+                <div className="flex bg-[#F5F5F3] p-1 rounded-lg border border-[#D6D2C4] shadow-sm">
+                  <button
+                    onClick={() => setPositionView('true_position')}
+                    className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
+                      positionView === 'true_position' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
+                    }`}
+                  >
+                    True Position
+                  </button>
+                  <button
+                    onClick={() => setPositionView('crop_year')}
+                    className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
+                      positionView === 'crop_year' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
+                    }`}
+                  >
+                    Crop Year
+                  </button>
                 </div>
               </div>
-            </>
+              
+              <div className="text-xs text-[#968C83] italic">
+                Showing {positionView === 'crop_year' ? 'Current Season' : 'All-Time'} undeclared balances for {activeCert} {PROJECTS_LIST.includes(activeCert as any) ? 'project' : 'certificate'} strategies.
+              </div>
+            </div>
           )}
 
           {/* --- KPI CARDS (Certifications) --- */}
-          {activeTab === 'position' && (
+          {activeTab === 'certification' && (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <Card className="p-4 border-l-4 border-l-[#007680]">
                 <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
@@ -2393,7 +2217,7 @@ export default function CertificationsPage() {
           )}
 
           {/* --- POSITION TABLE (Certification Tab) --- */}
-          {activeTab === 'position' && (
+          {activeTab === 'certification' && (
             <Card className="overflow-hidden border-none shadow-md">
               <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
                 <table className="w-full text-sm text-left whitespace-nowrap">
@@ -2409,23 +2233,55 @@ export default function CertificationsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#D6D2C4]">
-                    {tableData.length > 0 ? tableData.map((row) => (
-                      <tr key={row.strategy} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                        <td className="py-1.5 px-4 font-medium text-[#007680]">{row.strategy}</td>
-                        <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
-                        {uniqueMonths.map(month => {
-                          const val = row.shipmentsByMonth[month] || 0;
-                          return <td key={month} className="py-1.5 px-4 text-right text-[#968C83]">{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
-                        })}
-                        <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
-                        <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                          {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
-                        </td>
-                      </tr>
-                    )) : (
+                    {tableData.length > 0 ? tableData.map((row) => {
+                      let runningAvailable = row.available; // Initialize running balance for inline deduction
+                      
+                      return (
+                        <tr key={row.strategy} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
+                          <td className="py-1.5 px-4 font-medium text-[#007680]">{row.strategy}</td>
+                          <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
+                          {uniqueMonths.map(month => {
+                            const val = row.shipmentsByMonth[month] || 0;
+                            let colorClass = "text-[#968C83]";
+                            
+                            if (Math.abs(val) > 0.01) {
+                              // Recursively deduct and assign colors based on availability
+                              if (runningAvailable >= val) {
+                                colorClass = "text-[#007680] font-medium"; // Green (Enough stock)
+                              } else {
+                                colorClass = "text-red-500 font-bold"; // Red (Not enough stock)
+                              }
+                              runningAvailable -= val;
+                            }
+                            
+                            return <td key={month} className={`py-1.5 px-4 text-right ${colorClass}`}>{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
+                          })}
+                          <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
+                          <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                            {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
+                          </td>
+                        </tr>
+                      );
+                    }) : (
                       <tr><td colSpan={uniqueMonths.length + 4} className="py-8 text-center text-[#968C83] italic">No {activeCert} positions found.</td></tr>
                     )}
                   </tbody>
+                  {tableData.length > 0 && (
+                     <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
+                        <tr>
+                           <td className="py-2 px-4">TOTALS</td>
+                           <td className="py-2 px-4 text-right">{formatNumber(convertQty(kpis.stock, unit))}</td>
+                           {uniqueMonths.map(month => {
+                              const monthTotal = tableData.reduce((sum, row) => sum + (row.shipmentsByMonth[month] || 0), 0);
+                              return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
+                           })}
+                           <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(kpis.shorts, unit))}</td>
+                           <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${kpis.net >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                              {kpis.net > 0 ? '+' : ''}{formatNumber(convertQty(kpis.net, unit))}
+                           </td>
+                        </tr>
+                     </tfoot>
+                  )}
                   {tableData.length > 0 && (
                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
                         <tr>
@@ -2500,7 +2356,7 @@ export default function CertificationsPage() {
                       type="button"
                       onClick={() => {
                         setTrackerDateStartFilter(trackerDateStartDraft);
-                        setTrackerDateEndFilter(trackerDateEndFilter);
+                        setTrackerDateEndFilter(trackerDateEndDraft);
                       }}
                       disabled={!trackerDateStartDraft && !trackerDateEndDraft}
                       className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50"
@@ -2590,21 +2446,17 @@ export default function CertificationsPage() {
 
                     <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                       {trackerCerts.length === 0 ? (
+                         // ALL: show every cert bucket
                          CERT_FILTERS.map(cert => renderAllocationCard(cert, trackerAllocationSummary[cert as keyof typeof trackerAllocationSummary]))
                       ) : trackerCerts.length === 1 ? (
-                         trackerCerts.includes("AAA") ? (
-                           <>
-                             {renderAllocationCard("AAA", trackerAllocationSummary["AAA"])}
-                             {renderAllocationCard("AAA/CP", trackerAllocationSummary["AAA/CP"])}
-                           </>
-                         ) : (
-                           trackerCerts.map(cert => (
-                              <React.Fragment key={cert}>
-                                {renderAllocationCard(cert, trackerAllocationSummary[cert as keyof typeof trackerAllocationSummary])}
-                              </React.Fragment>
-                           ))
-                         )
+                         // Single cert: show that cert's card
+                         trackerCerts.map(cert => (
+                            <React.Fragment key={cert}>
+                              {renderAllocationCard(cert, trackerAllocationSummary[cert as keyof typeof trackerAllocationSummary])}
+                            </React.Fragment>
+                         ))
                       ) : (
+                         // 2+ certs: collapse to a single intersection card
                          trackerIntersectionCard ? renderAllocationCard(trackerIntersectionCard.label, trackerIntersectionCard) : null
                       )}
                     </div>

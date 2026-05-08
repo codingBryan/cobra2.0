@@ -15,7 +15,12 @@ import {
   Search,
   ChevronRight,
   CheckCircle,
-  Circle
+  Circle,
+  PackageCheck,
+  AlertCircle,
+  LineChart as LineChartIcon,
+  RefreshCw,
+  Copy
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -36,7 +41,7 @@ const BLEND_COMPONENTS = [
   { key: 'post_specialty_washed', label: 'POST SPECIALTY WASHED' },
   { key: 'post_17_up_top', label: 'POST 17 UP TOP' },
   { key: 'post_16_top', label: 'POST 16 TOP' },
-  { key: 'post_15_top', label: 'POST 15 TOP' },
+  { key: 'post_15_top', label: 'POST PB TOP' },
   { key: 'post_pb_top', label: 'POST PB TOP' },
   { key: 'post_17_up_plus', label: 'POST 17 UP PLUS' },
   { key: 'post_16_plus', label: 'POST 16 PLUS' },
@@ -87,6 +92,7 @@ interface SaleContract {
   blend_id?: number;
   blend_name?: string;
   executed?: boolean;
+  pending_dispatch?: boolean;
 }
 
 interface PhysicalPositionRecord {
@@ -96,7 +102,6 @@ interface PhysicalPositionRecord {
   total_shorts: number;
   net_position: number;
 }
-
 
 // --- Helper Functions ---
 const convertQty = (kg: number, unit: Unit): number => {
@@ -169,10 +174,23 @@ function getBlendCompositionRow(blend: Blend) {
 }
 
 // --- Reusable Components ---
-const Card = ({ children, className = "", variant = "default" }: { children: React.ReactNode; className?: string, variant?: "default" | "dark" }) => {
+const Card = ({ 
+  children, 
+  className = "", 
+  variant = "default", 
+  style 
+}: { 
+  children: React.ReactNode; 
+  className?: string; 
+  variant?: "default" | "dark";
+  style?: React.CSSProperties;
+}) => {
   const bgClass = variant === "dark" ? "bg-[#51534a] text-white border-none" : "bg-white border border-[#968C83]/20";
   return (
-    <div className={`rounded-xl shadow-sm ${bgClass} ${className}`}>
+    <div 
+      className={`rounded-xl shadow-sm ${bgClass} ${className}`} 
+      style={style}
+    >
       {children}
     </div>
   );
@@ -289,7 +307,8 @@ export default function PhysicalPage() {
 
   const [sales, setSales] = useState<SaleContract[]>([]);
   const [blends, setBlends] = useState<Blend[]>([]);
-  const [historyData, setHistoryData] = useState<any[]>([]); // New history state
+  const [historyData, setHistoryData] = useState<any[]>([]); 
+  const [globalVariables, setGlobalVariables] = useState<any[]>([]);
   const [positionFilter, setPositionFilter] = useState<'all' | 'long' | 'short'>('all');
   
   // Physical Data state
@@ -297,7 +316,7 @@ export default function PhysicalPage() {
     gridData: PhysicalPositionRecord[],
     months: string[],
     kpis: { totalTheoretical: number, totalShorts: number, totalNet: number }
-  }>({ gridData: [], months: [], kpis: { totalTheoretical: 0, totalShorts: 0, totalNet: 0 } });
+  } | null>(null);
   
   const [isPhysicalLoading, setIsPhysicalLoading] = useState(false);
   const [hasFetchedPhysical, setHasFetchedPhysical] = useState(false);
@@ -310,6 +329,17 @@ export default function PhysicalPage() {
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
   const [isAddBlendModalOpen, setIsAddBlendModalOpen] = useState(false);
   const [isUpdatePositionsModalOpen, setIsUpdatePositionsModalOpen] = useState(false);
+  const [isChartDrawerOpen, setIsChartDrawerOpen] = useState(false);
+  
+  // Execution Modal State
+  const [isExecuteModalOpen, setIsExecuteModalOpen] = useState(false);
+  const [executeContractId, setExecuteContractId] = useState<number | null>(null);
+  const [executeForm, setExecuteForm] = useState({ containers: '', dispatchDate: '', finishedBatchId: null as number | null, finishedBatchNumber: '' });
+  
+  // Search Batch State
+  const [batchSearchQuery, setBatchSearchQuery] = useState('');
+  const [searchedBatch, setSearchedBatch] = useState<{id: number, batch_number: string, output_qty: number} | null>(null);
+  const [isSearchingBatch, setIsSearchingBatch] = useState(false);
 
   const [isDirectSale, setIsDirectSale] = useState(true);
   const [purchaseSaleNumber, setPurchaseSaleNumber] = useState('');
@@ -325,8 +355,10 @@ export default function PhysicalPage() {
   });
 
   const [blendForm, setBlendForm] = useState<Record<string, any>>(INITIAL_BLEND_FORM);
+  const [editingBlendId, setEditingBlendId] = useState<number | null>(null);
 
   const [solFile, setSolFile] = useState<File | null>(null);
+  const [dnpFile, setDnpFile] = useState<File | null>(null);
   const [purchaseFile, setPurchaseFile] = useState<File | null>(null);
 
   const [manualSaleForm, setManualSaleForm] = useState({
@@ -355,15 +387,17 @@ export default function PhysicalPage() {
     async function fetchData() {
       try {
         setLoading(true);
-        const [salesRes, blendsRes, historyRes] = await Promise.all([
+        const [salesRes, blendsRes, historyRes, varsRes] = await Promise.all([
           fetch('/api/contracts', { cache: 'no-store' }),
           fetch('/api/blends', { cache: 'no-store' }),
-          fetch('/api/physical_stock_position', { cache: 'no-store' }).catch(() => null) // <-- FIXED URL HERE
+          fetch('/api/physical_stock_position', { cache: 'no-store' }).catch(() => null),
+          fetch('/api/contracts?fetchVariables=true', { cache: 'no-store' }).catch(() => null)
         ]);
         
         if (salesRes.ok) setSales(await salesRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
         if (blendsRes.ok) setBlends(await blendsRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
         if (historyRes && historyRes.ok) setHistoryData(await historyRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
+        if (varsRes && varsRes.ok) setGlobalVariables(await varsRes.json());
       } catch (error) {
         console.error("Error fetching data:", error);
       } finally {
@@ -373,11 +407,16 @@ export default function PhysicalPage() {
     fetchData();
   }, []);
 
+  const getVariableValue = (name: string) => {
+    const variable = globalVariables.find(v => v.name === name);
+    return variable ? variable.value : 0;
+  };
+
   useEffect(() => {
     if (!selectedBlendId && blends.length > 0) setSelectedBlendId(blends[0].id);
   }, [blends, selectedBlendId]);
 
-  // O(N) Memoization for Chart Data pivoting
+  // Chart Data pivot
   const chartData = useMemo(() => {
     const grouped: Record<string, any> = {};
     const stackNames = new Set<string>();
@@ -385,7 +424,6 @@ export default function PhysicalPage() {
 
     historyData.forEach(row => {
       if (!row.recorded_date) return;
-      // Standardize date to "Apr 16" format
       const d = new Date(row.recorded_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       if (!grouped[d]) grouped[d] = { date: d };
       
@@ -393,11 +431,9 @@ export default function PhysicalPage() {
       grouped[d][row.stack] = pos;
       stackNames.add(row.stack);
       
-      // historyData is sorted ASC by date. Therefore, the last time a stack appears, it is its latest value.
       latestPositions[row.stack] = pos;
     });
 
-    // Filter stacks based on the selected toggle (O(S) complexity)
     let stacks = Array.from(stackNames);
     if (positionFilter === 'long') {
         stacks = stacks.filter(stack => latestPositions[stack] > 0);
@@ -449,40 +485,90 @@ export default function PhysicalPage() {
     }
   };
 
-  // O(1) Fetch toggle endpoint for contract execution logic
+  const handleSearchBatch = async () => {
+    if (!batchSearchQuery.trim()) return;
+    setIsSearchingBatch(true);
+    setSearchedBatch(null);
+    try {
+        const res = await fetch(`/api/contracts?searchBatch=${encodeURIComponent(batchSearchQuery.trim())}`);
+        if (!res.ok) throw new Error("Search failed");
+        const data = await res.json();
+        
+        if (Array.isArray(data) && data.length > 0) {
+            setSearchedBatch(data[0]);
+        } else {
+            alert("No finished batch found matching this query.");
+        }
+    } catch (e) {
+        console.error(e);
+        alert("Error searching for batch.");
+    } finally {
+        setIsSearchingBatch(false);
+    }
+  };
+
+  // Execution Toggle Flow
   const toggleContractExecution = async (id: number, currentStatus: boolean) => {
+    if (!currentStatus) {
+        setExecuteContractId(id);
+        setExecuteForm({ containers: '', dispatchDate: '', finishedBatchId: null, finishedBatchNumber: '' });
+        setBatchSearchQuery('');
+        setSearchedBatch(null);
+        setIsSearchingBatch(false);
+        setIsExecuteModalOpen(true);
+        return;
+    }
+
     try {
       const response = await fetch('/api/contracts', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, executed: !currentStatus })
+        body: JSON.stringify({ id, executed: false })
       });
       if (!response.ok) throw new Error("Failed to update status");
       
-      setSales(prev => prev.map(sale => sale.id === id ? { ...sale, executed: !currentStatus } : sale));
+      setSales(prev => prev.map(sale => sale.id === id ? { ...sale, executed: false } : sale));
     } catch(e) {
       alert("Failed to toggle contract execution status.");
     }
   };
 
-  // ⚡ O(N) Memoization for Contracts Tab Filtering
+  const handleExecuteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!executeContractId) return;
+
+    try {
+        const response = await fetch('/api/contracts', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                id: executeContractId, 
+                executed: true,
+                containers: executeForm.containers,
+                dispatchDate: executeForm.dispatchDate,
+                finishedBatchId: executeForm.finishedBatchId
+            })
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.error || "Failed to execute contract");
+        }
+        
+        setSales(prev => prev.map(sale => sale.id === executeContractId ? { ...sale, executed: true } : sale));
+        setIsExecuteModalOpen(false);
+        setExecuteContractId(null);
+    } catch (error: any) {
+        alert(`Execution failed: ${error.message}`);
+    }
+  };
+
   const filteredContracts = useMemo(() => {
     return sales.filter(sale => {
-      // Execute toggle filter
       if (!showExecutedContracts && bool(sale.executed)) return false;
-      
-      // Search filter
       if (contractSearch) {
         const q = contractSearch.toLowerCase();
-        const match = [
-          sale.contract_number,
-          sale.client,
-          sale.quality,
-          sale.strategy,
-          sale.grade,
-          sale.blend_name
-        ].some(val => String(val || '').toLowerCase().includes(q));
-        if (!match) return false;
+        return [sale.contract_number, sale.client, sale.quality, sale.strategy, sale.grade, sale.blend_name].some(val => String(val || '').toLowerCase().includes(q));
       }
       return true;
     });
@@ -493,81 +579,90 @@ export default function PhysicalPage() {
       return Array.from(new Set(clients)).sort();
   }, [sales]);
 
-
-  // ⚡ O(N) Physical Positions Grid Complete Construction:
+  // COMPUTE PHYSICAL GRID VIEW
   const physicalGridView = useMemo(() => {
-    if (!hasFetchedPhysical || !physicalData.gridData) return { data: [], months: [], kpis: { totalTheoretical: 0, totalShorts: 0, totalNet: 0 } };
-    
-    const gridMap = new Map(physicalData.gridData.map(row => [row.stack, row]));
-    const missingShorts = new Map<string, { total: number, months: Record<string, number> }>();
-    const monthSet = new Set<string>(physicalData.months || []);
+    let sourceTheoretical: Record<string, number> = {};
+    let initialKpis = { totalTheoretical: 0, totalShorts: 0, totalNet: 0 };
+    let monthSet = new Set<string>();
+
+    if (hasFetchedPhysical && physicalData) {
+      physicalData.gridData.forEach(row => {
+        sourceTheoretical[row.stack] = row.theoretical_volume;
+      });
+      initialKpis.totalTheoretical = physicalData.kpis.totalTheoretical;
+      physicalData.months.forEach(m => monthSet.add(m));
+    } 
+    else if (historyData.length > 0) {
+      const uniqueDates = Array.from(new Set(historyData.map(d => d.recorded_date))).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+      const latestDate = uniqueDates[0];
+      const snapshot = historyData.filter(d => d.recorded_date === latestDate);
+      
+      snapshot.forEach(row => {
+        const vol = asNumber(row.theoretical_volume);
+        sourceTheoretical[row.stack] = vol;
+        initialKpis.totalTheoretical += vol;
+      });
+    }
+
+    const gridMap = new Map<string, PhysicalPositionRecord>();
     const blendMap = new Map(blends.map(b => [b.id, b]));
 
-    let extraShortsTotal = 0;
+    BLEND_COMPONENTS.forEach(comp => {
+      const theoretical = sourceTheoretical[comp.key] || 0;
+      gridMap.set(comp.key, {
+        stack: comp.key,
+        theoretical_volume: theoretical,
+        months: {},
+        total_shorts: 0,
+        net_position: theoretical
+      });
+    });
 
-    // O(N) pass to deduct shorts for zero-volume stacks dynamically
     sales.forEach(sale => {
-        if (bool(sale.executed) || !sale.blend_id) return;
-        const blend = blendMap.get(Number(sale.blend_id));
-        if (!blend) return;
+      if (bool(sale.executed) || !sale.blend_id || sale.pending_dispatch) return;
+      const blend = blendMap.get(Number(sale.blend_id));
+      if (!blend) return;
 
-        const monthKey = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
-        const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
+      const monthKey = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
+      const weight = Math.abs(asNumber(sale.weight_kilos || sale.weight || sale.SMT || 0));
+      monthSet.add(monthKey);
 
-        BLEND_COMPONENTS.forEach(comp => {
-            if (!gridMap.has(comp.key)) {
-                const compPercent = asNumber(blend[comp.key]) / 100;
-                if (compPercent > 0) {
-                    const shortVol = weight * compPercent;
-                    if (!missingShorts.has(comp.key)) {
-                        missingShorts.set(comp.key, { total: 0, months: {} });
-                    }
-                    const record = missingShorts.get(comp.key)!;
-                    record.total += shortVol;
-                    record.months[monthKey] = (record.months[monthKey] || 0) + shortVol;
-                    monthSet.add(monthKey);
-                    extraShortsTotal += shortVol;
-                }
-            }
-        });
-    });
-    
-    const result = BLEND_COMPONENTS.map(comp => {
-        const existing = gridMap.get(comp.key);
-        if (existing) {
-            gridMap.delete(comp.key); 
-            return existing;
+      BLEND_COMPONENTS.forEach(comp => {
+        const compPercent = asNumber(blend[comp.key]) / 100;
+        if (compPercent > 0) {
+          const shortVol = weight * compPercent;
+          const record = gridMap.get(comp.key)!;
+          record.months[monthKey] = (record.months[monthKey] || 0) + shortVol;
+          record.total_shorts += shortVol;
+          record.net_position -= shortVol;
         }
-        
-        const shorts = missingShorts.get(comp.key);
-        return {
-            stack: comp.key,
-            theoretical_volume: 0,
-            months: shorts ? shorts.months : {},
-            total_shorts: shorts ? shorts.total : 0,
-            net_position: shorts ? -shorts.total : 0
-        };
+      });
     });
-    
-    gridMap.forEach(val => result.push(val));
-    
+
+    const gridData = Array.from(gridMap.values());
     const sortedMonths = Array.from(monthSet).sort((a, b) => {
         if (a === 'Unscheduled') return 1;
         if (b === 'Unscheduled') return -1;
         return new Date(a).getTime() - new Date(b).getTime();
     });
 
-    return { 
-        data: result, 
-        months: sortedMonths, 
-        kpis: {
-            totalTheoretical: physicalData.kpis.totalTheoretical,
-            totalShorts: physicalData.kpis.totalShorts + extraShortsTotal,
-            totalNet: physicalData.kpis.totalNet - extraShortsTotal
-        }
-    };
-  }, [physicalData, hasFetchedPhysical, sales, blends]);
+    let totalShorts = 0;
+    let totalNet = 0;
+    gridData.forEach(row => {
+      totalShorts += row.total_shorts;
+      totalNet += row.net_position;
+    });
 
+    return { 
+      data: gridData, 
+      months: sortedMonths, 
+      kpis: {
+        totalTheoretical: initialKpis.totalTheoretical,
+        totalShorts,
+        totalNet
+      }
+    };
+  }, [physicalData, hasFetchedPhysical, sales, blends, historyData]);
 
   const visibleBlends = useMemo(() => {
     const q = blendSearch.trim().toLowerCase();
@@ -587,75 +682,50 @@ export default function PhysicalPage() {
     const entered = BLEND_COMPONENTS.some((comp) => asNumber(blendForm[comp.key]) > 0);
     if (!isAddBlendModalOpen || !entered) return "";
     if (Math.abs(blendCompositionTotal - 100) < 0.01) return "";
-    return blendCompositionTotal > 100 ? `Blend composition is over 100% (${blendCompositionTotal.toFixed(2)}%). Reduce one or more components.` : `Blend composition is below 100% (${blendCompositionTotal.toFixed(2)}%). Add the remaining percentage before saving.`;
+    return blendCompositionTotal > 100 ? `Over 100% (${blendCompositionTotal.toFixed(2)}%).` : `Under 100% (${blendCompositionTotal.toFixed(2)}%).`;
   }, [isAddBlendModalOpen, blendCompositionTotal, blendForm]);
 
   const handleUploadSol = async () => {
     if (!solFile) return;
     const formData = new FormData();
     formData.append('sol_file', solFile);
+    if (dnpFile) formData.append('daily_net_position_file', dnpFile);
 
     try {
-      const response = await fetch('http://localhost:8100/api/upload_sol_report', {
-          method: 'POST',
-          body: formData, 
-      });
-
-      if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.detail || "Failed to upload SOL report.");
-      }
-      
-      alert("SOL Report uploaded successfully!");
-      setSolFile(null);
+      const response = await fetch('http://localhost:8100/api/upload_sol_report', { method: 'POST', body: formData });
+      if (!response.ok) throw new Error("Failed to upload reports.");
+      alert("Reports uploaded successfully!");
       setIsAddModalOpen(false);
       window.location.reload(); 
-      
     } catch (error: any) {
-      console.error("Upload error:", error);
-      alert(`Error uploading file: ${error.message}`);
+      alert(`Error: ${error.message}`);
     }
   };
 
   const handleUploadPurchasesSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!purchaseFile) return;
-    
     const formData = new FormData();
     formData.append('xbs_file', purchaseFile);
     if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
-
     try {
       const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
       if (!response.ok) throw new Error("Failed to upload purchases.");
-      
       alert("Purchases uploaded successfully!");
       setIsPurchaseModalOpen(false);
       setIsAddModalOpen(false);
-      setPurchaseFile(null);
-      setPurchaseSaleNumber('');
-      setIsDirectSale(true);
     } catch (error) {
-      alert("Error uploading file. Please try again.");
+      alert("Error uploading file.");
     }
   };
 
   const handleManualSaleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-
     try {
-      const response = await fetch('/api/contracts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(manualSaleForm)
-      });
-      if (!response.ok) throw new Error("Failed to save sale.");
+      const response = await fetch('/api/contracts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(manualSaleForm) });
+      if (!response.ok) throw new Error("Failed to save.");
       const data = await response.json();
-      
-      if (data.success && data.sale) {
-        setSales(prev => [...prev, data.sale]);
-      }
-      
+      if (data.success && data.sale) setSales(prev => [...prev, data.sale]);
       setIsManualSalesModalOpen(false);
       setManualSaleForm({ contractNumber: '', client: '', weight: '', quality: '', grade: '', shippingDate: '', certifications: [] });
     } catch (error) {
@@ -673,34 +743,13 @@ export default function PhysicalPage() {
       });
   };
 
-  const handleCancelEdit = () => {
-      setEditingContractId(null);
-  };
-
   const handleSaveEdit = async (id: number) => {
       try {
           const payloadBlendId = editForm.blend_id === '' ? null : editForm.blend_id;
-
-          const response = await fetch('/api/contracts', {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id, ...editForm, blend_id: payloadBlendId })
-          });
-          
+          const response = await fetch('/api/contracts', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, ...editForm, blend_id: payloadBlendId }) });
           if (!response.ok) throw new Error("Failed to update");
-          
           const selectedBlend = blends.find(b => b.id === Number(editForm.blend_id));
-          
-          setSales(prev => prev.map(sale => 
-              sale.id === id ? { 
-                  ...sale, 
-                  quality: editForm.quality, 
-                  grade: editForm.grade, 
-                  certifications: editForm.certifications,
-                  blend_id: payloadBlendId !== null ? Number(payloadBlendId) : undefined,
-                  blend_name: selectedBlend ? selectedBlend.name : undefined
-              } : sale
-          ));
+          setSales(prev => prev.map(sale => sale.id === id ? { ...sale, quality: editForm.quality, grade: editForm.grade, certifications: editForm.certifications, blend_id: payloadBlendId !== null ? Number(payloadBlendId) : undefined, blend_name: selectedBlend ? selectedBlend.name : undefined } : sale));
           setEditingContractId(null);
       } catch (e) {
           alert("Failed to update contract");
@@ -713,39 +762,61 @@ export default function PhysicalPage() {
     const response = await fetch("/api/contracts", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: contractId,
-        quality: contract.quality || contract.strategy || "",
-        grade: contract.grade || "",
-        certifications: parseCerts(contract.certifications),
-        blend_id: blendId
-      }),
+      body: JSON.stringify({ id: contractId, quality: contract.quality || contract.strategy || "", grade: contract.grade || "", certifications: parseCerts(contract.certifications), blend_id: blendId }),
     });
     if (!response.ok) throw new Error("Failed to update contract");
     const selected = blends.find((b) => b.id === blendId);
     setSales((prev) => prev.map((sale) => (sale.id === contractId ? { ...sale, blend_id: blendId ?? undefined, blend_name: selected?.name ?? undefined } : sale)));
   }
 
-  const handleCreateBlendSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const openEditBlendModal = (blend: Blend) => {
+    setEditingBlendId(blend.id);
+    const formPopulate: Record<string, any> = { ...INITIAL_BLEND_FORM };
     
-    const payload = Object.fromEntries(
-        Object.entries(blendForm).filter(([_, v]) => v !== '')
-    );
+    // Map existing blend properties to the form state
+    Object.keys(INITIAL_BLEND_FORM).forEach(key => {
+        if (blend[key] !== undefined && blend[key] !== null) {
+            formPopulate[key] = blend[key];
+        }
+    });
+    
+    setBlendForm(formPopulate);
+    setIsAddBlendModalOpen(true);
+  };
+
+  const handleCreateBlendSubmit = async (e: React.MouseEvent | React.FormEvent, isDuplicate = false) => {
+    e.preventDefault();
+    const payload: any = Object.fromEntries(Object.entries(blendForm).filter(([_, v]) => v !== ''));
+
+    if (isDuplicate) {
+        payload.name = `${payload.name || 'Blend'}-Copy`;
+    }
+
+    const isUpdating = editingBlendId !== null && !isDuplicate;
+    const method = isUpdating ? 'PUT' : 'POST';
+    
+    if (isUpdating) {
+        payload.id = editingBlendId;
+    }
 
     try {
-      const response = await fetch('/api/blends', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+      const response = await fetch('/api/blends', { 
+          method, 
+          headers: { 'Content-Type': 'application/json' }, 
+          body: JSON.stringify(payload) 
       });
-      
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Failed to create blend");
+      if (!response.ok) throw new Error(data.error || `Failed to ${isUpdating ? 'update' : 'create'} blend`);
       
       if (data.success) {
-        setBlends(prev => [{ id: data.id, ...payload } as Blend, ...prev]);
+        if (isUpdating) {
+            setBlends(prev => prev.map(b => b.id === editingBlendId ? { ...b, ...payload } as Blend : b));
+        } else {
+            setBlends(prev => [{ id: data.id, ...payload } as Blend, ...prev]);
+            setSelectedBlendId(data.id);
+        }
         setIsAddBlendModalOpen(false);
+        setEditingBlendId(null);
         setBlendForm(INITIAL_BLEND_FORM);
       }
     } catch (error: any) {
@@ -754,201 +825,263 @@ export default function PhysicalPage() {
   };
 
   async function deleteBlend(blendId: number) {
-    const linked = sales.filter((sale) => Number(sale.blend_id) === blendId);
     try {
-      await Promise.allSettled(
-        linked.map(async (sale) => {
-          try { await updateContractBlend(sale.id, null); } catch (error) {}
-        })
-      );
-      
-      const response = await fetch(`/api/blends?id=${blendId}`, {
-        method: "DELETE",
-      });
-
-      if (!response.ok) {
-        throw new Error("Backend database deletion failed");
-      }
-
-      setBlends((prev) => prev.filter((blend) => blend.id !== blendId));
+      const linked = sales.filter((sale) => Number(sale.blend_id) === blendId);
+      await Promise.allSettled(linked.map(s => updateContractBlend(s.id, null)));
+      const response = await fetch(`/api/blends?id=${blendId}`, { method: "DELETE" });
+      if (!response.ok) throw new Error("Deletion failed");
+      setBlends((prev) => prev.filter((b) => b.id !== blendId));
       if (selectedBlendId === blendId) setSelectedBlendId(null);
-      setSales((prev) => prev.map((sale) => (Number(sale.blend_id) === blendId ? { ...sale, blend_id: undefined, blend_name: undefined } : sale)));
-
       alert("Blend deleted successfully.");
     } catch (error) {
-      console.error(error);
       alert("Failed to delete blend.");
     }
   }
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#D6D2C4] flex flex-col items-center justify-center text-[#51534a] font-bold">
-        <style>{`
-          @keyframes steamUp {
-            0% { opacity: 0; transform: translateY(4px); }
-            50% { opacity: 1; }
-            100% { opacity: 0; transform: translateY(-8px); }
-          }
-          .steam-1 { animation: steamUp 1.5s infinite ease-in-out; }
-          .steam-2 { animation: steamUp 1.5s infinite ease-in-out 0.3s; }
-          .steam-3 { animation: steamUp 1.5s infinite ease-in-out 0.6s; }
-        `}</style>
-        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" className="mb-4">
-          <path d="M16 28V44C16 48.4183 19.5817 52 24 52H40C44.4183 52 48 48.4183 48 44V28H16Z" fill="#007680"/>
-          <path d="M48 32H52C54.2091 32 56 33.7909 56 36C56 38.2091 54.2091 40 52 40H48" stroke="#007680" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/>
-          <path className="steam-1" d="M24 20C24 16 28 16 28 12" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
-          <path className="steam-2" d="M32 22C32 18 36 18 36 14" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
-          <path className="steam-3" d="M40 20C40 16 44 16 44 12" stroke="#968C83" strokeWidth="3" strokeLinecap="round"/>
-        </svg>
-        <div>Brewing Physical Data...</div>
+      <div className="min-h-screen bg-[#D6D2C4] flex flex-col items-center justify-center text-[#51534a] font-bold gap-4">
+        <RefreshCw className="animate-spin text-[#007680]" size={40} />
+        <div>Brewing Coffee Data...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#D6D2C4] font-sans text-[#51534a] md:p-1 relative">
+    <div className="min-h-screen bg-[#D6D2C4] font-sans text-[#51534a] relative overflow-x-hidden">
       
-      {/* --- MODALS --- */}
-      {isAddModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-[#EFEFE9] w-full max-w-4xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
-              <h2 className="text-lg font-bold text-[#51534a] flex items-center gap-2">
-                <div className="w-8 h-8 bg-[#007680] rounded flex items-center justify-center text-white">
-                  <Plus size={18} />
+      {/* --- CHART SIDE DRAWER --- */}
+      <div className={`fixed inset-0 z-[100] transition-opacity duration-300 ${isChartDrawerOpen ? 'bg-black/40 visible' : 'bg-transparent invisible pointer-events-none'}`} onClick={() => setIsChartDrawerOpen(false)}>
+         <div 
+           className={`absolute top-0 right-0 h-full w-full max-w-2xl bg-white shadow-2xl transition-transform duration-300 transform p-6 flex flex-col ${isChartDrawerOpen ? 'translate-x-0' : 'translate-x-full'}`}
+           onClick={e => e.stopPropagation()}
+         >
+            <div className="flex justify-between items-center mb-6">
+                <div>
+                  <h3 className="text-xl font-bold text-[#51534a]">Position History</h3>
+                  <p className="text-sm text-[#968C83]">7-Day trend of net positions</p>
                 </div>
-                Add / Upload Records
-              </h2>
-              <button onClick={() => setIsAddModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/30 transition-all">
-                <X size={20} />
-              </button>
+                <button onClick={() => setIsChartDrawerOpen(false)} className="p-2 hover:bg-[#F5F5F3] rounded-full transition-colors"><X size={24} /></button>
             </div>
 
-            <div className="flex flex-col md:flex-row divide-y md:divide-y-0 md:divide-x divide-[#D6D2C4] bg-[#F5F5F3]">
-              <div className="flex-1 p-6 flex flex-col gap-6">
-                <div>
-                  <h3 className="font-bold text-[#51534a] text-sm flex items-center gap-2 mb-1">
-                    <CloudUpload size={16} className="text-[#B9975B]" />
-                    Upload Purchases
-                  </h3>
-                  <p className="text-xs text-[#968C83]">Import stock batches from Excel.</p>
-                </div>
-                <div className="space-y-4">
-                  <FileDropZone 
-                    label="XBS Upload Template (XLS/XLSX)" 
-                    accept=".xls,.xlsx" 
-                    file={purchaseFile}
-                    onFileAdded={setPurchaseFile}
-                    onRemoveFile={() => setPurchaseFile(null)}
-                  />
-                  <div className="pt-2">
-                      <button 
-                        onClick={() => setIsPurchaseModalOpen(true)}
-                        disabled={!purchaseFile}
-                        className="w-full bg-[#51534a] text-white px-4 py-2 rounded text-sm font-medium hover:bg-[#51534a]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        Upload Purchases
-                      </button>
-                  </div>
-                </div>
-              </div>
+            <div className="flex bg-[#F5F5F3] rounded-lg p-1 border border-[#D6D2C4] shadow-inner mb-6 w-max">
+                <button onClick={() => setPositionFilter('all')} className={`px-4 py-1.5 text-xs font-bold rounded transition-colors ${positionFilter === 'all' ? 'bg-white shadow text-[#51534a]' : 'text-[#968C83] hover:text-[#51534a]'}`}>ALL</button>
+                <button onClick={() => setPositionFilter('long')} className={`px-4 py-1.5 text-xs font-bold rounded transition-colors ${positionFilter === 'long' ? 'bg-white shadow text-[#007680]' : 'text-[#968C83] hover:text-[#007680]'}`}>LONG</button>
+                <button onClick={() => setPositionFilter('short')} className={`px-4 py-1.5 text-xs font-bold rounded transition-colors ${positionFilter === 'short' ? 'bg-white shadow text-red-500' : 'text-[#968C83] hover:text-red-500'}`}>SHORT</button>
+            </div>
 
-              <div className="flex-1 p-6 flex flex-col gap-6 bg-white/50">
-                <div>
-                  <h3 className="font-bold text-[#51534a] text-sm flex items-center gap-2 mb-1">
-                    <FileSpreadsheet size={16} className="text-[#007680]" />
-                    Add Sales
-                  </h3>
-                  <p className="text-xs text-[#968C83]">Upload logistics report or add manually.</p>
+            <div className="flex-1 min-h-0">
+                {chartData.data.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData.data} margin={{ top: 20, right: 30, left: 10, bottom: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EFEFE9" />
+                      <XAxis dataKey="date" tick={{fontSize: 11, fill: '#968C83'}} axisLine={false} tickLine={false} />
+                      <YAxis tick={{fontSize: 11, fill: '#968C83'}} axisLine={false} tickLine={false} tickFormatter={(val) => formatNumber(convertQty(val, unit))} />
+                      <Tooltip 
+                        content={({ active, payload, label }) => {
+                            if (active && payload && payload.length) {
+                                const activePayload = payload.filter((p: any) => Math.abs(p.value) > 0.01).sort((a: any, b: any) => Math.abs(b.value) - Math.abs(a.value));
+                                if (activePayload.length === 0) return null;
+                                return (
+                                    <div className="bg-white/95 backdrop-blur-sm p-4 border border-[#D6D2C4] shadow-xl rounded-xl text-xs min-w-[180px]">
+                                        <p className="font-bold mb-3 text-[#51534a] border-b border-[#D6D2C4] pb-2">{label}</p>
+                                        <div className="space-y-1.5">
+                                            {activePayload.map((entry: any) => (
+                                                <div key={entry.name} className="flex justify-between items-center gap-4">
+                                                    <span style={{ color: entry.color }} className="font-medium truncate max-w-[140px]">{entry.name}</span>
+                                                    <span className="font-bold text-[#51534a]">{formatNumber(convertQty(entry.value, unit))}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            }
+                            return null;
+                        }}
+                      />
+                      {chartData.stacks.map((stack, i) => (
+                        <Line key={stack} type="monotone" dataKey={stack} name={formatStackName(stack)} stroke={`hsl(${(i * 137.5) % 360}, 65%, 45%)`} strokeWidth={2.5} dot={false} activeDot={{ r: 5 }} />
+                      ))}
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-sm text-[#968C83] italic">No history data available.</div>
+                )}
+            </div>
+         </div>
+      </div>
+
+      {/* --- ADD / UPLOAD RECORDS MODAL --- */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-[#EFEFE9] w-full max-w-4xl rounded-xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
+              <h2 className="text-lg font-bold text-[#51534a] flex items-center gap-2">
+                <div className="w-8 h-8 bg-[#007680] rounded flex items-center justify-center text-white"><Plus size={18} /></div>
+                Add / Upload Records
+              </h2>
+              <button onClick={() => setIsAddModalOpen(false)} className="text-[#968C83] hover:text-[#51534a]"><X size={20} /></button>
+            </div>
+            <div className="flex flex-col md:flex-row divide-[#D6D2C4] bg-[#F5F5F3]">
+              <div className="flex-1 p-6 flex flex-col gap-6">
+                <div><h3 className="font-bold text-[#51534a] text-sm">Upload Purchases</h3></div>
+                <FileDropZone label="XBS Template" accept=".xls,.xlsx" file={purchaseFile} onFileAdded={setPurchaseFile} onRemoveFile={() => setPurchaseFile(null)} />
+                <button onClick={() => setIsPurchaseModalOpen(true)} disabled={!purchaseFile} className="w-full bg-[#51534a] text-white px-4 py-2 rounded text-sm font-medium">Next</button>
+              </div>
+              <div className="flex-1 p-6 flex flex-col gap-6 bg-white/50 border-l border-[#D6D2C4]">
+                <div><h3 className="font-bold text-[#51534a] text-sm">Add Sales & Daily Position</h3></div>
+                <div className="grid grid-cols-1 gap-4">
+                  <FileDropZone label="SOL Report *" accept=".xls,.xlsx" file={solFile} onFileAdded={setSolFile} onRemoveFile={() => setSolFile(null)} />
+                  <FileDropZone label="Daily Net Position (Optional)" accept=".xls,.xlsx" file={dnpFile} onFileAdded={setDnpFile} onRemoveFile={() => setDnpFile(null)} />
+                  {solFile && <button onClick={handleUploadSol} className="w-full bg-[#007680] text-white px-4 py-2 rounded text-sm font-medium flex justify-center items-center gap-2"><CloudUpload size={16}/> Upload Reports</button>}
                 </div>
-                <div className="flex flex-col h-full justify-between">
-                  <div>
-                    <FileDropZone 
-                      label="SOL Logistics Report (XLS/XLSX)" 
-                      accept=".xls,.xlsx" 
-                      file={solFile}
-                      onFileAdded={setSolFile}
-                      onRemoveFile={() => setSolFile(null)}
-                    />
-                    {solFile && (
-                      <div className="mt-3 animate-in fade-in slide-in-from-top-2">
-                        <button 
-                          onClick={handleUploadSol}
-                          className="w-full bg-[#007680] text-white px-4 py-2 rounded text-sm font-medium hover:bg-[#007680]/90 transition-all flex justify-center items-center gap-2 shadow-sm"
-                        >
-                          <CloudUpload size={16}/> Upload SOL File
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-6">
-                    <div className="flex items-center gap-4 mb-4">
-                      <div className="h-px bg-[#D6D2C4] flex-1"></div>
-                      <span className="text-[10px] uppercase font-bold text-[#968C83] tracking-wider">OR</span>
-                      <div className="h-px bg-[#D6D2C4] flex-1"></div>
-                    </div>
-                    <button 
-                      onClick={() => setIsManualSalesModalOpen(true)}
-                      disabled={!!solFile}
-                      className="w-full bg-white border-2 border-[#007680] text-[#007680] px-4 py-2 rounded text-sm font-bold hover:bg-[#007680]/5 transition-all disabled:opacity-40 disabled:border-[#D6D2C4] disabled:text-[#968C83] disabled:cursor-not-allowed"
-                    >
-                      Manually add sales
-                    </button>
-                  </div>
-                </div>
+                <div className="flex items-center gap-4 my-2"><div className="h-px bg-[#D6D2C4] flex-1"></div><span className="text-[10px] font-bold text-[#968C83]">OR</span><div className="h-px bg-[#D6D2C4] flex-1"></div></div>
+                <button onClick={() => setIsManualSalesModalOpen(true)} disabled={!!solFile} className="w-full bg-white border-2 border-[#007680] text-[#007680] px-4 py-2 rounded text-sm font-bold">Manual Entry</button>
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- UPDATE POSITIONS MODAL --- */}
+      {/* --- RECALCULATE POSITIONS MODAL --- */}
       {isUpdatePositionsModalOpen && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="bg-white w-full max-w-lg rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-white w-full max-w-lg rounded-xl shadow-2xl flex flex-col overflow-hidden">
             <div className="flex items-center justify-between px-5 py-3 border-b border-[#D6D2C4] bg-[#F5F5F3]">
-              <h3 className="font-bold text-[#51534a]">Update Physical Positions</h3>
-              <button onClick={() => setIsUpdatePositionsModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1 rounded-full hover:bg-[#D6D2C4]/50">
+              <h3 className="font-bold text-[#51534a]">Recalculate theoretical volumes</h3>
+              <button onClick={() => setIsUpdatePositionsModalOpen(false)}><X size={16} /></button>
+            </div>
+            <form onSubmit={handleFetchPhysicalPositions} className="p-5 flex flex-col gap-4">
+              <p className="text-xs text-[#968C83]">Upload reports to update the theoretical base. Without this, the system defaults to the last known base snapshot.</p>
+              <div className="space-y-3">
+                  <FileDropZone label="Current Stock (CSV)" accept=".csv" file={stockFile} onFileAdded={setStockFile} onRemoveFile={() => setStockFile(null)} />
+                  <FileDropZone label="Proc. Analysis (XLSX)" accept=".xls,.xlsx" file={procFile} onFileAdded={setProcFile} onRemoveFile={() => setProcFile(null)} />
+                  <FileDropZone label="Test Details (XLSX)" accept=".xls,.xlsx" file={testFile} onFileAdded={setTestFile} onRemoveFile={() => setTestFile(null)} />
+              </div>
+              <div className="pt-4 border-t flex justify-end gap-2">
+                <button type="button" onClick={() => setIsUpdatePositionsModalOpen(false)} className="px-4 py-2 text-sm font-bold text-[#968C83]">Cancel</button>
+                <button type="submit" disabled={!stockFile || !procFile || !testFile || isPhysicalLoading} className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold disabled:opacity-50">
+                  {isPhysicalLoading ? 'Calculating...' : 'Run New Calculation'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --- EXECUTE CONTRACT MODAL --- */}
+      {isExecuteModalOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="bg-white w-full max-w-sm rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[#D6D2C4] bg-[#F5F5F3]">
+              <h3 className="font-bold text-[#51534a] flex items-center gap-2">
+                  <PackageCheck size={16} className="text-[#007680]"/>
+                  Execute Contract
+              </h3>
+              <button onClick={() => setIsExecuteModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1 rounded-full hover:bg-[#D6D2C4]/50">
                 <X size={16} />
               </button>
             </div>
             
-            <form onSubmit={handleFetchPhysicalPositions} className="p-5 flex flex-col gap-4">
-              <p className="text-xs text-[#968C83] mb-2">Upload the required reports to calculate theoretical blend allocations. The backend processing script will automatically exclude executed contracts from computations.</p>
-              <div className="space-y-4">
-                  <FileDropZone 
-                    label="Current Stock (CSV)" 
-                    accept=".csv" 
-                    file={stockFile}
-                    onFileAdded={setStockFile}
-                    onRemoveFile={() => setStockFile(null)}
-                  />
-                  <FileDropZone 
-                    label="Processing Analysis (XLS/XLSX)" 
-                    accept=".xls,.xlsx" 
-                    file={procFile}
-                    onFileAdded={setProcFile}
-                    onRemoveFile={() => setProcFile(null)}
-                  />
-                  <FileDropZone 
-                    label="Test Details Summary (XLS/XLSX)" 
-                    accept=".xls,.xlsx" 
-                    file={testFile}
-                    onFileAdded={setTestFile}
-                    onRemoveFile={() => setTestFile(null)}
-                  />
+            <form onSubmit={handleExecuteSubmit} className="p-5 flex flex-col gap-4">
+              <p className="text-xs text-[#968C83] mb-1">
+                This will mark the contract as executed and automatically generate sale records for each split container.
+              </p>
+
+              <div className="bg-[#D6D2C4]/20 p-3 rounded-lg border border-[#D6D2C4]/50">
+                   <div className="grid grid-cols-3 gap-2 mb-2">
+                       <div>
+                           <div className="text-[10px] uppercase text-[#968C83] font-bold">Financing Rate</div>
+                           <div className="text-sm font-bold text-[#51534a]">{getVariableValue('Financing Rate per Annum')}%</div>
+                       </div>
+                       <div>
+                           <div className="text-[10px] uppercase text-[#968C83] font-bold">Financed Cost</div>
+                           <div className="text-sm font-bold text-[#51534a]">{getVariableValue('Financed cost percentage')}%</div>
+                       </div>
+                       <div>
+                           <div className="text-[10px] uppercase text-[#968C83] font-bold">Fixed Fobbing</div>
+                           <div className="text-sm font-bold text-[#51534a]">{getVariableValue('Fixed Fobbing Costs')} c/lb</div>
+                       </div>
+                   </div>
+                   <p className="text-[10px] font-bold text-red-500 flex items-center gap-1 border-t border-[#D6D2C4] pt-2 mt-1">
+                      <AlertCircle size={12} /> Ensure these are up to date, lias with Finance department.
+                   </p>
               </div>
-              
-              <div className="pt-4 mt-2 border-t border-[#D6D2C4] flex justify-end gap-2">
-                <button type="button" onClick={() => setIsUpdatePositionsModalOpen(false)} className="px-4 py-2 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
-                <button 
-                  type="submit" 
-                  disabled={!stockFile || !procFile || !testFile || isPhysicalLoading}
-                  className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center min-w-[140px]"
-                >
-                  {isPhysicalLoading ? 'Calculating...' : 'Run Calculation'}
-                </button>
+
+              <div>
+                <label className="text-xs font-bold text-[#51534a] mb-1 block">Number of Containers *</label>
+                <input 
+                  type="number" required min="1" step="1" placeholder="e.g. 2"
+                  className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none text-[#51534a]"
+                  value={executeForm.containers}
+                  onChange={(e) => setExecuteForm({...executeForm, containers: e.target.value})}
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-[#51534a] mb-1 block">Dispatch / Blocked Date *</label>
+                <input 
+                  type="date" required
+                  className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none text-[#51534a]"
+                  value={executeForm.dispatchDate}
+                  onChange={(e) => setExecuteForm({...executeForm, dispatchDate: e.target.value})}
+                />
+              </div>
+
+              <div>
+                  <label className="text-xs font-bold text-[#51534a] mb-1 block">Final bulk for contract (Batch Number)</label>
+                  <div className="flex gap-2">
+                      <input 
+                          type="text" 
+                          placeholder="Search batch number..."
+                          className="flex-1 border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none text-[#51534a]"
+                          value={batchSearchQuery}
+                          onChange={(e) => setBatchSearchQuery(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleSearchBatch())}
+                      />
+                      <button 
+                          type="button" 
+                          onClick={handleSearchBatch}
+                          disabled={isSearchingBatch || !batchSearchQuery.trim()}
+                          className="bg-[#D6D2C4] text-[#51534a] px-3 py-2 rounded-lg text-sm font-bold hover:bg-[#968C83] hover:text-white transition-colors disabled:opacity-50 flex items-center justify-center"
+                      >
+                          {isSearchingBatch ? '...' : <Search size={16} />}
+                      </button>
+                  </div>
+                  
+                  {searchedBatch && (
+                      <div className="mt-2 p-3 border border-[#007680]/30 bg-[#007680]/5 rounded-lg flex items-center justify-between">
+                          <div>
+                              <div className="text-sm font-bold text-[#51534a]">{searchedBatch.batch_number}</div>
+                              <div className="text-xs text-[#968C83]">Output: {formatNumber(searchedBatch.output_qty)} kg</div>
+                          </div>
+                          {executeForm.finishedBatchId === searchedBatch.id ? (
+                              <span className="flex items-center gap-1 text-xs font-bold text-[#007680] bg-white px-2 py-1 rounded shadow-sm border border-[#007680]/20">
+                                  <Check size={14} /> Tagged
+                              </span>
+                          ) : (
+                              <button 
+                                  type="button"
+                                  onClick={() => setExecuteForm(prev => ({ ...prev, finishedBatchId: searchedBatch.id, finishedBatchNumber: searchedBatch.batch_number }))}
+                                  className="text-xs font-bold text-white bg-[#007680] px-3 py-1.5 rounded hover:bg-[#007680]/90 transition-colors shadow-sm"
+                              >
+                                  Tag Batch
+                              </button>
+                          )}
+                      </div>
+                  )}
+
+                  {executeForm.finishedBatchId && !searchedBatch && (
+                      <div className="mt-2 text-xs font-bold text-[#007680] flex items-center gap-1">
+                          <Check size={14} /> Tagged: {executeForm.finishedBatchNumber}
+                          <button type="button" onClick={() => setExecuteForm(prev => ({...prev, finishedBatchId: null, finishedBatchNumber: ''}))} className="text-red-500 hover:underline ml-2 text-[10px]">Remove</button>
+                      </div>
+                  )}
+              </div>
+
+              <div className="pt-2 mt-2 border-t border-[#D6D2C4] flex justify-end gap-2">
+                <button type="button" onClick={() => setIsExecuteModalOpen(false)} className="px-4 py-2 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
+                <button type="submit" className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm">Execute & Split</button>
               </div>
             </form>
           </div>
@@ -1131,16 +1264,25 @@ export default function PhysicalPage() {
         </div>
       )}
 
-      {/* --- CREATE BLEND MODAL --- */}
+      {/* --- CREATE / EDIT BLEND MODAL --- */}
       {isAddBlendModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl shadow-2xl flex flex-col animate-in zoom-in-95 duration-200 my-8">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
               <div>
-                <div className="text-lg font-bold text-[#51534a]">Create New Blend</div>
+                <div className="text-lg font-bold text-[#51534a]">
+                    {editingBlendId ? 'Edit Blend' : 'Create New Blend'}
+                </div>
                 <div className="text-xs text-[#968C83]">Composition must equal exactly 100%</div>
               </div>
-              <button onClick={() => setIsAddBlendModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/30 transition-all">
+              <button 
+                onClick={() => {
+                    setIsAddBlendModalOpen(false);
+                    setEditingBlendId(null);
+                    setBlendForm(INITIAL_BLEND_FORM);
+                }} 
+                className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/30 transition-all"
+              >
                 <X size={18} />
               </button>
             </div>
@@ -1209,362 +1351,228 @@ export default function PhysicalPage() {
                 </div>
               </div>
 
-              <div className="mt-5 flex items-center justify-end gap-2">
-                <button type="button" onClick={() => setIsAddBlendModalOpen(false)} className="rounded-lg border border-[#D6D2C4] bg-white px-4 py-2 text-sm font-bold text-[#51534a]">Cancel</button>
-                <button type="button" onClick={handleCreateBlendSubmit} disabled={!blendForm.name.trim() || Math.abs(blendCompositionTotal - 100) > 0.01} className="rounded-lg bg-[#007680] px-5 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50">Save Blend</button>
+              <div className="mt-5 flex items-center justify-between">
+                <div>
+                    {editingBlendId && (
+                        <button 
+                            type="button" 
+                            onClick={(e) => handleCreateBlendSubmit(e, true)} 
+                            disabled={!blendForm.name.trim() || Math.abs(blendCompositionTotal - 100) > 0.01} 
+                            className="text-xs font-bold text-[#007680] hover:underline flex items-center gap-1 disabled:opacity-50"
+                        >
+                            <Copy size={14}/> Duplicate Blend
+                        </button>
+                    )}
+                </div>
+                <div className="flex items-center gap-2">
+                    <button 
+                        type="button" 
+                        onClick={() => {
+                            setIsAddBlendModalOpen(false); 
+                            setEditingBlendId(null); 
+                            setBlendForm(INITIAL_BLEND_FORM);
+                        }} 
+                        className="rounded-lg border border-[#D6D2C4] bg-white px-4 py-2 text-sm font-bold text-[#51534a]"
+                    >
+                        Cancel
+                    </button>
+                    <button 
+                        type="button" 
+                        onClick={(e) => handleCreateBlendSubmit(e, false)} 
+                        disabled={!blendForm.name.trim() || Math.abs(blendCompositionTotal - 100) > 0.01} 
+                        className="rounded-lg bg-[#007680] px-5 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50"
+                    >
+                        {editingBlendId ? 'Update Blend' : 'Save Blend'}
+                    </button>
+                </div>
               </div>
             </div>
           </div>
         </div>
       )}
 
-
-      <div className="max-w-[1400px] mx-auto space-y-6 p-4 md:p-6">
+      <div className="max-w-full mx-auto space-y-6 px-4 py-6 md:px-8">
         
         {/* --- HEADER --- */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-[#51534a] flex items-center gap-2">
-              <div className="w-8 h-8 bg-[#007680] rounded-lg flex items-center justify-center text-white">
-                <ShieldCheck size={18} />
-              </div>
-              Physical Positions
+              <div className="w-8 h-8 bg-[#007680] rounded-lg flex items-center justify-center text-white"><ShieldCheck size={18} /></div>
+              Coffee Positions
             </h1>
-            <p className="text-[#968C83] text-sm mt-1">Physical Stock, Contracts & Blends</p>
+            <p className="text-[#968C83] text-sm mt-0.5">Live view of Theoretical Stock vs Blend Commitments</p>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <div className="flex items-center bg-white p-1 rounded-lg border border-[#968C83]/20 shadow-sm">
               {(['kg', 'bag', 'mt'] as Unit[]).map((u) => (
-                <button
-                  key={u}
-                  onClick={() => setUnit(u)}
-                  className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
-                    unit === u ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:bg-[#D6D2C4]/30'
-                  }`}
-                >
-                  {u.toUpperCase()}
-                </button>
+                <button key={u} onClick={() => setUnit(u)} className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${unit === u ? 'bg-[#007680] text-white' : 'text-[#968C83] hover:bg-[#D6D2C4]/30'}`}>{u.toUpperCase()}</button>
               ))}
             </div>
+            
+            {activeTab === 'physical' && (
+               <button onClick={() => setIsChartDrawerOpen(true)} className="flex items-center justify-center w-10 h-10 bg-white border border-[#968C83]/30 text-[#51534a] rounded-lg hover:bg-[#F5F5F3] shadow-sm" title="View History Chart">
+                 <LineChartIcon size={20} />
+               </button>
+            )}
 
-            <button 
-              onClick={() => setIsAddModalOpen(true)}
-              className="flex items-center justify-center w-10 h-10 bg-[#007680] text-white rounded-lg hover:bg-[#007680]/90 transition-colors shadow-sm"
-              title="Add Records"
-            >
-              <Plus size={20} />
-            </button>
+            <button onClick={() => setIsAddModalOpen(true)} className="flex items-center justify-center w-10 h-10 bg-[#007680] text-white rounded-lg hover:bg-[#007680]/90 shadow-sm"><Plus size={20} /></button>
           </div>
         </header>
 
-        {/* --- MAIN NAVIGATION --- */}
-        <div className="flex gap-2 border-b border-[#968C83]/30 overflow-x-auto">
-          <button
-            onClick={() => setActiveTab('physical')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'physical' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
-            }`}
-          >
-            <Box size={16} /> Physical
-          </button>
-          <button
-            onClick={() => setActiveTab('contracts')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'contracts' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
-            }`}
-          >
-            <FileSpreadsheet size={16} /> Contracts
-          </button>
-          <button
-            onClick={() => setActiveTab('blends')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'blends' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
-            }`}
-          >
-            <Combine size={16} /> Blends
-          </button>
-        </div>
+        {/* --- TABS --- */}
+        <nav className="flex gap-1 border-b border-[#968C83]/30 overflow-x-auto">
+          {([['physical', <Box key="b" size={16}/>, 'Physical'], ['contracts', <FileSpreadsheet key="s" size={16}/>, 'Contracts'], ['blends', <Combine key="c" size={16}/>, 'Blends']] as const).map(([tab, icon, label]) => (
+            <button key={tab} onClick={() => setActiveTab(tab)} className={`flex items-center gap-2 px-6 py-3 text-sm font-bold border-b-4 transition-colors whitespace-nowrap ${activeTab === tab ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a]'}`}>
+                {icon} {label}
+            </button>
+          ))}
+        </nav>
 
-        {/* --- TAB CONTENT --- */}
+        {/* --- CONTENT --- */}
         <main className="space-y-6">
 
-          {/* --- KPI CARDS (Physical) --- */}
-          {(activeTab === 'physical' && hasFetchedPhysical) && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Card className="p-4 border-l-4 border-l-[#007680]">
-                <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
-                  PHYSICAL THEORETICAL STOCK
-                </div>
-                <div className="text-2xl font-bold text-[#51534a] mt-1">
-                  {formatNumber(convertQty(physicalGridView.kpis.totalTheoretical, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
-                </div>
-              </Card>
-              <Card className="p-4 border-l-4 border-l-[#5B3427]">
-                <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
-                   PHYSICAL TOTAL BLEND SHORTS
-                </div>
-                <div className="text-2xl font-bold text-[#5B3427] mt-1 flex items-center gap-2">
-                  {formatNumber(convertQty(physicalGridView.kpis.totalShorts, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
-                  <TrendingDown size={18} className="text-[#B9975B]" />
-                </div>
-              </Card>
-              <Card className="p-4 border-l-4 border-l-[#007680]">
-                <div className="text-[#968C83] text-xs font-uppercase font-bold tracking-wider">
-                   PHYSICAL NET POSITION
-                </div>
-                <div className={`text-2xl font-bold mt-1 flex items-center gap-2 ${physicalGridView.kpis.totalNet >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                  {physicalGridView.kpis.totalNet > 0 ? '+' : ''}{formatNumber(convertQty(physicalGridView.kpis.totalNet, unit))} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span>
-                  {physicalGridView.kpis.totalNet >= 0 ? <TrendingUp size={18} className="text-[#97D700]" /> : <TrendingDown size={18} />}
-                </div>
-              </Card>
-            </div>
-          )}
-
-          {/* --- POSITION TABLE AND CHART (Physical Tab) --- */}
           {activeTab === 'physical' && (
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-              
-              {/* LEFT: TABLE (Takes 2 columns) */}
-              <div className="xl:col-span-2 space-y-4">
-                <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-[#968C83]/20">
+            <>
+              {/* KPIs */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {[
+                    ['THEORETICAL STOCK', physicalGridView.kpis.totalTheoretical, '#007680', <TrendingUp key="up" size={18}/>],
+                    ['TOTAL BLEND SHORTS', physicalGridView.kpis.totalShorts, '#5B3427', <TrendingDown key="down" size={18} className="text-[#B9975B]"/>],
+                    ['NET POSITION', physicalGridView.kpis.totalNet, physicalGridView.kpis.totalNet >= 0 ? '#007680' : '#B9975B', physicalGridView.kpis.totalNet >= 0 ? <TrendingUp key="up2" size={18} className="text-[#97D700]"/> : <TrendingDown key="down2" size={18}/>]
+                ].map(([label, val, color, icon]) => (
+                    <Card key={label as string} className="p-4" style={{ borderLeft: `4px solid ${color}` }}>
+                        <div className="text-[#968C83] text-[10px] font-bold tracking-widest uppercase">{label}</div>
+                        <div className="text-2xl font-bold text-[#51534a] mt-1 flex items-center justify-between">
+                            <span>{formatNumber(convertQty(val as number, unit))} <span className="text-xs font-normal text-[#968C83]">{unitText(unit)}</span></span>
+                            {icon}
+                        </div>
+                    </Card>
+                ))}
+              </div>
+
+              {/* TABLE CONTAINER - FULL WIDTH */}
+              <div className="space-y-4">
+                <div className="flex justify-between items-center bg-white px-5 py-3 rounded-xl border border-[#968C83]/20 shadow-sm">
                   <div>
-                    <h3 className="font-bold text-[#51534a]">Physical Positions</h3>
-                    <p className="text-xs text-[#968C83]">Calculate theoretical vs actual blend allocations</p>
+                    <h3 className="font-bold text-sm text-[#51534a]">Live Position Table</h3>
+                    <p className="text-[10px] text-[#968C83]">Snapshot: {hasFetchedPhysical ? 'Fresh Upload' : 'Latest Backend Sync'}</p>
                   </div>
-                  <button 
-                    onClick={() => setIsUpdatePositionsModalOpen(true)} 
-                    disabled={isPhysicalLoading}
-                    className="flex items-center gap-2 bg-[#007680] text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50"
-                  >
-                    {isPhysicalLoading ? 'Calculating...' : 'Update Positions'}
+                  <button onClick={() => setIsUpdatePositionsModalOpen(true)} className="flex items-center gap-2 bg-[#007680] text-white px-4 py-2 rounded-lg text-xs font-bold hover:bg-[#007680]/90 transition-all shadow-sm">
+                    <RefreshCw size={14} /> Recalculate Base
                   </button>
                 </div>
 
-                {hasFetchedPhysical ? (
-                  <Card className="overflow-hidden border-none shadow-md">
-                    <div className="overflow-x-auto max-h-[60vh] overflow-y-auto">
-                      <table className="w-full text-sm text-left whitespace-nowrap">
-                        <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
-                          <tr>
-                            <th className="py-2 px-4 w-1/4">Post Stack</th>
-                            <th className="py-2 px-4 text-right">Theoretical Volume ({unit})</th>
-                            {physicalGridView.months.map(month => (
-                              <th key={month} className="py-2 px-4 text-right bg-[#5B3427]">{month}</th>
-                            ))}
-                            <th className="py-2 px-4 text-right bg-[#B9975B]/20 border-l border-white/10">Total Shorts</th>
-                            <th className="py-2 px-4 text-right bg-[#007680] border-l border-white/10">Net Position</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-[#D6D2C4]">
-                          {physicalGridView.data.length > 0 ? physicalGridView.data.map((row) => {
-                            let runningAvailable = row.theoretical_volume; // Local state for inline deduction
-                            
-                            return (
-                            <tr key={row.stack} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                              <td className="py-1.5 px-4 font-medium text-[#007680]">{formatStackName(row.stack)}</td>
-                              <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">
-                                  {formatNumber(convertQty(row.theoretical_volume, unit))}
+                <Card className="overflow-hidden border-none shadow-md">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[11px] text-left whitespace-nowrap min-w-full">
+                      <thead className="bg-[#51534a] text-white font-bold sticky top-0 z-10 uppercase tracking-tight">
+                        <tr>
+                          <th className="py-2.5 px-3 border-r border-white/5">Post Stack</th>
+                          <th className="py-2.5 px-3 text-right bg-[#42443d]">Theoretical Vol. ({unit})</th>
+                          {physicalGridView.months.map(month => (
+                            <th key={month} className="py-2.5 px-3 text-right bg-[#5B3427] border-l border-white/5">{month}</th>
+                          ))}
+                          <th className="py-2.5 px-3 text-right bg-[#B9975B]/30 border-l border-white/5">Total Shorts</th>
+                          <th className="py-2.5 px-3 text-right bg-[#007680] border-l border-white/5">Net Position</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#D6D2C4]/50">
+                        {physicalGridView.data.map((row) => {
+                          let runningAvailable = row.theoretical_volume;
+                          return (
+                            <tr key={row.stack} className="bg-white hover:bg-[#F5F5F3] transition-colors">
+                              <td className="py-2 px-3 font-bold text-[#007680] border-r border-[#D6D2C4]/30">{formatStackName(row.stack)}</td>
+                              <td className="py-2 px-3 text-right font-medium text-[#51534a] bg-[#F5F5F3]/80">
+                                {formatNumber(convertQty(row.theoretical_volume, unit))}
                               </td>
                               {physicalGridView.months.map(month => {
                                 const val = row.months[month] || 0;
                                 let colorClass = "text-[#968C83]";
-
-                                if (Math.abs(val) > 0.01) {
-                                  // Inline recursive check
-                                  if (runningAvailable >= val) {
-                                    colorClass = "text-[#007680] font-medium"; // Green
-                                  } else {
-                                    colorClass = "text-red-500 font-bold"; // Red
-                                  }
+                                if (val > 0.01) {
+                                  colorClass = runningAvailable >= val ? "text-[#007680] font-bold" : "text-red-500 font-bold";
                                   runningAvailable -= val;
                                 }
-
-                                return (
-                                  <td key={month} className={`py-1.5 px-4 text-right ${colorClass}`}>
-                                    {Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}
-                                  </td>
-                                );
+                                return <td key={month} className={`py-2 px-3 text-right border-l border-[#D6D2C4]/20 ${colorClass}`}>{val > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
                               })}
-                              <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">
-                                  {formatNumber(convertQty(row.total_shorts, unit))}
+                              <td className="py-2 px-3 text-right font-bold text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/30">
+                                {formatNumber(convertQty(row.total_shorts, unit))}
                               </td>
-                              {/* Net Position Colored Validation */}
-                              <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.net_position >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                              <td className={`py-2 px-3 text-right font-bold border-l border-[#D6D2C4]/30 ${row.net_position >= 0 ? 'text-[#007680] bg-[#007680]/5' : 'text-red-500 bg-red-50'}`}>
                                 {row.net_position > 0 ? '+' : ''}{formatNumber(convertQty(row.net_position, unit))}
                               </td>
                             </tr>
-                            );
-                          }) : (
-                            <tr><td colSpan={physicalGridView.months.length + 4} className="py-8 text-center text-[#968C83] italic">No physical positions data found.</td></tr>
-                          )}
-                        </tbody>
-                        {physicalGridView.data.length > 0 && (
-                          <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
-                              <tr>
-                                <td className="py-2 px-4">TOTALS</td>
-                                <td className="py-2 px-4 text-right">{formatNumber(convertQty(physicalGridView.kpis.totalTheoretical, unit))}</td>
-                                {physicalGridView.months.map(month => {
-                                    const monthTotal = physicalGridView.data.reduce((sum, row) => sum + (row.months[month] || 0), 0);
-                                    return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
-                                })}
-                                <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(physicalGridView.kpis.totalShorts, unit))}</td>
-                                <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${physicalGridView.kpis.totalNet >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
-                                    {physicalGridView.kpis.totalNet > 0 ? '+' : ''}{formatNumber(convertQty(physicalGridView.kpis.totalNet, unit))}
-                                </td>
-                              </tr>
-                          </tfoot>
-                        )}
-                      </table>
-                    </div>
-                  </Card>
-                ) : (
-                  <div className="flex flex-col items-center justify-center p-12 text-[#968C83] border-2 border-dashed border-[#D6D2C4] rounded-xl bg-white/50">
-                      <Box size={48} className="mb-4 opacity-30 text-[#007680]" />
-                      <h3 className="text-lg font-bold text-[#51534a]">Ready to Calculate</h3>
-                      <p className="text-sm mt-2 text-center max-w-md">
-                          Click the "Update Positions" button above to run the calculations for physical blend allocations.
-                      </p>
-                  </div>
-                )}
-              </div>
-
-              {/* RIGHT: CHART (Takes 1 column) */}
-              <div className="xl:col-span-1 flex flex-col h-full">
-                <Card className="p-5 h-full flex flex-col shadow-md border border-[#968C83]/20">
-                  <div className="flex justify-between items-start mb-4">
-                    <div>
-                      <h3 className="font-bold text-[#51534a]">Position History</h3>
-                      <p className="text-xs text-[#968C83]">7-Day trend of net positions</p>
-                    </div>
-                    {/* Toggle Buttons */}
-                    <div className="flex bg-[#F5F5F3] rounded-lg p-1 border border-[#D6D2C4] shadow-inner">
-                        <button onClick={() => setPositionFilter('all')} className={`px-2 py-1 text-[10px] font-bold rounded transition-colors ${positionFilter === 'all' ? 'bg-white shadow text-[#51534a]' : 'text-[#968C83] hover:text-[#51534a]'}`}>ALL</button>
-                        <button onClick={() => setPositionFilter('long')} className={`px-2 py-1 text-[10px] font-bold rounded transition-colors ${positionFilter === 'long' ? 'bg-white shadow text-[#007680]' : 'text-[#968C83] hover:text-[#007680]'}`}>LONG</button>
-                        <button onClick={() => setPositionFilter('short')} className={`px-2 py-1 text-[10px] font-bold rounded transition-colors ${positionFilter === 'short' ? 'bg-white shadow text-red-500' : 'text-[#968C83] hover:text-red-500'}`}>SHORT</button>
-                    </div>
-                  </div>
-                  
-                  <div className="flex-1 min-h-[400px]">
-                    {chartData.data.length > 0 ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={chartData.data} margin={{ top: 5, right: 5, left: -20, bottom: 5 }}>
-                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EFEFE9" />
-                          <XAxis dataKey="date" tick={{fontSize: 10, fill: '#968C83'}} axisLine={false} tickLine={false} />
-                          <YAxis tick={{fontSize: 10, fill: '#968C83'}} axisLine={false} tickLine={false} tickFormatter={(val) => formatNumber(convertQty(val, unit))} />
-                          <Tooltip 
-                            content={({ active, payload, label }) => {
-                                if (active && payload && payload.length) {
-                                    // Declutter Tooltip: Remove 0 values and sort by absolute magnitude
-                                    const activePayload = payload
-                                        .filter((p: any) => Math.abs(p.value) > 0.01)
-                                        .sort((a: any, b: any) => Math.abs(b.value) - Math.abs(a.value));
-                                    
-                                    if (activePayload.length === 0) return null;
-
-                                    return (
-                                        <div className="bg-white/95 backdrop-blur-sm p-3 border border-[#D6D2C4] shadow-xl rounded-xl text-xs min-w-[160px] z-50">
-                                            <p className="font-bold mb-2 text-[#51534a] border-b border-[#D6D2C4] pb-1.5">{label}</p>
-                                            {activePayload.map((entry: any) => (
-                                                <div key={entry.name} className="flex justify-between items-center gap-4 py-0.5">
-                                                    <span style={{ color: entry.color }} className="font-medium truncate max-w-[140px]">{entry.name}</span>
-                                                    <span className="font-bold text-[#51534a]">{formatNumber(convertQty(entry.value, unit))}</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    );
-                                }
-                                return null;
-                            }}
-                          />
-                          {chartData.stacks.map((stack, i) => (
-                            <Line 
-                              key={stack} 
-                              type="monotone" 
-                              dataKey={stack} 
-                              name={formatStackName(stack)} 
-                              stroke={`hsl(${(i * 137.5) % 360}, 70%, 40%)`} 
-                              strokeWidth={2}
-                              dot={false}
-                              activeDot={{ r: 4 }}
-                            />
-                          ))}
-                        </LineChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="h-full flex items-center justify-center text-sm text-[#968C83] italic">
-                        Not enough history data.
-                      </div>
-                    )}
+                          );
+                        })}
+                      </tbody>
+                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] font-bold text-[#51534a] text-xs">
+                        <tr>
+                          <td className="py-3 px-3">TOTAL AGGREGATE</td>
+                          <td className="py-3 px-3 text-right">{formatNumber(convertQty(physicalGridView.kpis.totalTheoretical, unit))}</td>
+                          {physicalGridView.months.map(month => {
+                              const mSum = physicalGridView.data.reduce((s, r) => s + (r.months[month] || 0), 0);
+                              return <td key={month} className="py-3 px-3 text-right text-[#5B3427]">{mSum > 0.01 ? formatNumber(convertQty(mSum, unit)) : '-'}</td>;
+                          })}
+                          <td className="py-3 px-3 text-right text-[#5B3427] border-l border-[#D6D2C4]/30">{formatNumber(convertQty(physicalGridView.kpis.totalShorts, unit))}</td>
+                          <td className={`py-3 px-3 text-right border-l border-[#D6D2C4]/30 ${physicalGridView.kpis.totalNet >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                              {physicalGridView.kpis.totalNet > 0 ? '+' : ''}{formatNumber(convertQty(physicalGridView.kpis.totalNet, unit))}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>
                 </Card>
               </div>
-
-            </div>
+            </>
           )}
 
-          {/* --- CONTRACTS TAB --- */}
           {activeTab === 'contracts' && (
             <div className="space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div className="relative w-full sm:w-96">
                       <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
-                      <input 
-                          type="text" 
-                          placeholder="Search contracts, clients, qualities..." 
-                          value={contractSearch}
-                          onChange={(e) => setContractSearch(e.target.value)}
-                          className="w-full border border-[#D6D2C4] rounded-lg pl-9 pr-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
-                      />
+                      <input type="text" placeholder="Search contracts, clients..." value={contractSearch} onChange={(e) => setContractSearch(e.target.value)} className="w-full border border-[#D6D2C4] rounded-lg pl-9 pr-3 py-2 text-sm outline-none bg-white shadow-sm" />
                   </div>
-                  <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-2 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] transition-colors shadow-sm">
-                      <input 
-                          type="checkbox" 
-                          checked={showExecutedContracts}
-                          onChange={(e) => setShowExecutedContracts(e.target.checked)}
-                          className="w-4 h-4 text-[#007680] rounded focus:ring-[#007680]"
-                      />
-                      <span className="text-sm font-bold text-[#51534a]">Show Executed Contracts</span>
+                  <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-2 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] shadow-sm">
+                      <input type="checkbox" checked={showExecutedContracts} onChange={(e) => setShowExecutedContracts(e.target.checked)} className="w-4 h-4 text-[#007680] rounded" />
+                      <span className="text-sm font-bold text-[#51534a]">Show Executed</span>
                   </label>
               </div>
-
               <Card className="overflow-hidden border-none shadow-md">
-                <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
-                  <table className="w-full text-sm text-left whitespace-nowrap">
-                    <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
+                <div className="overflow-x-auto max-h-[70vh]">
+                  <table className="w-full text-[11px] text-left whitespace-nowrap">
+                    <thead className="bg-[#51534a] text-white font-bold sticky top-0 z-10 uppercase">
                       <tr>
                         <th className="py-3 px-4">Contract</th>
                         <th className="py-3 px-4">Client</th>
-                        <th className="py-3 px-4 text-right">Weight (kg)</th>
+                        <th className="py-3 px-4 text-right">Weight</th>
                         <th className="py-3 px-4">Ship Date</th>
                         <th className="py-3 px-4">Quality</th>
-                        <th className="py-3 px-4">Grade</th>
-                        <th className="py-3 px-4 w-1/4">Certifications</th>
+                        <th className="py-3 px-4 w-1/5">Certifications</th>
                         <th className="py-3 px-4">Blend</th>
                         <th className="py-3 px-4 text-center">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#D6D2C4]">
-                      {filteredContracts.length > 0 ? filteredContracts.map((sale) => {
+                      {filteredContracts.map((sale) => {
                         const isEditing = editingContractId === sale.id;
-                        const displayCerts = parseCerts(sale.certifications);
                         const isExecuted = bool(sale.executed);
+                        const displayCerts = parseCerts(sale.certifications);
 
                         return (
-                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isExecuted ? 'opacity-60' : ''}`}>
-                            <td className="py-3 px-4 font-bold text-[#51534a]">
-                                <div className="flex items-center gap-2">
-                                  {isExecuted && <CheckCircle size={14} className="text-[#007680]" />}
-                                  {sale.contract_number}
-                                </div>
+                          <tr key={sale.id} className={`${sale.pending_dispatch ? 'bg-red-50 hover:bg-red-100/80' : 'bg-white hover:bg-[#F5F5F3]'} ${isExecuted ? 'opacity-50' : ''}`}>
+                            <td className="py-2.5 px-4 font-bold">
+                              <div className="flex items-center gap-2">
+                                {isExecuted && <CheckCircle size={14} className="text-[#007680]" />}
+                                {sale.contract_number}
+                                {sale.pending_dispatch && <AlertCircle size={14} className="text-red-500"/>}
+                              </div>
                             </td>
-                            <td className="py-3 px-4 text-[#51534a]">{sale.client || '-'}</td>
-                            <td className="py-3 px-4 text-right font-medium text-[#5B3427]">
-                                {formatNumber(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')))}
-                            </td>
-                            <td className="py-3 px-4 text-[#968C83]">{sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : '-'}</td>
+                            <td className="py-2.5 px-4">{sale.client || '-'}</td>
+                            <td className="py-2.5 px-4 text-right font-medium text-[#5B3427]">{formatNumber(convertQty(asNumber(sale.weight_kilos), unit))}</td>
+                            <td className="py-2.5 px-4 text-[#968C83]">{formatDateToMonthYear(sale.shipping_date)}</td>
                             
-                            <td className="py-3 px-4">
+                            <td className="py-2.5 px-4">
                               {isEditing ? (
                                 <select 
                                   className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
@@ -1575,27 +1583,13 @@ export default function PhysicalPage() {
                                   {CONTRACT_QUALITIES.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                                 </select>
                               ) : (
-                                <span className="text-[#007680] font-medium">{sale.quality || sale.strategy || '-'}</span>
+                                <span className="text-[#007680] font-bold">{sale.quality || sale.strategy || '-'}</span>
                               )}
                             </td>
 
-                            <td className="py-3 px-4">
-                               {isEditing ? (
-                                <input 
-                                  type="text"
-                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                  value={editForm.grade}
-                                  onChange={(e) => setEditForm({...editForm, grade: e.target.value})}
-                                  placeholder="Grade"
-                                />
-                              ) : (
-                                <span className="text-[#51534a]">{sale.grade || '-'}</span>
-                              )}
-                            </td>
-
-                            <td className="py-3 px-4">
+                            <td className="py-2.5 px-4">
                               {isEditing ? (
-                                <div className="flex flex-col gap-2 min-w-[200px]">
+                                <div className="flex flex-col gap-2 min-w-[180px]">
                                     <select 
                                       className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
                                       value=""
@@ -1633,16 +1627,12 @@ export default function PhysicalPage() {
                                 </div>
                               ) : (
                                 <div className="flex flex-wrap gap-1">
-                                    {displayCerts.length > 0 ? displayCerts.map(cert => (
-                                        <span key={cert} className="inline-flex px-1.5 py-0.5 bg-[#D6D2C4]/30 text-[#51534a] text-[10px] font-bold rounded-sm">
-                                          {cert}
-                                        </span>
-                                    )) : <span className="text-[#968C83] text-xs italic">Uncertified</span>}
+                                  {displayCerts.length > 0 ? displayCerts.map(c => <span key={c} className="px-1 bg-[#D6D2C4]/30 rounded-sm text-[9px] font-bold">{c}</span>) : <span className="text-[#968C83] text-xs italic">Uncertified</span>}
                                 </div>
                               )}
                             </td>
 
-                            <td className="py-3 px-4">
+                            <td className="py-2.5 px-4">
                               {isEditing ? (
                                 <select 
                                   className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
@@ -1653,45 +1643,38 @@ export default function PhysicalPage() {
                                   {blends.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                                 </select>
                               ) : (
-                                <span className="text-[#51534a] font-medium">
-                                  {sale.blend_name || <span className="text-[#968C83] font-normal italic">Unassigned</span>}
-                                </span>
+                                sale.blend_name || <span className="italic opacity-50">Unassigned</span>
                               )}
                             </td>
 
-                            <td className="py-3 px-4 text-center">
-                                {isEditing ? (
-                                    <div className="flex items-center justify-center gap-2">
-                                        <button onClick={() => handleSaveEdit(sale.id)} className="p-1.5 text-white bg-[#007680] hover:bg-[#007680]/80 rounded shadow-sm transition-colors">
-                                            <Check size={14} />
-                                        </button>
-                                        <button onClick={handleCancelEdit} className="p-1.5 text-[#51534a] bg-[#D6D2C4] hover:bg-[#968C83] rounded shadow-sm transition-colors">
-                                            <X size={14} />
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="flex items-center justify-center gap-2">
-                                        <button 
-                                            onClick={() => toggleContractExecution(sale.id, isExecuted)}
-                                            title={isExecuted ? "Mark as Unexecuted" : "Mark as Executed"}
-                                            className={`p-1.5 rounded transition-colors ${isExecuted ? 'text-[#007680] hover:bg-[#A4DBE8]/30' : 'text-[#968C83] hover:text-[#51534a] hover:bg-[#D6D2C4]/50'}`}
-                                        >
-                                            {isExecuted ? <CheckCircle size={14} /> : <Circle size={14} />}
-                                        </button>
-                                        <button onClick={() => handleEditClick(sale)} title="Edit Contract" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
-                                            <Pencil size={14} />
-                                        </button>
-                                        <button onClick={() => handleEditClick(sale)} title="Allocate Blend" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
-                                            <Combine size={14} />
-                                        </button>
-                                    </div>
-                                )}
+                            <td className="py-2.5 px-4 text-center">
+                              {isEditing ? (
+                                  <div className="flex items-center justify-center gap-2">
+                                      <button onClick={() => handleSaveEdit(sale.id)} className="p-1.5 text-white bg-[#007680] hover:bg-[#007680]/80 rounded shadow-sm transition-colors">
+                                          <Check size={14} />
+                                      </button>
+                                      <button onClick={() => setEditingContractId(null)} className="p-1.5 text-[#51534a] bg-[#D6D2C4] hover:bg-[#968C83] rounded shadow-sm transition-colors">
+                                          <X size={14} />
+                                      </button>
+                                  </div>
+                              ) : (
+                                  <div className="flex items-center justify-center gap-2">
+                                      <button 
+                                          onClick={() => toggleContractExecution(sale.id, isExecuted)}
+                                          title={isExecuted ? "Mark as Unexecuted" : "Execute Contract"}
+                                          className={`p-1.5 rounded transition-colors ${isExecuted ? 'text-[#007680] hover:bg-[#A4DBE8]/30' : 'text-[#968C83] hover:text-[#51534a] hover:bg-[#D6D2C4]/50'}`}
+                                      >
+                                          {isExecuted ? <CheckCircle size={14} /> : <Circle size={14} />}
+                                      </button>
+                                      <button onClick={() => handleEditClick(sale)} title="Edit Contract" className="p-1.5 text-[#968C83] hover:text-[#007680] hover:bg-[#A4DBE8]/20 rounded transition-colors">
+                                          <Pencil size={14} />
+                                      </button>
+                                  </div>
+                              )}
                             </td>
                           </tr>
                         );
-                      }) : (
-                        <tr><td colSpan={9} className="py-8 text-center text-[#968C83] italic">No contracts match your search or filter.</td></tr>
-                      )}
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1699,122 +1682,64 @@ export default function PhysicalPage() {
             </div>
           )}
 
-          {/* --- BLENDS TAB --- */}
           {activeTab === 'blends' && (
-            <div className="grid gap-5 xl:grid-cols-[0.95fr_1.05fr]">
-              <SectionCard title="Blend Directory" subtitle="Only non-zero post stacks are shown in the summary" right={<button onClick={() => setIsAddBlendModalOpen(true)} className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm"><Plus size={16} className="mr-2 inline-block" />Create Blend</button>}>
-                <div className="relative mb-4">
-                  <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
-                  <input value={blendSearch} onChange={(e) => setBlendSearch(e.target.value)} placeholder="Search blends by name, client, grade, blend no." className="w-full rounded-lg border border-[#D6D2C4] bg-white py-2 pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-[#007680]" />
-                </div>
-                <div className="max-h-[70vh] space-y-2 overflow-y-auto pr-1">
-                  {visibleBlends.length > 0 ? visibleBlends.map(({ blend, composition, linkedContracts }) => {
-                    const selected = selectedBlendData?.blend.id === blend.id;
-                    const totalComp = composition.reduce((sum, c) => sum + c.value, 0);
+            <div className="grid gap-5 xl:grid-cols-2">
+              <SectionCard 
+                title="Blend Directory" 
+                right={
+                    <button 
+                        onClick={() => {
+                            setEditingBlendId(null);
+                            setBlendForm(INITIAL_BLEND_FORM);
+                            setIsAddBlendModalOpen(true);
+                        }} 
+                        className="rounded-lg bg-[#007680] px-4 py-1.5 text-xs font-bold text-white shadow-sm"
+                    >
+                        <Plus size={14} className="mr-1 inline-block" />New Blend
+                    </button>
+                }
+              >
+                <div className="relative mb-4"><Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" /><input value={blendSearch} onChange={(e) => setBlendSearch(e.target.value)} placeholder="Search blends..." className="w-full rounded-lg border border-[#D6D2C4] bg-white py-1.5 pl-8 pr-3 text-xs outline-none focus:ring-1 focus:ring-[#007680]" /></div>
+                <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+                  {visibleBlends.map(({ blend, composition, linkedContracts }) => {
+                    const sel = selectedBlendId === blend.id;
+                    const tot = composition.reduce((s, c) => s + c.value, 0);
                     return (
-                      <button key={blend.id} type="button" onClick={() => setSelectedBlendId(blend.id)} className={`w-full rounded-2xl border p-4 text-left transition ${selected ? "border-[#007680] bg-[#EAF8FA]" : "border-[#D6D2C4] bg-white hover:border-[#007680]/30"}`}>
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="flex items-center gap-2 font-bold text-[#007680]"><ChevronRight size={14} className={selected ? "rotate-90 transition" : "transition"} />{blend.name}</div>
-                            <div className="mt-1 text-xs text-[#968C83]">{blend.client || "-"} · {blend.blend_no || "-"} · {blend.grade || "-"}</div>
-                            <div className="mt-1 text-xs text-[#51534a]">{blend.cup_profile || "No cup profile"}</div>
-                          </div>
-                          <div className="text-right text-xs">
-                            <div className="font-bold text-[#51534a]">{linkedContracts.length} contracts</div>
-                            <div className="text-[#968C83]">{composition.length} non-zero components</div>
-                            <div className={Math.abs(totalComp - 100) < 0.01 ? "font-bold text-[#007680]" : totalComp > 100 ? "font-bold text-red-600" : "font-bold text-[#B9975B]"}>{totalComp.toFixed(2)}%</div>
-                          </div>
+                      <button key={blend.id} onClick={() => setSelectedBlendId(blend.id)} className={`w-full rounded-xl border p-3 text-left transition ${sel ? "border-[#007680] bg-[#EAF8FA]" : "border-[#D6D2C4] bg-white hover:border-[#007680]/30"}`}>
+                        <div className="flex justify-between items-start">
+                          <div><div className="font-bold text-[#007680] text-sm">{blend.name}</div><div className="text-[10px] text-[#968C83]">{blend.client || "-"} · {blend.grade || "-"}</div></div>
+                          <div className="text-right text-[10px] font-bold"><div className="text-[#51534a]">{linkedContracts.length} sales</div><div className={tot > 100.01 ? "text-red-600" : "text-[#007680]"}>{tot.toFixed(2)}%</div></div>
                         </div>
                       </button>
                     );
-                  }) : <div className="py-8 text-center text-sm italic text-[#968C83]">No blends found.</div>}
+                  })}
                 </div>
               </SectionCard>
 
-              <div className="space-y-4">
-                <SectionCard title="Blend Composition" subtitle="Only non-zero post stacks are shown here">
+              <SectionCard title="Composition Details">
                   {selectedBlendData ? (
                     <div className="space-y-4">
-                      <div className="grid gap-2 text-sm">
-                        <div className="flex justify-between"><span>Blend name</span><span className="font-bold">{selectedBlendData.blend.name}</span></div>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs border-b pb-3">
+                        <div className="flex justify-between"><span>Name</span><span className="font-bold">{selectedBlendData.blend.name}</span></div>
                         <div className="flex justify-between"><span>Client</span><span className="font-bold">{selectedBlendData.blend.client || "-"}</span></div>
-                        <div className="flex justify-between"><span>Blend no.</span><span className="font-bold">{selectedBlendData.blend.blend_no || "-"}</span></div>
-                        <div className="flex justify-between"><span>Linked contracts</span><span className="font-bold">{selectedBlendData.linkedContracts.length}</span></div>
+                        <div className="flex justify-between"><span>Linked Sales</span><span className="font-bold">{selectedBlendData.linkedContracts.length}</span></div>
+                        <div className="flex justify-between"><span>Total Comp.</span><span className="font-bold">{selectedBlendData.composition.reduce((s, c) => s + c.value, 0).toFixed(2)}%</span></div>
                       </div>
-
-                      <div className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
-                        <div className="flex items-center justify-between">
-                          <div className="font-bold text-[#51534a]">Composition total</div>
-                          <div className={Math.abs(selectedBlendData.composition.reduce((s, c) => s + c.value, 0) - 100) < 0.01 ? "font-bold text-[#007680]" : selectedBlendData.composition.reduce((s, c) => s + c.value, 0) > 100 ? "font-bold text-red-600" : "font-bold text-[#B9975B]"}>{selectedBlendData.composition.reduce((s, c) => s + c.value, 0).toFixed(2)}%</div>
-                        </div>
-                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#D6D2C4]"><div className="h-full rounded-full bg-[#007680]" style={{ width: `${Math.min(100, selectedBlendData.composition.reduce((s, c) => s + c.value, 0))}%` }} /></div>
-                        <div className="mt-2 text-xs text-[#968C83]">Only non-zero post stacks are listed.</div>
-                      </div>
-
-                      <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                        {selectedBlendData.composition.length > 0 ? selectedBlendData.composition.map((comp) => (
-                          <div key={comp.key} className="rounded-xl border border-[#D6D2C4] bg-white px-3 py-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div>
-                                <div className="text-sm font-bold text-[#007680]">{comp.label}</div>
-                                <div className="text-xs text-[#968C83]">Post stack</div>
-                              </div>
-                              <div className="text-right"><div className="text-sm font-bold text-[#51534a]">{comp.value.toFixed(2)}%</div></div>
-                            </div>
+                      <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
+                        {selectedBlendData.composition.map((comp) => (
+                          <div key={comp.key} className="flex justify-between text-[11px] bg-[#F5F5F3] p-2 rounded-lg border border-[#D6D2C4]/40">
+                            <span className="font-bold text-[#007680]">{comp.label}</span>
+                            <span className="font-bold">{comp.value.toFixed(2)}%</span>
                           </div>
-                        )) : <div className="text-sm italic text-[#968C83]">No non-zero post stacks in this blend.</div>}
+                        ))}
                       </div>
-
-                      <div className="rounded-2xl border border-[#D6D2C4] bg-white p-4">
-                        <div className="mb-2 text-xs font-bold uppercase tracking-wider text-[#968C83]">Linked contracts</div>
-                        <div className="max-h-[220px] space-y-2 overflow-y-auto pr-1">
-                          {selectedBlendData.linkedContracts.length > 0 ? selectedBlendData.linkedContracts.map((sale) => (
-                            <div key={sale.id} className="rounded-xl border border-[#D6D2C4] bg-[#F5F5F3] px-3 py-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <div>
-                                  <div className="text-sm font-bold text-[#007680]">{sale.contract_number}</div>
-                                  <div className="text-xs text-[#968C83]">{sale.client || "-"} · {sale.strategy || sale.quality || "Unassigned"}</div>
-                                </div>
-                                <div className="text-xs font-bold text-[#51534a]">{formatQty(asNumber(sale.weight_kilos), unit)} {unitText(unit)}</div>
-                              </div>
-                            </div>
-                          )) : <div className="text-sm italic text-[#968C83]">No contracts allocated to this blend.</div>}
-                        </div>
-                      </div>
-
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <button type="button" onClick={() => selectedBlendData && deleteBlend(selectedBlendData.blend.id)} className="rounded-lg border border-red-300 px-4 py-2 text-sm font-bold text-red-600 hover:bg-red-50">Delete Blend</button>
-                        <div className="flex items-center gap-2">
-                          <select value={blendAllocContractId} onChange={(e) => setBlendAllocContractId(e.target.value ? Number(e.target.value) : "")} className="rounded-lg border border-[#D6D2C4] bg-white px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#007680]">
-                            <option value="">Select contract</option>
-                            {sales.filter((s) => !s.blend_id || Number(s.blend_id) !== selectedBlendData.blend.id).map((sale) => <option key={sale.id} value={sale.id}>{sale.contract_number}</option>)}
-                          </select>
-                          <button
-                            onClick={async () => {
-                              if (blendAllocContractId !== "") {
-                                setBlendBusy(true);
-                                try {
-                                  await updateContractBlend(Number(blendAllocContractId), selectedBlendData.blend.id);
-                                  setBlendAllocContractId("");
-                                  alert("Contract successfully allocated to blend.");
-                                } catch {
-                                  alert("Failed to allocate contract to blend.");
-                                } finally {
-                                  setBlendBusy(false);
-                                }
-                              }
-                            }}
-                            className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50"
-                            disabled={blendAllocContractId === "" || blendBusy}
-                          >
-                            Allocate
-                          </button>
-                        </div>
+                      <div className="flex justify-end gap-4 pt-3 mt-2 border-t border-[#D6D2C4]/40">
+                        <button onClick={() => openEditBlendModal(selectedBlendData.blend)} className="text-xs font-bold text-[#007680] hover:underline flex items-center gap-1"><Pencil size={12} /> Edit Blend</button>
+                        <button onClick={() => deleteBlend(selectedBlendData.blend.id)} className="text-xs font-bold text-red-500 hover:underline flex items-center gap-1"><X size={12} /> Delete Blend</button>
                       </div>
                     </div>
                   ) : <div className="text-sm italic text-[#968C83]">Select a blend to see its composition.</div>}
-                </SectionCard>
-              </div>
+              </SectionCard>
             </div>
           )}
 

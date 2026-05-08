@@ -76,7 +76,7 @@ const STRATEGY_MAPPING: Record<string, string[]> = {
         "PRE GRINDER LIGHT", "IN GRINDER LIGHT", "POST GRINDER LIGHT", "FINISHED GRINDER LIGHT"
     ],
     "MBUNIS": [
-        "MBUNIS", "ML", "MH", "PRE MBUNIS", "POST MH", "IN MBUNIS", "FINISHED MBUNIS"
+        "MBUNIS", "ML", "MH", "PRE MBUNIS", "POST MH", "IN MBUNIS", "FINISHED MBUNIS", "POST MBUNI HEAVY", "POST MBUNI LIGHT"
     ],
     "REJECTS": [
         "REJECTS L", "REJECT", "REJECTS B", "DEFECTS P. %", "LOW GRADE", "PRE REJECT", "IN REJECT", "IN REJECTS S", "POST REJECTS S", "FINISHED REJECT", "POST REJECTS P"
@@ -158,7 +158,6 @@ function mapStrategyToMainKey(detailedStrategy: string): string | null {
     }
     return null;
 }
-
 
 // 1. Define Interface
 interface StockRow {
@@ -321,7 +320,6 @@ export async function update_raw_material__intake_date(file: File) {
         console.timeEnd("Total Execution Time");
     }
 }
-
 
 interface ProcessRow {
     id: number;
@@ -1879,7 +1877,7 @@ export async function process_sale_record(file: File): Promise<void> {
     }
 }
 
-export async function fetchSaleRecords(): Promise<SaleRecord[]> {
+export async function fetchSaleRecords(): Promise<any[]> {
     const sql = `
         SELECT 
             sr.id, 
@@ -1889,6 +1887,12 @@ export async function fetchSaleRecords(): Promise<SaleRecord[]> {
             sr.dispatched_qty, 
             sr.sale_differential, 
             sr.packaging_type,
+            sr.financing_rate, 
+            sr.fixed_fobbing,
+            sr.financed_cost_percentage,
+            sr.average_batch_intake_date,
+            sr.hedgeable,
+            sr.fixation_month,
             dsp.batch_number, 
             dsp.strategy, 
             dsp.output_differential, 
@@ -1898,30 +1902,51 @@ export async function fetchSaleRecords(): Promise<SaleRecord[]> {
         JOIN daily_strategy_processing dsp ON sr.finished_batch_id = dsp.id
         ORDER BY sr.blocked_date DESC
     `;
-
+    
     const rows = await query<any[]>({ query: sql });
     
     if (!rows) return [];
-
     return rows.map(row => {
         const quantity = Number(row.dispatched_qty);
         const sale_fob_diff_val = row.sale_differential;
-        // Determine if sale diff is explicitly null
         const is_sale_diff_null = (sale_fob_diff_val === null || sale_fob_diff_val === undefined);
         
         const sale_fob_diff = is_sale_diff_null ? 0 : Number(sale_fob_diff_val);
         const cost_diff = Number(row.output_differential);
         
+        // --- NEW DYNAMIC FOBBING CALCULATIONS ---
+        // 1. Total Batch Value (Total Kg / 50kg per bag * Price per bag)
+        const total_batch_value = (quantity / 50) * Number(row.output_cost_usd_50);
+        
+        // 2. Financed Batch Value
+        const financed_batch_value = total_batch_value * (Number(row.financed_cost_percentage) / 100);
+        
+        // 3. Age in days
+        let age_days = 0;
+        if (row.blocked_date && row.average_batch_intake_date) {
+            const bDate = new Date(row.blocked_date);
+            const iDate = new Date(row.average_batch_intake_date);
+            const diffTime = bDate.getTime() - iDate.getTime();
+            age_days = Math.max(0, diffTime / (1000 * 3600 * 24)); // Prevents negative age
+        }
+        
+        // 4. Accrued Interest (USD)
+        const accrued_batch_interest = financed_batch_value * (Number(row.financing_rate) / 100) * (age_days / 365);
+        
+        // 5. Convert to cents/pound (Dynamic Fobbing)
+        const total_lbs = quantity * 2.204623;
+        const dynamic_fobbing = total_lbs > 0 ? (accrued_batch_interest / total_lbs) * 100 : 0;
+        const fixed_fobbing = Number(row.fixed_fobbing || 0);
+        // ----------------------------------------
+
         let pnl_per_lb = 0;
         let pnl_total = 0;
 
-        // Only calculate P&L if we have a valid sale differential (is_sale_diff_null is false)
         if (!is_sale_diff_null) {
-            pnl_per_lb = sale_fob_diff - cost_diff;
-            // Formula: pnl_per_lb * (dispatched_qty * 2.204623) / 100
-            pnl_total = (pnl_per_lb * (quantity * 2.204623)) / 100; 
+            // New Margin Formula
+            pnl_per_lb = sale_fob_diff - cost_diff - (fixed_fobbing + dynamic_fobbing);
+            pnl_total = (pnl_per_lb * total_lbs) / 100; 
         } else {
-            // Explicitly set to 0 if sale diff is null (redundant due to initialization but clear)
             pnl_per_lb = 0;
             pnl_total = 0;
         }
@@ -1929,7 +1954,6 @@ export async function fetchSaleRecords(): Promise<SaleRecord[]> {
         return {
             id: row.id.toString(),
             contract_number: row.sales_ref,
-            // Ensure date string format YYYY-MM-DD
             date: row.blocked_date instanceof Date ? row.blocked_date.toISOString().split('T')[0] : String(row.blocked_date),
             client: row.client,
             batch_number: row.batch_number,
@@ -1940,9 +1964,12 @@ export async function fetchSaleRecords(): Promise<SaleRecord[]> {
             cost_diff: cost_diff,
             hedge_level: Number(row.output_hedge_level_usc_lb),
             cost_usd_50: Number(row.output_cost_usd_50),
+            fixed_fobbing: fixed_fobbing,     
+            dynamic_fobbing: dynamic_fobbing, 
             pnl_per_lb: pnl_per_lb,
             pnl_total: pnl_total,
-            is_sale_diff_null: is_sale_diff_null
+            is_sale_diff_null: is_sale_diff_null,
+            hedgeable: row.hedgeable // <-- ADD THIS LINE
         };
     });
 }

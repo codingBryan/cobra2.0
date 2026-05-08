@@ -400,25 +400,31 @@ export interface PreviousClosingStock extends RowDataPacket {
   xbs_closing_stock: number;
 }
 
+
 export interface SaleRecord {
     id: string; 
-    contract_number:string;
+    contract_number: string;
     date: string; 
     client: string;
     batch_number: string;
     strategy: string;
     packing: string;
     quantity: number;
-    sale_fob_diff: number; // Sale FOB_Dif. - This minus the batch diff is the margin
-    cost_diff: number; // W.Avg Diff from daily_strategy_processing
+    financing_rate: number;
+    financed_cost_percentage: number;
+    average_batch_intake_date: string; // <-- Changed from Date to string
+    fixed_fobbing: number;
+    dynamic_fobbing: number;
+    sale_fob_diff: number; 
+    cost_diff: number; 
     hedge_level: number;
-    cost_usd_50: number; // From daily strategy processing
+    cost_usd_50: number; 
     pnl_per_lb: number;
     pnl_total: number;
-    is_sale_diff_null:Boolean;
+    is_sale_diff_null: boolean;  // <-- lowercase
+    hedgeable: number | boolean; // <-- handles both numeric 0/1 and true/false
+    fixation_month: string;
 }
-
-
 
 
 export interface LastUpdateDates {

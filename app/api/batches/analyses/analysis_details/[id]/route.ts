@@ -24,7 +24,11 @@ export async function GET(
       `SELECT screen_size, class, percentage FROM class_by_screensize WHERE analysis_id = ? ORDER BY screen_size ASC`,
       [id]
     );
-
+    
+    
+    console.log("ID is here:",id)
+    
+    console.log("Classes are here",classes)
     return NextResponse.json({ screensize, classes }, { status: 200 });
   } catch (error: any) {
     console.error("Fetch Details Error:", error);

@@ -35,6 +35,8 @@ export async function GET() {
                 impact_declared_weight,
                 aaa_project,
                 aaa_volume,
+                aaa_rs_volume,
+                aaa_rs_declared_weight,
                 geodata_available,
                 aaa_declared_weight,
                 netzero_project,

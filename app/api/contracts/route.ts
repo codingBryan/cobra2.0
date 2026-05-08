@@ -5,10 +5,31 @@ import { ResultSetHeader, RowDataPacket } from 'mysql2/promise';
 // O(1) Cache-busting flag to force Next.js to expose all methods
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(request: Request) {
     try {
+        const { searchParams } = new URL(request.url);
+        const searchBatch = searchParams.get('searchBatch');
+        const fetchVariables = searchParams.get('fetchVariables');
+
+        // Fetch Global Financial Variables Route
+        if (fetchVariables) {
+            const vars = await query({ query: `SELECT name, value FROM variables` });
+            return NextResponse.json(vars);
+        }
+
+        // Search Batch Route
+        if (searchBatch) {
+            const batchQuery = `
+                SELECT id, batch_number, output_qty 
+                FROM daily_strategy_processing 
+                WHERE batch_number = ? AND output_qty > 0 
+                LIMIT 1
+            `;
+            const batchRows = await query({ query: batchQuery, values: [searchBatch] });
+            return NextResponse.json(batchRows);
+        }
+
         // Highly Optimized: Resolves the M:N relationships and Blends directly in SQL.
-        // FIXED: Pulls the 'executed' flag from the 'sale_contract' (sc) table
         const sqlQuery = `
             SELECT 
                 sc.id, 
@@ -21,6 +42,7 @@ export async function GET() {
                 MAX(sc.blend_id) as blend_id,
                 MAX(sc.certs_declared) as certs_declared,
                 MAX(sc.executed) as executed,
+                MAX(sc.pending_dispatch) as pending_dispatch,
                 MAX(b.name) as blend_name,
                 MAX(cst.strategy) as strategy,
                 JSON_ARRAYAGG(c.certificate) as certifications
@@ -46,7 +68,6 @@ export async function POST(request: Request) {
         const body = await request.json();
         const { contractNumber, client, weight, quality, grade, certifications, shippingDate } = body;
 
-        // O(1) Defensive casting and certs_declared synchronization
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
         const certsDeclared = 0;
 
@@ -130,8 +151,6 @@ export async function PUT(request: Request) {
         if (!id) return NextResponse.json({ error: 'ID is required' }, { status: 400 });
 
         const safeBlendId = (blend_id !== undefined && blend_id !== null && blend_id !== '') ? Number(blend_id) : null;
-        
-        // Strict fallback logic to guarantee processing
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
         const certsDeclared = 0;
 
@@ -140,13 +159,11 @@ export async function PUT(request: Request) {
             values: [quality || null, grade || null, safeBlendId, certsDeclared, id]
         });
 
-        // Wipe the mapping slate clean unconditionally
         await query({
             query: `DELETE FROM sale_contract_certification WHERE sale_contract_id = ?`,
             values: [id]
         });
 
-        // Rebuild mapping perfectly if array > 0
         if (uniqueCerts.length > 0) {
             const placeholders = uniqueCerts.map(() => '?').join(',');
             
@@ -191,20 +208,151 @@ export async function PUT(request: Request) {
     }
 }
 
-// Highly Optimized Dedicated Endpoint for toggling executed status O(1)
+// Highly Optimized O(1) Bulk Insert & Cascade Delete Execution Endpoint
 export async function PATCH(request: Request) {
     try {
         const body = await request.json();
-        const { id, executed } = body;
+        const { id, executed, containers, dispatchDate, finishedBatchId } = body;
 
         if (!id || executed === undefined) {
             return NextResponse.json({ error: 'ID and executed status are required' }, { status: 400 });
         }
 
-        await query({
-            query: `UPDATE sale_contract SET executed = ? WHERE id = ?`,
-            values: [executed ? 1 : 0, id]
+        // Fast-path un-execute logic with Optimized Bulk Delete
+        if (!executed) {
+            const contractData: any = await query({
+                query: `SELECT contract_number FROM sale_contract WHERE id = ?`,
+                values: [id]
+            });
+
+            if (contractData && contractData.length > 0) {
+                const contractNumber = contractData[0].contract_number;
+                await query({
+                    query: `DELETE FROM sale_record WHERE sales_ref LIKE ?`,
+                    values: [`${contractNumber}-%`]
+                });
+            }
+
+            await query({
+                query: `UPDATE sale_contract SET executed = 0 WHERE id = ?`,
+                values: [id]
+            });
+            return NextResponse.json({ success: true });
+        }
+
+        // --- FULL EXECUTION LOGIC ---
+        if (!containers || !dispatchDate) {
+            return NextResponse.json({ error: 'Containers and Dispatch Date are required for execution' }, { status: 400 });
+        }
+
+        // 1. Fetch Latest Financial Variables
+        const varsQuery: any = await query({
+            query: `SELECT name, value FROM variables WHERE name IN ('Financing Rate per Annum', 'Financed cost percentage', 'Fixed Fobbing Costs')`
         });
+        
+        let financingRate = null;
+        let financedCostPct = null;
+        let fixedFobbing = null;
+
+        varsQuery.forEach((v: any) => {
+            if (v.name === 'Financing Rate per Annum') financingRate = v.value;
+            if (v.name === 'Financed cost percentage') financedCostPct = v.value;
+            if (v.name === 'Fixed Fobbing Costs') fixedFobbing = v.value;
+        });
+
+        // 2. Determine Average Batch Intake Date Fallback Logic
+        let avgBatchIntakeDate = null;
+        if (finishedBatchId) {
+            const batchData: any = await query({
+                query: `SELECT date_in FROM daily_strategy_processing WHERE id = ?`,
+                values: [finishedBatchId]
+            });
+            if (batchData && batchData.length > 0 && batchData[0].date_in) {
+                avgBatchIntakeDate = batchData[0].date_in;
+            }
+        }
+
+        // Mode Month Fallback
+        if (!avgBatchIntakeDate) {
+            const modeMonthData: any = await query({
+                query: `
+                    SELECT DATE_FORMAT(date, '%Y-%m-01') as mode_date
+                    FROM raw_batches_intake_dates
+                    WHERE date IS NOT NULL
+                    GROUP BY DATE_FORMAT(date, '%Y-%m-01')
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 1
+                `
+            });
+            if (modeMonthData && modeMonthData.length > 0) {
+                avgBatchIntakeDate = modeMonthData[0].mode_date;
+            }
+        }
+
+        // 3. Consolidated Read: Fetch contract data
+        const contractData: any = await query({
+            query: `SELECT contract_number, client, weight_kilos, sale_differential, hedgeable, fixation_month FROM sale_contract WHERE id = ?`,
+            values: [id]
+        });
+
+        if (!contractData || contractData.length === 0) {
+            return NextResponse.json({ error: 'Contract not found' }, { status: 404 });
+        }
+
+        const contract = contractData[0];
+        const numContainers = parseInt(containers, 10);
+        const splitQty = contract.weight_kilos / numContainers;
+
+        // O(1) Math-Based Suffix Generator
+        const getSuffix = (index: number) => {
+            let suffix = '';
+            let temp = index;
+            while (temp >= 0) {
+                suffix = String.fromCharCode(65 + (temp % 26)) + suffix;
+                temp = Math.floor(temp / 26) - 1;
+            }
+            return suffix;
+        };
+
+        const saleRecordsValues = [];
+        for (let i = 0; i < numContainers; i++) {
+            const salesRef = `${contract.contract_number}-${getSuffix(i)}`;
+            saleRecordsValues.push([
+                salesRef,
+                contract.client || null,
+                splitQty,
+                dispatchDate,
+                contract.sale_differential ?? null,
+                finishedBatchId || null,
+                financingRate,
+                fixedFobbing,
+                financedCostPct,
+                avgBatchIntakeDate,
+                contract.hedgeable ?? null,
+                contract.fixation_month ?? null
+            ]);
+        }
+
+        // Update the execution status
+        await query({
+            query: `UPDATE sale_contract SET executed = 1 WHERE id = ?`,
+            values: [id]
+        });
+
+        // O(1) Bulk Insert into sale_record with new columns
+        if (saleRecordsValues.length > 0) {
+            const placeholders = saleRecordsValues.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+            const flatValues = saleRecordsValues.flat();
+            
+            await query({
+                query: `
+                    INSERT INTO sale_record 
+                    (sales_ref, client, dispatched_qty, blocked_date, sale_differential, finished_batch_id, financing_rate, fixed_fobbing, financed_cost_percentage, average_batch_intake_date, hedgeable, fixation_month) 
+                    VALUES ${placeholders}
+                `,
+                values: flatValues
+            });
+        }
 
         return NextResponse.json({ success: true });
     } catch (error) {
