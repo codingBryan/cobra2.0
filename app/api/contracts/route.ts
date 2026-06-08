@@ -30,6 +30,7 @@ export async function GET(request: Request) {
         }
 
         // Highly Optimized: Resolves the M:N relationships and Blends directly in SQL.
+        // Added MAX(sc.region) to extract the new Region column seamlessly.
         const sqlQuery = `
             SELECT 
                 sc.id, 
@@ -39,6 +40,7 @@ export async function GET(request: Request) {
                 MAX(sc.shipping_date) as shipping_date,
                 MAX(sc.quality) as quality,
                 MAX(sc.grade) as grade,
+                MAX(sc.region) as region,
                 MAX(sc.blend_id) as blend_id,
                 MAX(sc.certs_declared) as certs_declared,
                 MAX(sc.executed) as executed,
@@ -66,18 +68,19 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
     try {
         const body = await request.json();
-        const { contractNumber, client, weight, quality, grade, certifications, shippingDate } = body;
+        const { contractNumber, client, weight, quality, grade, region, certifications, shippingDate } = body;
 
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
         const certsDeclared = 0;
 
+        // Added region column injection
         const insertSaleQuery = `
-            INSERT INTO sale_contract (contract_number, client, weight_kilos, quality, grade, shipping_date, certs_declared, executed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO sale_contract (contract_number, client, weight_kilos, quality, grade, region, shipping_date, certs_declared, executed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
         `;
         const saleResult: any = await query({
             query: insertSaleQuery,
-            values: [contractNumber, client || null, weight, quality, grade || null, shippingDate, certsDeclared]
+            values: [contractNumber, client || null, weight, quality, grade || null, region || null, shippingDate, certsDeclared]
         });
 
         const newSaleId = saleResult?.insertId || saleResult?.[0]?.insertId;
@@ -130,6 +133,7 @@ export async function POST(request: Request) {
                 quality: quality,
                 strategy: quality, 
                 grade: grade,
+                region: region,
                 shipping_date: shippingDate,
                 certifications: uniqueCerts,
                 blend_id: null,
@@ -146,7 +150,7 @@ export async function POST(request: Request) {
 export async function PUT(request: Request) {
     try {
         const body = await request.json();
-        const { id, quality, grade, certifications, blend_id } = body;
+        const { id, quality, grade, region, certifications, blend_id } = body;
 
         if (!id) return NextResponse.json({ error: 'ID is required' }, { status: 400 });
 
@@ -154,9 +158,10 @@ export async function PUT(request: Request) {
         const uniqueCerts = Array.isArray(certifications) ? Array.from(new Set(certifications as string[])) : [];
         const certsDeclared = 0;
 
+        // Added region column update
         await query({
-            query: `UPDATE sale_contract SET quality = ?, grade = ?, blend_id = ?, certs_declared = ? WHERE id = ?`,
-            values: [quality || null, grade || null, safeBlendId, certsDeclared, id]
+            query: `UPDATE sale_contract SET quality = ?, grade = ?, region = ?, blend_id = ?, certs_declared = ? WHERE id = ?`,
+            values: [quality || null, grade || null, region || null, safeBlendId, certsDeclared, id]
         });
 
         await query({

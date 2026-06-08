@@ -2,38 +2,38 @@ import { NextResponse } from 'next/server';
 import { query } from '@/lib/stock_movement_db';
 import * as xlsx from 'xlsx';
 
-// GET: Fetch all active declarations grouped by contract and stock lot
 export async function GET(request: Request) {
     try {
-        const sql = `
-            SELECT 
-                sc.id as contract_id,
-                sc.contract_number,
-                sc.client,
-                sc.weight_kilos as contract_weight,
-                sc.shipping_date,
-                cst.id as stock_id,
-                cst.lot_number,
-                cst.grade,
-                cst.strategy,
-                cst.cooperative,
-                cst.wet_mill,
-                cst.purchased_weight as lot_purchased_weight,
-                scsd.rfa_declared_weight,
-                scsd.eudr_declared_weight,
-                scsd.cafe_declared_weight,
-                scsd.impact_declared_weight,
-                scsd.aaa_rs_declared_weight,
-                scsd.aaa_declared_weight,
-                scsd.netzero_declared_weight
-            FROM sale_contract sc
-            INNER JOIN sale_contract_stock_declaration scsd ON sc.id = scsd.sale_contract_id
-            INNER JOIN certified_stock_tracker cst ON scsd.stock_tracker_id = cst.id
-        `;
-        const rows = await query({ query: sql }) as any[];
-        return NextResponse.json({ success: true, data: rows });
+        const rows = await query({
+            query: `
+                SELECT 
+                    scsd.sale_contract_id as contract_id,
+                    sc.contract_number,
+                    sc.client,
+                    sc.weight_kilos as contract_weight,
+                    sc.shipping_date,
+                    scsd.stock_tracker_id as stock_id,
+                    cst.lot_number,
+                    cst.grade,
+                    cst.strategy,
+                    cst.cooperative,
+                    cst.wet_mill,
+                    cst.purchased_weight as lot_purchased_weight,
+                    scsd.rfa_declared_weight,
+                    scsd.eudr_declared_weight,
+                    scsd.cafe_declared_weight,
+                    scsd.impact_declared_weight,
+                    scsd.aaa_declared_weight,
+                    scsd.aaa_rs_declared_weight,
+                    scsd.netzero_declared_weight
+                FROM sale_contract_stock_declaration scsd
+                JOIN sale_contract sc ON scsd.sale_contract_id = sc.id
+                JOIN certified_stock_tracker cst ON scsd.stock_tracker_id = cst.id
+            `
+        });
+        return NextResponse.json({ data: rows });
     } catch (error) {
-        console.error("Fetch Declarations Error:", error);
+        console.error("Fetch declarations error:", error);
         return NextResponse.json({ error: 'Failed to fetch declarations' }, { status: 500 });
     }
 }
@@ -47,7 +47,7 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: 'sale_contract_id is required' }, { status: 400 });
         }
 
-        // 0. O(1) Reset: Instantly revert any existing declarations for this contract before re-allocating
+        // 0. O(1) Reset: Revert existing declarations
         await query({
             query: `
                 UPDATE certified_stock_tracker cst
@@ -69,10 +69,10 @@ export async function POST(request: Request) {
             values: [sale_contract_id]
         });
 
-        // 1. Fetch Contract & Certificates in O(1) Trip
+        // 1. Fetch Contract & Required Certificates
         const contractRows = await query({
             query: `
-                SELECT sc.weight_kilos, c.certificate
+                SELECT sc.weight_kilos, sc.contract_number, c.certificate
                 FROM sale_contract sc
                 LEFT JOIN sale_contract_certification scc ON sc.id = scc.sale_contract_id
                 LEFT JOIN certifications c ON scc.certification_id = c.id
@@ -86,273 +86,261 @@ export async function POST(request: Request) {
         }
 
         const volume_to_declare = parseFloat(contractRows[0].weight_kilos);
+        const contract_number = contractRows[0].contract_number || sale_contract_id;
         const rawCerts = contractRows.map(r => r.certificate).filter(Boolean);
-        
-        // Normalize names: 'NET ZERO' -> 'netzero'
         const certificates_to_declare = Array.from(new Set(
             rawCerts.map(c => c.toLowerCase().replace(/\s/g, ''))
         ));
 
-        const volume_declaration: Record<string, number> = {};
+        if (certificates_to_declare.length === 0) {
+            await query({ query: `UPDATE sale_contract SET certs_declared = 1 WHERE id = ?`, values: [sale_contract_id] });
+            return NextResponse.json({ message: 'No certificates required for this contract.' }, { status: 200 });
+        }
 
-        // 3. Construct the Dynamic Stock Query (Pushing Filter Logic to SQL Engine)
+        // 2. Load Filtered Stock Pool
         let stockQuery = 'SELECT * FROM certified_stock_tracker WHERE 1=1';
         const queryValues: any[] = [];
 
-        if (regions && regions.length > 0) {
+        if (regions.length > 0) {
             stockQuery += ` AND county IN (${regions.map(() => '?').join(',')})`;
             queryValues.push(...regions);
-        } else {
-            stockQuery += ` AND 1=0`; // If no regions allowed, match nothing
         }
-        
-        if (grades && grades.length > 0) {
+        if (grades.length > 0) {
             stockQuery += ` AND grade IN (${grades.map(() => '?').join(',')})`;
             queryValues.push(...grades);
-        } else {
-            stockQuery += ` AND 1=0`; // If no grades allowed, match nothing
-        }
-
-        // Dual-Certification priority optimization
-        const requiresBoth = certificates_to_declare.includes('aaa') && certificates_to_declare.includes('cafe');
-        if (!requiresBoth) {
-            stockQuery += ' AND NOT (aaa_project = 1 AND cafe_certified = 1)';
         }
         
         const allStocks = await query({ query: stockQuery, values: queryValues }) as any[];
 
-        // Trackers for bulk database updates
-        const trackerUpdatesMap = new Map<number, any>();
-        const declarationInsertsMap = new Map<number, any>();
-        const excelReportData: Record<string, any[]> = {};
-        
-        const successfulCertificates: string[] = [];
-        const failedCertificates: string[] = [];
+        // 3. Define the Dynamic Rules & Base Volume requirements
+        let baseVolumeField = 'purchased_weight';
+        if (certificates_to_declare.includes('aaa')) {
+            baseVolumeField = 'aaa_volume';
+        } else if (certificates_to_declare.includes('aaars') || certificates_to_declare.includes('aaa-rs')) {
+            baseVolumeField = 'aaa_rs_volume';
+        }
 
-        // 4. Core Transactional Allocation Loop
-        for (const cert of certificates_to_declare) {
-            
-            // ⚡ O(1) EXPLICIT COLUMN MAPPING
-            let certField = '';
-            let declaredField = '';
-            let baseVolumeField = 'purchased_weight';
-
+        const certRules = certificates_to_declare.map(cert => {
+            let certField = '', declaredField = '', expiryField = '';
             switch (cert) {
                 case 'aaa':
-                    certField = 'aaa_project';
-                    declaredField = 'aaa_declared_weight';
-                    baseVolumeField = 'aaa_volume';
-                    break;
-                case 'aaa-rs':
+                    certField = 'aaa_project'; declaredField = 'aaa_declared_weight'; break;
                 case 'aaars':
-                    certField = 'aaa_rs_volume'; // Identity purely reliant on volume presence
-                    declaredField = 'aaa_rs_declared_weight';
-                    baseVolumeField = 'aaa_rs_volume';
-                    break;
+                case 'aaa-rs':
+                    certField = 'aaa_rs_volume'; declaredField = 'aaa_rs_declared_weight'; break;
                 case 'netzero':
-                    certField = 'netzero_project';
-                    declaredField = 'netzero_declared_weight';
-                    break;
+                    certField = 'netzero_project'; declaredField = 'netzero_declared_weight'; break;
+                case 'rfa':
+                    certField = 'rfa_certified'; declaredField = 'rfa_declared_weight'; expiryField = 'rfa_expiry_date'; break;
+                case 'cafe':
+                    certField = 'cafe_certified'; declaredField = 'cafe_declared_weight'; expiryField = 'cafe_expiry_date'; break;
+                case 'eudr':
+                    certField = 'eudr_certified'; declaredField = 'eudr_declared_weight'; expiryField = 'eudr_expiry_date'; break;
+                case 'impact':
+                    certField = 'impact_certified'; declaredField = 'impact_declared_weight'; expiryField = 'impact_expiry_date'; break;
                 default:
-                    // Fallback for standard certs (rfa, cafe, eudr, impact)
-                    certField = `${cert}_certified`;
-                    declaredField = `${cert}_declared_weight`;
-                    break;
+                    certField = `${cert}_certified`; declaredField = `${cert}_declared_weight`; expiryField = `${cert}_expiry_date`; break;
+            }
+            return { cert, certField, declaredField, expiryField };
+        });
+
+        const currentDate = new Date();
+        const isNespresso = certificates_to_declare.includes('aaa') && certificates_to_declare.includes('cafe');
+
+        // 4. Intersection Filter: Ensure lot satisfies EVERY requested certificate
+        const applicableStocks = allStocks.filter(s => {
+            let lotCapacity = parseFloat(s[baseVolumeField] || 0);
+            if (lotCapacity <= 0) return false;
+
+            if (!isNespresso && s.aaa_project == 1 && s.cafe_certified == 1) {
+                return false;
             }
 
-            // Filter for applicable stock with available capacity
-            const applicableStocks = allStocks.filter(s => {
-                const baseVol = parseFloat(s[baseVolumeField] || 0);
-                const declaredVol = parseFloat(s[declaredField] || 0);
-                
-                // 1. O(1) FAST FILTER: MUST HAVE AVAILABLE CAPACITY
-                if (declaredVol >= baseVol) return false;
-                
-                // 2. IDENTITY CHECK
-                if (cert === 'aaa-rs' || cert === 'aaars') {
-                    return baseVol > 0; // Purely checks if aaa_rs_volume > 0
-                }
-                
-                // Normal flags check
-                return s[certField] == 1;
-            });
+            for (const rule of certRules) {
+                if (rule.expiryField && s[rule.expiryField] && new Date(s[rule.expiryField]) <= currentDate) return false;
 
-            // OPTIMIZATION: Prioritize Kenyacof holders first, then Dual-Certified lots (if applicable)
-            applicableStocks.sort((a, b) => {
-                const aHolder = String(a[`${cert}_certificate_holder`] || a['cafe_certificate_holder'] || '').toLowerCase();
-                const bHolder = String(b[`${cert}_certificate_holder`] || b['cafe_certificate_holder'] || '').toLowerCase();
-                
-                const aIsKenyacof = aHolder.includes('kenyacof') ? 1 : 0;
-                const bIsKenyacof = bHolder.includes('kenyacof') ? 1 : 0;
-                
-                if (aIsKenyacof !== bIsKenyacof) return bIsKenyacof - aIsKenyacof;
-
-                if (requiresBoth) {
-                    const aIsDual = (a.aaa_project == 1 && a.cafe_certified == 1) ? 1 : 0;
-                    const bIsDual = (b.aaa_project == 1 && b.cafe_certified == 1) ? 1 : 0;
-                    return bIsDual - aIsDual; 
+                if (rule.cert === 'aaa') {
+                    if (s.aaa_project != 1) return false;
+                } else if (rule.cert === 'aaars' || rule.cert === 'aaa-rs') {
+                    if (parseFloat(s.aaa_rs_volume || 0) <= 0) return false;
+                } else {
+                    if (s[rule.certField] != 1) return false;
                 }
 
-                return 0;
-            });
-
-            // Transactional Dry Run (O(N))
-            let currentAllocated = 0;
-            const tempTrackerUpdates = new Map<number, any>();
-            const tempDeclarationInserts = new Map<number, any>();
-            const tempExcelRows: any[] = [];
-
-            for (const stock of applicableStocks) {
-                if (currentAllocated >= volume_to_declare) break;
-
-                const baseVolume = parseFloat(stock[baseVolumeField] || 0);
-                const alreadyDeclared = parseFloat(stock[declaredField] || 0);
-                const difference = baseVolume - alreadyDeclared;
-
-                const remainingNeeded = volume_to_declare - currentAllocated;
-                const amountToAllocate = Math.min(difference, remainingNeeded);
-
-                currentAllocated += amountToAllocate;
+                const alreadyDeclared = parseFloat(s[rule.declaredField] || 0);
+                const certCapacity = parseFloat(s[baseVolumeField] || 0) - alreadyDeclared;
                 
-                // Track proposed changes
-                tempTrackerUpdates.set(stock.id, { [declaredField]: alreadyDeclared + amountToAllocate });
-                tempDeclarationInserts.set(stock.id, { [declaredField]: amountToAllocate });
+                if (certCapacity <= 0) return false;
+                if (certCapacity < lotCapacity) lotCapacity = certCapacity;
+            }
 
-                tempExcelRows.push({
-                    'Certified Stock ID': stock.id,
-                    'Season': stock.season || 'N/A',
-                    'Sale Type': stock.sale_type || 'N/A',
-                    'Outturn': stock.outturn || 'N/A',
-                    'Lot Number': stock.lot_number || 'N/A',
-                    'Cooperative': stock.cooperative || 'N/A',
-                    'Wet Mill': stock.wet_mill || 'N/A',
-                    'County': stock.county || 'N/A',
-                    'Grade': stock.grade || 'N/A',
-                    'Strategy': stock.strategy || 'N/A',
-                    'Grower Code': stock.grower_code || 'N/A',
-                    'Base Volume': baseVolume,
-                    'Amount Allocated': amountToAllocate,
-                    'Total Declared After': alreadyDeclared + amountToAllocate
+            s._lotCapacity = lotCapacity;
+            return lotCapacity > 0;
+        });
+
+        // 5. Similarity Grouping
+        applicableStocks.sort((a, b) => {
+            const holderFields = ['rfa_certificate_holder', 'cafe_certificate_holder', 'eudr_certificate_holder'];
+            const isAKenyacof = holderFields.some(f => String(a[f] || '').toLowerCase().includes('kenyacof')) ? 1 : 0;
+            const isBKenyacof = holderFields.some(f => String(b[f] || '').toLowerCase().includes('kenyacof')) ? 1 : 0;
+            if (isAKenyacof !== isBKenyacof) return isBKenyacof - isAKenyacof;
+
+            const coopCmp = String(a.cooperative || '').localeCompare(String(b.cooperative || ''));
+            if (coopCmp !== 0) return coopCmp;
+            
+            const countyCmp = String(a.county || '').localeCompare(String(b.county || ''));
+            if (countyCmp !== 0) return countyCmp;
+            
+            const wetmillCmp = String(a.wet_mill || '').localeCompare(String(b.wet_mill || ''));
+            if (wetmillCmp !== 0) return wetmillCmp;
+
+            const gradeCmp = String(a.grade || '').localeCompare(String(b.grade || ''));
+            if (gradeCmp !== 0) return gradeCmp;
+
+            const outturnCmp = String(a.outturn || '').localeCompare(String(b.outturn || ''));
+            if (outturnCmp !== 0) return outturnCmp;
+
+            return new Date(a.recorded_date || 0).getTime() - new Date(b.recorded_date || 0).getTime();
+        });
+
+        // 6. Unified Allocation Loop
+        let currentAllocated = 0;
+        const trackerUpdatesMap = new Map<number, any>();
+        const declarationInsertsMap = new Map<number, any>();
+        
+        const excelReportRows: any[] = [];
+        const excelReportData: Record<string, any[]> = {};
+        
+        certificates_to_declare.forEach(cert => { excelReportData[cert] = []; });
+
+        for (const stock of applicableStocks) {
+            if (currentAllocated >= volume_to_declare) break;
+
+            const amountToAllocate = Math.min(stock._lotCapacity, volume_to_declare - currentAllocated);
+            currentAllocated += amountToAllocate;
+            
+            const updateObj: any = { id: stock.id };
+            const insertObj: any = { sale_contract_id, stock_tracker_id: stock.id };
+            const baseVol = parseFloat(stock[baseVolumeField] || 0);
+            
+            for (const rule of certRules) {
+                const alreadyDeclared = parseFloat(stock[rule.declaredField] || 0);
+                updateObj[rule.declaredField] = alreadyDeclared + amountToAllocate;
+                insertObj[rule.declaredField] = amountToAllocate;
+                
+                excelReportData[rule.cert].push({
+                    'Season': stock.season || '',
+                    'Outturn': stock.outturn || '',
+                    'Grower Code': stock.grower_code || '',
+                    'Grade': stock.grade || '',
+                    'Weight': baseVol,
+                    'Wetmill': stock.wet_mill || '',
+                    'County': stock.county || '',
+                    'Cooperative': stock.cooperative || '',
+                    'Purchased Weight': parseFloat(stock.purchased_weight || 0),
+                    'Lot Number': stock.lot_number || '',
+                    'Strategy': stock.strategy || '',
+                    'Declared Weight': amountToAllocate,
+                    'Balance': baseVol - (alreadyDeclared + amountToAllocate)
                 });
             }
 
-            // Check if Dry Run Succeeded (Account for minor float precision)
-            if (currentAllocated >= volume_to_declare - 0.01) {
-                successfulCertificates.push(cert);
-                volume_declaration[`certificate_${cert}_volume`] = currentAllocated;
-                excelReportData[cert] = tempExcelRows;
+            trackerUpdatesMap.set(stock.id, updateObj);
+            declarationInsertsMap.set(stock.id, insertObj);
 
-                // Merge temporary maps into main transaction maps
-                for (const [id, update] of tempTrackerUpdates.entries()) {
-                    if (!trackerUpdatesMap.has(id)) trackerUpdatesMap.set(id, { id });
-                    Object.assign(trackerUpdatesMap.get(id), update);
-                    
-                    // Update the in-memory array reference so subsequent independent certificates 
-                    // see the latest reality if they check the exact same lot.
-                    const stockRef = allStocks.find(s => s.id === id);
-                    if (stockRef) stockRef[declaredField] = update[declaredField];
-                }
-                
-                for (const [id, insert] of tempDeclarationInserts.entries()) {
-                    if (!declarationInsertsMap.has(id)) declarationInsertsMap.set(id, { sale_contract_id, stock_tracker_id: id });
-                    Object.assign(declarationInsertsMap.get(id), insert);
-                }
-            } else {
-                // Record the exact shortfall amount for the toast message
-                failedCertificates.push(`${cert}:${(volume_to_declare - currentAllocated).toFixed(2)}`);
-            }
+            excelReportRows.push({
+                'Season': stock.season || '',
+                'Outturn': stock.outturn || '',
+                'Grower Code': stock.grower_code || '',
+                'Grade': stock.grade || '',
+                'Weight': baseVol,
+                'Wetmill': stock.wet_mill || '',
+                'County': stock.county || '',
+                'Cooperative': stock.cooperative || '',
+                'Purchased Weight': parseFloat(stock.purchased_weight || 0),
+                'Lot Number': stock.lot_number || '',
+                'Strategy': stock.strategy || '',
+                'Declared Weight': amountToAllocate,
+                'Balance': stock._lotCapacity - amountToAllocate
+            });
         }
 
-        // Check for complete failure
-        if (successfulCertificates.length === 0) {
-             return NextResponse.json({ 
-                 error: `Insufficient volume to fulfill contract. The requested certificates have been skipped. Allocation aborted.` 
-             }, { status: 400 });
+        // 7. Validate holistic success
+        if (currentAllocated < volume_to_declare - 0.01) {
+            return NextResponse.json({ 
+                error: `Insufficient identical volume to simultaneously fulfill ALL requested certificates. Needed ${volume_to_declare}, only found ${currentAllocated.toFixed(2)}.` 
+            }, { status: 400 });
         }
 
-        // 5. O(1) Database Sync (Batch Updates for Successful Certificates Only)
+        // 8. ⚡ O(1) Database Sync (Optimized Execution)
         const trackerValues = Array.from(trackerUpdatesMap.values());
-        if (trackerValues.length > 0) {
-            for (const update of trackerValues) {
-                const keys = Object.keys(update).filter(k => k !== 'id');
-                const setClause = keys.map(k => `${k} = ?`).join(', ');
-                const values = keys.map(k => update[k]);
-                
-                await query({
-                    query: `UPDATE certified_stock_tracker SET ${setClause} WHERE id = ?`,
-                    values: [...values, update.id]
-                });
-            }
-        }
+        
+        // Run tracker updates in parallel
+        await Promise.all(trackerValues.map(update => {
+            const keys = Object.keys(update).filter(k => k !== 'id');
+            const setClause = keys.map(k => `${k} = ?`).join(', ');
+            const values = keys.map(k => update[k]);
+            
+            return query({
+                query: `UPDATE certified_stock_tracker SET ${setClause} WHERE id = ?`,
+                values: [...values, update.id]
+            });
+        }));
 
         const declValues = Array.from(declarationInsertsMap.values());
         if (declValues.length > 0) {
-            const allPossibleCols = ['rfa_declared_weight', 'eudr_declared_weight', 'cafe_declared_weight', 'impact_declared_weight', 'aaa_declared_weight', 'aaa_rs_declared_weight', 'netzero_declared_weight'];
+            // Dynamic column mapping removes dependency on hardcoded arrays
+            const insertCols = Object.keys(declValues[0]);
             
-            for (const decl of declValues) {
-                const insertCols = ['sale_contract_id', 'stock_tracker_id'];
-                const insertVals = [decl.sale_contract_id, decl.stock_tracker_id];
-                
-                const updateStmts: string[] = []; 
+            const placeholders = `(${insertCols.map(() => '?').join(', ')})`;
+            const allPlaceholders = declValues.map(() => placeholders).join(', ');
+            
+            const insertVals = declValues.flatMap(decl => insertCols.map(k => decl[k]));
+            
+            const updateStmts = insertCols
+                .filter(col => col !== 'sale_contract_id' && col !== 'stock_tracker_id')
+                .map(col => `${col} = VALUES(${col})`);
 
-                for (const col of allPossibleCols) {
-                    if (decl[col] !== undefined) {
-                        insertCols.push(col);
-                        insertVals.push(decl[col]);
-                        updateStmts.push(`${col} = VALUES(${col})`);
-                    }
-                }
-
-                const placeholders = insertCols.map(() => '?').join(', ');
-                
-                const onDuplicateClause = updateStmts.length > 0 
-                    ? `ON DUPLICATE KEY UPDATE ${updateStmts.join(', ')}` 
-                    : '';
-                
-                await query({
-                    query: `
-                        INSERT INTO sale_contract_stock_declaration (${insertCols.join(', ')})
-                        VALUES (${placeholders})
-                        ${onDuplicateClause}
-                    `,
-                    values: insertVals
-                });
-            }
+            const onDuplicateClause = updateStmts.length > 0 ? `ON DUPLICATE KEY UPDATE ${updateStmts.join(', ')}` : '';
+            
+            // Single O(1) Bulk Insert
+            await query({
+                query: `INSERT INTO sale_contract_stock_declaration (${insertCols.join(', ')}) VALUES ${allPlaceholders} ${onDuplicateClause}`,
+                values: insertVals
+            });
         }
 
-        // Update certs_declared status based on success
-        const isFullyDeclared = successfulCertificates.length === certificates_to_declare.length && certificates_to_declare.length > 0;
         await query({
-            query: `UPDATE sale_contract SET certs_declared = ? WHERE id = ?`,
-            values: [isFullyDeclared ? 1 : 0, sale_contract_id]
+            query: `UPDATE sale_contract SET certs_declared = 1 WHERE id = ?`,
+            values: [sale_contract_id]
         });
 
-        // 6. Generate Excel File (For Successful Certs Only)
+        // 9. Generate specific Excel File format
         const workbook = xlsx.utils.book_new();
+        
+        const combinedWorksheet = xlsx.utils.json_to_sheet(excelReportRows);
+        if (excelReportRows.length > 0) {
+            combinedWorksheet['!cols'] = Object.keys(excelReportRows[0]).map(key => ({ wch: Math.max(key.length + 5, 15) }));
+        }
+        xlsx.utils.book_append_sheet(workbook, combinedWorksheet, 'COMBINED DECLARATION');
+        
+        for (const cert of certificates_to_declare) {
+            const certData = excelReportData[cert];
+            const certWorksheet = xlsx.utils.json_to_sheet(certData);
+            if (certData.length > 0) {
+                certWorksheet['!cols'] = Object.keys(certData[0]).map(key => ({ wch: Math.max(key.length + 5, 15) }));
+            }
+            xlsx.utils.book_append_sheet(workbook, certWorksheet, cert.toUpperCase());
+        }
 
-        Object.keys(excelReportData).forEach(cert => {
-            const data = excelReportData[cert];
-            const worksheet = xlsx.utils.json_to_sheet(data);
-            
-            worksheet['!cols'] = [
-                { wch: 18 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 25 }, 
-                { wch: 25 }, { wch: 25 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, 
-                { wch: 20 }, { wch: 15 }, { wch: 20 }, { wch: 25 }
-            ];
-            
-            xlsx.utils.book_append_sheet(workbook, worksheet, cert.toUpperCase());
-        });
-
-        const fileName = `Declaration_Contract_${sale_contract_id}_${Date.now()}.xlsx`;
         const fileBuffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+        const cleanContractName = String(contract_number).replace(/[^a-zA-Z0-9!@#&()-_=+]/g, '_');
 
         return new NextResponse(fileBuffer, {
             status: 200,
             headers: {
-                'Content-Disposition': `attachment; filename="${fileName}"`,
-                'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'X-Allocation-Data': JSON.stringify(volume_declaration),
-                'X-Failed-Certificates': failedCertificates.join(',')
+                'Content-Disposition': `attachment; filename="Declaration_${cleanContractName}.xlsx"`,
+                'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             }
         });
 
@@ -362,16 +350,164 @@ export async function POST(request: Request) {
     }
 }
 
+export async function PUT(request: Request) {
+    try {
+        const body = await request.json();
+        const { sale_contract_id, old_stock_id, new_stock_ids } = body;
+
+        if (!sale_contract_id || !old_stock_id || !new_stock_ids || new_stock_ids.length === 0) {
+            return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
+        }
+
+        // 1. Fetch exactly how much was declared on the old stock
+        const oldDeclRows = await query({
+            query: `SELECT * FROM sale_contract_stock_declaration WHERE sale_contract_id = ? AND stock_tracker_id = ?`,
+            values: [sale_contract_id, old_stock_id]
+        }) as any[];
+
+        if (!oldDeclRows || oldDeclRows.length === 0) {
+            return NextResponse.json({ error: 'Original declaration not found' }, { status: 404 });
+        }
+
+        const oldDecl = oldDeclRows[0];
+        const activeCerts: string[] = [];
+        let volumeToReplace = 0;
+        const cols = ['rfa_declared_weight', 'eudr_declared_weight', 'cafe_declared_weight', 'impact_declared_weight', 'aaa_declared_weight', 'aaa_rs_declared_weight', 'netzero_declared_weight'];
+
+        for (const col of cols) {
+            const val = parseFloat(oldDecl[col] || 0);
+            if (val > 0) {
+                activeCerts.push(col);
+                if (val > volumeToReplace) volumeToReplace = val;
+            }
+        }
+
+        if (volumeToReplace <= 0) {
+            return NextResponse.json({ error: 'No volume to replace found in the old lot.' }, { status: 400 });
+        }
+
+        // 2. O(1) Fetch all requested replacement lots
+        const placeholders = new_stock_ids.map(() => '?').join(',');
+        const newStocks = await query({
+            query: `SELECT * FROM certified_stock_tracker WHERE id IN (${placeholders})`,
+            values: new_stock_ids
+        }) as any[];
+
+        // 3. O(N) Calculate new allocation greedy approach
+        let currentAllocated = 0;
+        const updatesMap = new Map();
+        const insertsMap = new Map();
+
+        for (const stockId of new_stock_ids) {
+            const stock = newStocks.find(s => s.id === stockId);
+            if (!stock) continue;
+            if (currentAllocated >= volumeToReplace) break;
+
+            let baseVolumeField = 'purchased_weight';
+            if (activeCerts.includes('aaa_declared_weight')) baseVolumeField = 'aaa_volume';
+            else if (activeCerts.includes('aaa_rs_declared_weight')) baseVolumeField = 'aaa_rs_volume';
+
+            let lotCap = parseFloat(stock[baseVolumeField] || 0);
+
+            for (const col of activeCerts) {
+                 const alreadyDeclared = parseFloat(stock[col] || 0);
+                 const certCap = parseFloat(stock[baseVolumeField] || 0) - alreadyDeclared;
+                 if (certCap < lotCap) lotCap = certCap;
+            }
+
+            if (lotCap <= 0) continue;
+
+            const amountToAllocate = Math.min(lotCap, volumeToReplace - currentAllocated);
+            currentAllocated += amountToAllocate;
+
+            const stockUpdate: any = { id: stock.id };
+            const declInsert: any = { sale_contract_id, stock_tracker_id: stock.id };
+
+            for (const col of activeCerts) {
+                stockUpdate[col] = parseFloat(stock[col] || 0) + amountToAllocate;
+                declInsert[col] = amountToAllocate;
+            }
+
+            updatesMap.set(stock.id, stockUpdate);
+            insertsMap.set(stock.id, declInsert);
+        }
+
+        if (currentAllocated < volumeToReplace - 0.01) {
+            return NextResponse.json({ 
+                error: `Selected lots have insufficient capacity. Needed ${volumeToReplace}, but could only allocate ${currentAllocated}.` 
+            }, { status: 400 });
+        }
+
+        // 4. Execute DB Changes 
+        
+        // A. Free the old stock capacity
+        const revertSetClause = activeCerts.map(col => `${col} = GREATEST(0, COALESCE(${col}, 0) - ?)`).join(', ');
+        const revertValues = activeCerts.map(col => parseFloat(oldDecl[col] || 0));
+
+        if (revertSetClause) {
+            await query({
+                query: `UPDATE certified_stock_tracker SET ${revertSetClause} WHERE id = ?`,
+                values: [...revertValues, old_stock_id]
+            });
+        }
+
+        // B. Delete the old declaration record entirely
+        await query({
+            query: `DELETE FROM sale_contract_stock_declaration WHERE sale_contract_id = ? AND stock_tracker_id = ?`,
+            values: [sale_contract_id, old_stock_id]
+        });
+
+        // C. ⚡ Consume new stock capacities (Optimized parallel execution)
+        const updatePromises = Array.from(updatesMap.values()).map(update => {
+            const keys = Object.keys(update).filter(k => k !== 'id');
+            const setClause = keys.map(k => `${k} = ?`).join(', ');
+            const values = keys.map(k => update[k]);
+
+            return query({
+                query: `UPDATE certified_stock_tracker SET ${setClause} WHERE id = ?`,
+                values: [...values, update.id]
+            });
+        });
+        await Promise.all(updatePromises);
+
+        // D. ⚡ Insert / Upsert the new declarations (Optimized bulk query)
+        const newDeclValues = Array.from(insertsMap.values());
+        if (newDeclValues.length > 0) {
+            const insertCols = Object.keys(newDeclValues[0]);
+            
+            const insertPlaceholders = `(${insertCols.map(() => '?').join(', ')})`;
+            const allPlaceholders = newDeclValues.map(() => insertPlaceholders).join(', ');
+            
+            const insertVals = newDeclValues.flatMap(decl => insertCols.map(k => decl[k]));
+            
+            const updateStmts = insertCols
+                .filter(col => col !== 'sale_contract_id' && col !== 'stock_tracker_id')
+                .map(col => `${col} = COALESCE(${col}, 0) + VALUES(${col})`);
+
+            const onDuplicateClause = updateStmts.length > 0 ? `ON DUPLICATE KEY UPDATE ${updateStmts.join(', ')}` : '';
+
+            await query({
+                query: `INSERT INTO sale_contract_stock_declaration (${insertCols.join(', ')}) VALUES ${allPlaceholders} ${onDuplicateClause}`,
+                values: insertVals
+            });
+        }
+
+        return NextResponse.json({ success: true, replaced_weight: volumeToReplace });
+    } catch (error) {
+        console.error("Replacement error:", error);
+        return NextResponse.json({ error: 'Failed to process replacement' }, { status: 500 });
+    }
+}
+
 export async function DELETE(request: Request) {
     try {
         const { searchParams } = new URL(request.url);
-        const id = searchParams.get('id');
+        const contractId = searchParams.get('id');
 
-        if (!id) {
-            return NextResponse.json({ error: 'Contract ID is required' }, { status: 400 });
+        if (!contractId) {
+            return NextResponse.json({ error: 'Contract ID required' }, { status: 400 });
         }
 
-        // 1. Revert weights in certified_stock_tracker using O(1) Bulk JOIN
         await query({
             query: `
                 UPDATE certified_stock_tracker cst
@@ -386,24 +522,22 @@ export async function DELETE(request: Request) {
                     cst.netzero_declared_weight = GREATEST(0, COALESCE(cst.netzero_declared_weight, 0) - COALESCE(scsd.netzero_declared_weight, 0))
                 WHERE scsd.sale_contract_id = ?
             `,
-            values: [id]
+            values: [contractId]
         });
 
-        // 2. Delete the declaration records
         await query({
             query: `DELETE FROM sale_contract_stock_declaration WHERE sale_contract_id = ?`,
-            values: [id]
+            values: [contractId]
         });
 
-        // 3. Reset certs_declared status
         await query({
             query: `UPDATE sale_contract SET certs_declared = 0 WHERE id = ?`,
-            values: [id]
+            values: [contractId]
         });
 
-        return NextResponse.json({ success: true, message: "Declarations reverted successfully" });
+        return NextResponse.json({ success: true });
     } catch (error) {
-        console.error("Delete Declaration Error:", error);
-        return NextResponse.json({ error: 'Failed to delete declaration' }, { status: 500 });
+        console.error("Delete declaration error:", error);
+        return NextResponse.json({ error: 'Failed to revert allocations' }, { status: 500 });
     }
 }

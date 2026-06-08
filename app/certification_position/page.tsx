@@ -16,12 +16,16 @@ import {
   Download,
   FileCheck,
   Eye,
-  CheckCircle
+  CheckCircle,
+  MapPin,
+  ChevronDown,
+  RefreshCw
 } from 'lucide-react';
+import * as xlsx from 'xlsx';
 
 // --- Constants & Types ---
 type Unit = 'kg' | 'bag' | 'mt';
-type MainTab = 'position' | 'tracker' | 'contracts' | 'declarations';
+type MainTab = 'position' | 'tracker' | 'contracts' | 'allocations';
 
 const CERTIFICATES_LIST = ["RFA", "CAFE", "EUDR"] as const;
 const PROJECTS_LIST = ["AAA", "AAA-RS", "NET ZERO"] as const;
@@ -46,24 +50,24 @@ interface CertifiedStock {
   rfa_certified: boolean;
   rfa_certificate_holder?: string;
   rfa_expiry_date?: string;
-  rfa_declared_weight?: number;
+  rfa_allocated_weight?: number;
   eudr_certified: boolean;
   eudr_certificate_holder?: string;
   eudr_expiry_date?: string;
-  eudr_declared_weight?: number;
+  eudr_allocated_weight?: number;
   cafe_certified: boolean;
   cafe_certificate_holder?: string;
   cafe_expiry_date?: string;
-  cafe_declared_weight?: number;
+  cafe_allocated_weight?: number;
   impact_certified?: boolean;
   impact_expiry_date?: string;
-  impact_declared_weight?: number;
+  impact_allocated_weight?: number;
   aaa_project: boolean;
   aaa_volume?: number;
   geodata_available?: boolean;
-  aaa_declared_weight?: number;
+  aaa_allocated_weight?: number;
   netzero_project: boolean;
-  netzero_declared_weight?: number;
+  netzero_allocated_weight?: number;
   season?: string;
   sale_type?: string;
   outturn?: string;
@@ -72,11 +76,12 @@ interface CertifiedStock {
   county?: string;
   grade?: string;
   grower_code?: string;
-  fully_declared?: boolean;
+  fully_allocated?: boolean;
   recorded_date?: string;
   aaa_rs_project?: boolean;
   aaa_rs_volume?: number;
-  aaa_rs_declared_weight?: number;
+  aaa_rs_allocated_weight?: number;
+  _replacementCap?: number;
 }
 
 interface Blend {
@@ -93,6 +98,7 @@ interface SaleContract {
   strategy?: string; 
   quality?: string; 
   grade?: string; 
+  region?: string;
   certifications: any; 
   client?: string; 
   weight?: number; 
@@ -100,7 +106,7 @@ interface SaleContract {
   blend_id?: number;
   blend_name?: string;
   executed?: boolean;
-  certs_declared?: boolean | number | string | { type: string, data: number[] };
+  certs_allocated?: boolean | number | string | { type: string, data: number[] };
 }
 
 interface DeclarationRow {
@@ -116,13 +122,13 @@ interface DeclarationRow {
   cooperative: string;
   wet_mill: string;
   lot_purchased_weight: number;
-  rfa_declared_weight: number;
-  eudr_declared_weight: number;
-  cafe_declared_weight: number;
-  impact_declared_weight: number;
-  aaa_declared_weight: number;
-  netzero_declared_weight: number;
-  aaa_rs_declared_weight?: number;
+  rfa_allocated_weight: number;
+  eudr_allocated_weight: number;
+  cafe_allocated_weight: number;
+  impact_allocated_weight: number;
+  aaa_allocated_weight: number;
+  netzero_allocated_weight: number;
+  aaa_rs_allocated_weight?: number;
 }
 
 type TrackerColumn = {
@@ -200,25 +206,20 @@ function asNumber(value: unknown) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// ⚡ HIGHLY OPTIMIZED O(1) BOOLEAN/BUFFER PARSER
 function bool(value: unknown): boolean {
   if (value === null || value === undefined) return false;
   if (value === true || value === 1 || value === "1" || value === "true") return true;
-  
   if (typeof value === 'number' && value > 0) return true;
-  
   if (typeof value === 'string') {
     const lower = value.toLowerCase();
     if (lower === 'true' || lower === 'yes' || lower === '1') return true;
-    if (value.charCodeAt(0) === 1) return true; // Catch BIT(1) string serialization
+    if (value.charCodeAt(0) === 1) return true;
   }
-  
   if (typeof value === 'object') {
     const v = value as any;
     if (v.type === 'Buffer' && Array.isArray(v.data)) return v.data[0] > 0;
     if (Array.isArray(v)) return v[0] > 0;
   }
-  
   return false;
 }
 
@@ -226,16 +227,15 @@ function displayText(value: unknown, fallback = "—") {
   return value === null || value === undefined || value === "" ? fallback : String(value);
 }
 
-// ⚡ Explicit string mapping (removed regex replacements)
 const certToField = (cert: string) => {
     switch(cert) {
-        case 'RFA': return 'rfa_declared_weight';
-        case 'EUDR': return 'eudr_declared_weight';
-        case 'CAFE': return 'cafe_declared_weight';
-        case 'Impact': return 'impact_declared_weight';
-        case 'AAA': return 'aaa_declared_weight';
-        case 'AAA-RS': return 'aaa_rs_declared_weight';
-        case 'NET ZERO': return 'netzero_declared_weight';
+        case 'RFA': return 'rfa_allocated_weight';
+        case 'EUDR': return 'eudr_allocated_weight';
+        case 'CAFE': return 'cafe_allocated_weight';
+        case 'Impact': return 'impact_allocated_weight';
+        case 'AAA': return 'aaa_allocated_weight';
+        case 'AAA-RS': return 'aaa_rs_allocated_weight';
+        case 'NET ZERO': return 'netzero_allocated_weight';
         default: return '';
     }
 }
@@ -246,7 +246,6 @@ function getEffectiveWeight(stock: CertifiedStock, cert: string) {
   return asNumber(stock.purchased_weight);
 }
 
-// ⚡ O(1) Short-Circuit logic for distinguishing Pure AAA
 function isPureAAA(stock: CertifiedStock): boolean {
   if (!bool(stock.aaa_project)) return false;
   if (asNumber(stock.aaa_volume) > 0) return true;
@@ -257,7 +256,7 @@ function isPureAAA(stock: CertifiedStock): boolean {
 }
 
 function getAaaReservationLabelFromStock(stock: CertifiedStock) {
-  return bool(stock.cafe_certified) || asNumber(stock.cafe_declared_weight) > 0 ? "AAA/CP" : "AAA";
+  return bool(stock.cafe_certified) || asNumber(stock.cafe_allocated_weight) > 0 ? "AAA/CP" : "AAA";
 }
 
 function getTrackerCertFlags(stock: CertifiedStock) {
@@ -328,12 +327,10 @@ function buildTrackerRow(stock: CertifiedStock, cert: TrackerCertType) {
   return {
     id: stock.id,
     season: displayText(stock.season),
-    sale_type: displayText(stock.sale_type),
     outturn: displayText(stock.outturn),
     lot_number: displayText(stock.lot_number),
     strategy: displayText(stock.strategy || stock.grade || stock.cooperative || stock.wet_mill || stock.county),
     cooperative: displayText(stock.cooperative),
-    wet_mill: displayText(stock.wet_mill),
     county: displayText(stock.county),
     grade: displayText(stock.grade),
     grower_code: displayText(stock.grower_code),
@@ -341,29 +338,29 @@ function buildTrackerRow(stock: CertifiedStock, cert: TrackerCertType) {
     rfa_certified: certFlags.RFA,
     rfa_expiry_date: formatDateDisplay(stock.rfa_expiry_date),
     rfa_certificate_holder: displayText(stock.rfa_certificate_holder),
-    rfa_declared_weight: stock.rfa_declared_weight == null ? null : asNumber(stock.rfa_declared_weight),
+    rfa_allocated_weight: stock.rfa_allocated_weight == null ? null : asNumber(stock.rfa_allocated_weight),
     eudr_certified: certFlags.EUDR,
     eudr_expiry_date: formatDateDisplay(stock.eudr_expiry_date),
     eudr_certificate_holder: displayText(stock.eudr_certificate_holder),
-    eudr_declared_weight: stock.eudr_declared_weight == null ? null : asNumber(stock.eudr_declared_weight),
+    eudr_allocated_weight: stock.eudr_allocated_weight == null ? null : asNumber(stock.eudr_allocated_weight),
     cafe_certified: certFlags.CAFE,
     cafe_expiry_date: formatDateDisplay(stock.cafe_expiry_date),
     cafe_certificate_holder: displayText(stock.cafe_certificate_holder),
-    cafe_declared_weight: stock.cafe_declared_weight == null ? null : asNumber(stock.cafe_declared_weight),
+    cafe_allocated_weight: stock.cafe_allocated_weight == null ? null : asNumber(stock.cafe_allocated_weight),
     impact_certified: bool(stock.impact_certified),
     impact_expiry_date: formatDateDisplay(stock.impact_expiry_date),
-    impact_declared_weight: stock.impact_declared_weight == null ? null : asNumber(stock.impact_declared_weight),
+    impact_allocated_weight: stock.impact_allocated_weight == null ? null : asNumber(stock.impact_allocated_weight),
     aaa_project: certFlags.AAA,
     aaa_reservation: getAaaReservationLabelFromStock(stock),
     aaa_volume: stock.aaa_volume == null ? null : asNumber(stock.aaa_volume),
     geodata_available: bool(stock.geodata_available),
-    aaa_declared_weight: stock.aaa_declared_weight == null ? null : asNumber(stock.aaa_declared_weight),
-    aaa_rs_project: certFlags["AAA-RS"], // Displays Yes when volume > 0
+    aaa_allocated_weight: stock.aaa_allocated_weight == null ? null : asNumber(stock.aaa_allocated_weight),
+    aaa_rs_project: certFlags["AAA-RS"], 
     aaa_rs_volume: stock.aaa_rs_volume == null ? null : asNumber(stock.aaa_rs_volume),
-    aaa_rs_declared_weight: stock.aaa_rs_declared_weight == null ? null : asNumber(stock.aaa_rs_declared_weight),
+    aaa_rs_allocated_weight: stock.aaa_rs_allocated_weight == null ? null : asNumber(stock.aaa_rs_allocated_weight),
     netzero_project: certFlags["NET ZERO"],
-    netzero_declared_weight: stock.netzero_declared_weight == null ? null : asNumber(stock.netzero_declared_weight),
-    fully_declared: bool(stock.fully_declared),
+    netzero_allocated_weight: stock.netzero_allocated_weight == null ? null : asNumber(stock.netzero_allocated_weight),
+    fully_allocated: bool(stock.fully_allocated),
     recorded_date: formatDateDisplay(stock.recorded_date),
     tracker_expiry_label: expiry.label,
     tracker_expiry_days: expiry.days,
@@ -391,78 +388,56 @@ function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
 
   const common: TrackerColumn[] = [
     { key: "season", label: "Season", align: "left", render: (row) => row.season, exportValue: (row) => row.season },
-    { key: "sale_type", label: "Sale Type", align: "left", render: (row) => row.sale_type, exportValue: (row) => row.sale_type },
     { key: "outturn", label: "Outturn", align: "left", render: (row) => row.outturn, exportValue: (row) => row.outturn },
-    { key: "lot_number", label: "Lot", align: "left", render: (row) => row.lot_number, exportValue: (row) => row.lot_number },
     { key: "strategy", label: "Strategy", align: "left", render: (row) => row.strategy, exportValue: (row) => row.strategy },
     { key: "cooperative", label: "Cooperative", align: "left", render: (row) => row.cooperative, exportValue: (row) => row.cooperative },
-    { key: "wet_mill", label: "Wet Mill", align: "left", render: (row) => row.wet_mill, exportValue: (row) => row.wet_mill },
+    { key: "lot_number", label: "Lot", align: "left", render: (row) => row.lot_number, exportValue: (row) => row.lot_number },
     { key: "county", label: "County", align: "left", render: (row) => row.county, exportValue: (row) => row.county },
     { key: "grade", label: "Grade", align: "left", render: (row) => row.grade, exportValue: (row) => row.grade },
     { key: "grower_code", label: "Grower", align: "left", render: (row) => row.grower_code, exportValue: (row) => row.grower_code },
-    { key: "effective_weight", label: weightLabel, align: "right", render: (row) => `${formatQty(row.effective_weight, unit)} ${unitText(unit)}`, exportValue: (row) => formatQty(row.effective_weight, unit) },
+    { key: "effective_weight", label: weightLabel, align: "right", render: (row) => formatQty(row.effective_weight, unit), exportValue: (row) => formatQty(row.effective_weight, unit) },
   ];
 
   const certColumns: Record<TrackerCertType, TrackerColumn[]> = {
     ALL: [
       { key: "rfa_certified", label: "RFA", align: "center", render: (row) => (row.rfa_certified ? "Yes" : "No"), exportValue: (row) => (row.rfa_certified ? "Yes" : "No") },
-      { key: "rfa_expiry_date", label: "RFA Expiry", align: "center", render: (row) => row.rfa_expiry_date, exportValue: (row) => row.rfa_expiry_date },
-      { key: "rfa_certificate_holder", label: "RFA Holder", align: "center", render: (row) => row.rfa_certificate_holder, exportValue: (row) => row.rfa_certificate_holder },
-      { key: "rfa_declared_weight", label: "RFA Decl.", align: "right", render: (row) => (row.rfa_declared_weight != null ? `${formatQty(row.rfa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.rfa_declared_weight != null ? formatQty(row.rfa_declared_weight, unit) : "") },
+      { key: "rfa_allocated_weight", label: "RFA Decl.", align: "right", render: (row) => (row.rfa_allocated_weight != null ? formatQty(row.rfa_allocated_weight, unit) : "—"), exportValue: (row) => (row.rfa_allocated_weight != null ? formatQty(row.rfa_allocated_weight, unit) : "") },
       { key: "eudr_certified", label: "EUDR", align: "center", render: (row) => (row.eudr_certified ? "Yes" : "No"), exportValue: (row) => (row.eudr_certified ? "Yes" : "No") },
-      { key: "eudr_expiry_date", label: "EUDR Expiry", align: "center", render: (row) => row.eudr_expiry_date, exportValue: (row) => row.eudr_expiry_date },
-      { key: "eudr_certificate_holder", label: "EUDR Holder", align: "center", render: (row) => row.eudr_certificate_holder, exportValue: (row) => row.eudr_certificate_holder },
-      { key: "eudr_declared_weight", label: "EUDR Decl.", align: "right", render: (row) => (row.eudr_declared_weight != null ? `${formatQty(row.eudr_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.eudr_declared_weight != null ? formatQty(row.eudr_declared_weight, unit) : "") },
+      { key: "eudr_allocated_weight", label: "EUDR Decl.", align: "right", render: (row) => (row.eudr_allocated_weight != null ? formatQty(row.eudr_allocated_weight, unit) : "—"), exportValue: (row) => (row.eudr_allocated_weight != null ? formatQty(row.eudr_allocated_weight, unit) : "") },
       { key: "cafe_certified", label: "CAFE", align: "center", render: (row) => (row.cafe_certified ? "Yes" : "No"), exportValue: (row) => (row.cafe_certified ? "Yes" : "No") },
-      { key: "cafe_expiry_date", label: "CAFE Expiry", align: "center", render: (row) => row.cafe_expiry_date, exportValue: (row) => row.cafe_expiry_date },
-      { key: "cafe_certificate_holder", label: "CAFE Holder", align: "center", render: (row) => row.cafe_certificate_holder, exportValue: (row) => row.cafe_certificate_holder },
-      { key: "cafe_declared_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_declared_weight != null ? `${formatQty(row.cafe_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.cafe_declared_weight != null ? formatQty(row.cafe_declared_weight, unit) : "") },
+      { key: "cafe_allocated_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_allocated_weight != null ? formatQty(row.cafe_allocated_weight, unit) : "—"), exportValue: (row) => (row.cafe_allocated_weight != null ? formatQty(row.cafe_allocated_weight, unit) : "") },
       { key: "impact_certified", label: "Impact", align: "center", render: (row) => (row.impact_certified ? "Yes" : "No"), exportValue: (row) => (row.impact_certified ? "Yes" : "No") },
-      { key: "impact_expiry_date", label: "Impact Expiry", align: "center", render: (row) => row.impact_expiry_date, exportValue: (row) => row.impact_expiry_date },
-      { key: "impact_declared_weight", label: "Impact Decl.", align: "right", render: (row) => (row.impact_declared_weight != null ? `${formatQty(row.impact_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.impact_declared_weight != null ? formatQty(row.impact_declared_weight, unit) : "") },
+      { key: "impact_allocated_weight", label: "Impact Decl.", align: "right", render: (row) => (row.impact_allocated_weight != null ? formatQty(row.impact_allocated_weight, unit) : "—"), exportValue: (row) => (row.impact_allocated_weight != null ? formatQty(row.impact_allocated_weight, unit) : "") },
       { key: "aaa_project", label: "AAA", align: "center", render: (row) => row.aaa_project ? "Yes" : "No", exportValue: (row) => (row.aaa_project ? "Yes" : "No") },
-      { key: "aaa_volume", label: "AAA Vol.", align: "right", render: (row) => (row.aaa_volume != null ? `${formatQty(row.aaa_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_volume != null ? formatQty(row.aaa_volume, unit) : "") },
-      { key: "geodata_available", label: "Geo", align: "center", render: (row) => (row.geodata_available ? "Yes" : "No"), exportValue: (row) => (row.geodata_available ? "Yes" : "No") },
-      { key: "aaa_declared_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_declared_weight != null ? `${formatQty(row.aaa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_declared_weight != null ? formatQty(row.aaa_declared_weight, unit) : "") },
+      { key: "aaa_allocated_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_allocated_weight != null ? formatQty(row.aaa_allocated_weight, unit) : "—"), exportValue: (row) => (row.aaa_allocated_weight != null ? formatQty(row.aaa_allocated_weight, unit) : "") },
       { key: "aaa_rs_project", label: "AAA-RS", align: "center", render: (row) => (row.aaa_rs_project ? "Yes" : "No"), exportValue: (row) => (row.aaa_rs_project ? "Yes" : "No") },
-      { key: "aaa_rs_volume", label: "AAA-RS Vol.", align: "right", render: (row) => (row.aaa_rs_volume != null ? `${formatQty(row.aaa_rs_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_volume != null ? formatQty(row.aaa_rs_volume, unit) : "") },
-      { key: "aaa_rs_declared_weight", label: "AAA-RS Decl.", align: "right", render: (row) => (row.aaa_rs_declared_weight != null ? `${formatQty(row.aaa_rs_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_declared_weight != null ? formatQty(row.aaa_rs_declared_weight, unit) : "") },
+      { key: "aaa_rs_allocated_weight", label: "AAA-RS Decl.", align: "right", render: (row) => (row.aaa_rs_allocated_weight != null ? formatQty(row.aaa_rs_allocated_weight, unit) : "—"), exportValue: (row) => (row.aaa_rs_allocated_weight != null ? formatQty(row.aaa_rs_allocated_weight, unit) : "") },
       { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
-      { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
-      { key: "fully_declared", label: "Fully Declared", align: "center", render: (row) => (row.fully_declared ? "Yes" : "No"), exportValue: (row) => (row.fully_declared ? "Yes" : "No") },
+      { key: "netzero_allocated_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_allocated_weight != null ? formatQty(row.netzero_allocated_weight, unit) : "—"), exportValue: (row) => (row.netzero_allocated_weight != null ? formatQty(row.netzero_allocated_weight, unit) : "") },
     ],
     RFA: [
       { key: "rfa_certified", label: "RFA", align: "center", render: (row) => (row.rfa_certified ? "Yes" : "No"), exportValue: (row) => (row.rfa_certified ? "Yes" : "No") },
-      { key: "rfa_expiry_date", label: "RFA Expiry", align: "center", render: (row) => row.rfa_expiry_date, exportValue: (row) => row.rfa_expiry_date },
-      { key: "rfa_certificate_holder", label: "RFA Holder", align: "center", render: (row) => row.rfa_certificate_holder, exportValue: (row) => row.rfa_certificate_holder },
-      { key: "rfa_declared_weight", label: "RFA Decl.", align: "right", render: (row) => (row.rfa_declared_weight != null ? `${formatQty(row.rfa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.rfa_declared_weight != null ? formatQty(row.rfa_declared_weight, unit) : "") },
+      { key: "rfa_allocated_weight", label: "RFA Decl.", align: "right", render: (row) => (row.rfa_allocated_weight != null ? formatQty(row.rfa_allocated_weight, unit) : "—"), exportValue: (row) => (row.rfa_allocated_weight != null ? formatQty(row.rfa_allocated_weight, unit) : "") },
     ],
     CAFE: [
       { key: "cafe_certified", label: "CAFE", align: "center", render: (row) => (row.cafe_certified ? "Yes" : "No"), exportValue: (row) => (row.cafe_certified ? "Yes" : "No") },
-      { key: "cafe_expiry_date", label: "CAFE Expiry", align: "center", render: (row) => row.cafe_expiry_date, exportValue: (row) => row.cafe_expiry_date },
-      { key: "cafe_certificate_holder", label: "CAFE Holder", align: "center", render: (row) => row.cafe_certificate_holder, exportValue: (row) => row.cafe_certificate_holder },
-      { key: "cafe_declared_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_declared_weight != null ? `${formatQty(row.cafe_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.cafe_declared_weight != null ? formatQty(row.cafe_declared_weight, unit) : "") },
+      { key: "cafe_allocated_weight", label: "CAFE Decl.", align: "right", render: (row) => (row.cafe_allocated_weight != null ? formatQty(row.cafe_allocated_weight, unit) : "—"), exportValue: (row) => (row.cafe_allocated_weight != null ? formatQty(row.cafe_allocated_weight, unit) : "") },
     ],
     EUDR: [
       { key: "eudr_certified", label: "EUDR", align: "center", render: (row) => (row.eudr_certified ? "Yes" : "No"), exportValue: (row) => (row.eudr_certified ? "Yes" : "No") },
-      { key: "eudr_expiry_date", label: "EUDR Expiry", align: "center", render: (row) => row.eudr_expiry_date, exportValue: (row) => row.eudr_expiry_date },
-      { key: "eudr_certificate_holder", label: "EUDR Holder", align: "center", render: (row) => row.eudr_certificate_holder, exportValue: (row) => row.eudr_certificate_holder },
-      { key: "eudr_declared_weight", label: "EUDR Decl.", align: "right", render: (row) => (row.eudr_declared_weight != null ? `${formatQty(row.eudr_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.eudr_declared_weight != null ? formatQty(row.eudr_declared_weight, unit) : "") },
+      { key: "eudr_allocated_weight", label: "EUDR Decl.", align: "right", render: (row) => (row.eudr_allocated_weight != null ? formatQty(row.eudr_allocated_weight, unit) : "—"), exportValue: (row) => (row.eudr_allocated_weight != null ? formatQty(row.eudr_allocated_weight, unit) : "") },
     ],
     AAA: [
       { key: "aaa_reservation", label: "AAA Reservation", align: "center", render: (row) => row.aaa_reservation, exportValue: (row) => row.aaa_reservation },
-      { key: "aaa_volume", label: "AAA Vol.", align: "right", render: (row) => (row.aaa_volume != null ? `${formatQty(row.aaa_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_volume != null ? formatQty(row.aaa_volume, unit) : "") },
-      { key: "geodata_available", label: "Geo", align: "center", render: (row) => (row.geodata_available ? "Yes" : "No"), exportValue: (row) => (row.geodata_available ? "Yes" : "No") },
-      { key: "aaa_declared_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_declared_weight != null ? `${formatQty(row.aaa_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_declared_weight != null ? formatQty(row.aaa_declared_weight, unit) : "") },
+      { key: "aaa_allocated_weight", label: "AAA Decl.", align: "right", render: (row) => (row.aaa_allocated_weight != null ? formatQty(row.aaa_allocated_weight, unit) : "—"), exportValue: (row) => (row.aaa_allocated_weight != null ? formatQty(row.aaa_allocated_weight, unit) : "") },
     ],
     "NET ZERO": [
       { key: "netzero_project", label: "Net Zero", align: "center", render: (row) => (row.netzero_project ? "Yes" : "No"), exportValue: (row) => (row.netzero_project ? "Yes" : "No") },
-      { key: "netzero_declared_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_declared_weight != null ? `${formatQty(row.netzero_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.netzero_declared_weight != null ? formatQty(row.netzero_declared_weight, unit) : "") },
+      { key: "netzero_allocated_weight", label: "Net Zero Decl.", align: "right", render: (row) => (row.netzero_allocated_weight != null ? formatQty(row.netzero_allocated_weight, unit) : "—"), exportValue: (row) => (row.netzero_allocated_weight != null ? formatQty(row.netzero_allocated_weight, unit) : "") },
     ],
     "AAA-RS": [
       { key: "aaa_rs_project", label: "AAA-RS", align: "center", render: (row) => (row.aaa_rs_project ? "Yes" : "No"), exportValue: (row) => (row.aaa_rs_project ? "Yes" : "No") },
-      { key: "aaa_rs_volume", label: "AAA-RS Vol.", align: "right", render: (row) => (row.aaa_rs_volume != null ? `${formatQty(row.aaa_rs_volume, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_volume != null ? formatQty(row.aaa_rs_volume, unit) : "") },
-      { key: "aaa_rs_declared_weight", label: "AAA-RS Decl.", align: "right", render: (row) => (row.aaa_rs_declared_weight != null ? `${formatQty(row.aaa_rs_declared_weight, unit)} ${unitText(unit)}` : "—"), exportValue: (row) => (row.aaa_rs_declared_weight != null ? formatQty(row.aaa_rs_declared_weight, unit) : "") },
+      { key: "aaa_rs_allocated_weight", label: "AAA-RS Decl.", align: "right", render: (row) => (row.aaa_rs_allocated_weight != null ? formatQty(row.aaa_rs_allocated_weight, unit) : "—"), exportValue: (row) => (row.aaa_rs_allocated_weight != null ? formatQty(row.aaa_rs_allocated_weight, unit) : "") },
     ],
   };
 
@@ -642,7 +617,6 @@ const FileDropZone = ({
     );
 };
 
-// --- Native Donut Chart Component ---
 function TrackerDonutChart({ data, unit }: { data: { name: string, value: number, color: string }[], unit: Unit }) {
   const total = data.reduce((sum, d) => sum + d.value, 0);
   if (total === 0) return <div className="text-sm italic text-[#968C83]">No holder data available.</div>;
@@ -693,12 +667,14 @@ export default function CertificationsPage() {
   const [activeTab, setActiveTab] = useState<MainTab>('position');
   const [activeCert, setActiveCert] = useState<CertType>('RFA');
   const [positionView, setPositionView] = useState<'true_position' | 'crop_year'>('true_position');
+  const [positionRegions, setPositionRegions] = useState<Set<string>>(new Set()); 
+  const [applyRegionToExecSummary, setApplyRegionToExecSummary] = useState(false);
   const [unit, setUnit] = useState<Unit>('kg');
 
   const [stocks, setStocks] = useState<CertifiedStock[]>([]);
   const [sales, setSales] = useState<SaleContract[]>([]);
   const [blends, setBlends] = useState<Blend[]>([]);
-  const [declarations, setDeclarations] = useState<DeclarationRow[]>([]);
+  const [allocations, setallocations] = useState<DeclarationRow[]>([]);
   
   const [loading, setLoading] = useState(true);
 
@@ -727,8 +703,8 @@ export default function CertificationsPage() {
   const [isDeclaringCertId, setIsDeclaringCertId] = useState<number | null>(null);
 
   const [editingContractId, setEditingContractId] = useState<number | null>(null);
-  const [editForm, setEditForm] = useState<{ quality: string, grade: string, certifications: string[], blend_id: number | '' }>({
-      quality: '', grade: '', certifications: [], blend_id: ''
+  const [editForm, setEditForm] = useState<{ quality: string, grade: string, region: string, certifications: string[], blend_id: number | '' }>({
+      quality: '', grade: '', region: '', certifications: [], blend_id: ''
   });
 
   const [solFile, setSolFile] = useState<File | null>(null);
@@ -740,6 +716,7 @@ export default function CertificationsPage() {
     weight: '',
     quality: '',
     grade: '',
+    region: '',
     shippingDate: '',
     certifications: [] as CertType[] 
   });
@@ -757,15 +734,44 @@ export default function CertificationsPage() {
   const [downloadOpen, setDownloadOpen] = useState(false);
   const downloadWrapRef = useRef<HTMLDivElement | null>(null);
   
-  // Declarations UI state
+  // Custom tracker filter states
+  const [trackerSearchLot, setTrackerSearchLot] = useState("");
+  const [trackerFilterCounty, setTrackerFilterCounty] = useState("");
+  const [trackerFilterWetmill, setTrackerFilterWetmill] = useState("");
+  const [trackerFilterGrade, setTrackerFilterGrade] = useState("");
+  const [trackerFilterSeason, setTrackerFilterSeason] = useState("");
+  const [trackerFilterExpiry, setTrackerFilterExpiry] = useState<'ALL' | 'VALID' | 'EXPIRED'>('ALL');
+
+  // Custom position dropdown states
+  const [isRegionFilterOpen, setIsRegionFilterOpen] = useState(false);
+  const regionFilterRef = useRef<HTMLDivElement | null>(null);
+
+  // allocations UI state
   const [viewingDeclarationContract, setViewingDeclarationContract] = useState<number | null>(null);
   const [declarationModalCert, setDeclarationModalCert] = useState<string>("");
   const [contractToDelete, setContractToDelete] = useState<number | null>(null);
   const [isDeletingDecl, setIsDeletingDecl] = useState(false);
+  
+  // ⚡ Replacement Modal State
+  const [replaceModalState, setReplaceModalState] = useState<{
+      isOpen: boolean;
+      contractId: number;
+      oldStockId: number;
+      contractCerts: string[];
+      replacedVolume: number;
+      oldLotNumber: string;
+  }>({ isOpen: false, contractId: 0, oldStockId: 0, contractCerts: [], replacedVolume: 0, oldLotNumber: "" });
+  const [replacementSelected, setReplacementSelected] = useState<Set<number>>(new Set());
+  const [isReplacing, setIsReplacing] = useState(false);
 
   // Contracts UI View Filters
   const [contractSearch, setContractSearch] = useState('');
-  const [showDeclaredContracts, setShowDeclaredContracts] = useState(false);
+  const [showallocatedContracts, setShowallocatedContracts] = useState(false);
+  
+  const [contractFilterClient, setContractFilterClient] = useState('');
+  const [contractFilterRegion, setContractFilterRegion] = useState('');
+  const [contractFilterBlend, setContractFilterBlend] = useState('');
+  const [contractFilterShipMonth, setContractFilterShipMonth] = useState('');
 
   const certOptions: CertType[] = ['RFA', 'CAFE', 'NET ZERO', 'EUDR', 'AAA', 'AAA-RS'];
   
@@ -773,7 +779,7 @@ export default function CertificationsPage() {
   const fetchData = useCallback(async (silent = false) => {
     try {
       if (!silent) setLoading(true);
-      const [stocksRes, salesRes, blendsRes, declarationsRes] = await Promise.all([
+      const [stocksRes, salesRes, blendsRes, allocationsRes] = await Promise.all([
         fetch('/api/certified_stocks', { cache: 'no-store' }),
         fetch('/api/contracts', { cache: 'no-store' }),
         fetch('/api/blends', { cache: 'no-store' }),
@@ -781,9 +787,35 @@ export default function CertificationsPage() {
       ]);
       
       if (stocksRes.ok) setStocks(await stocksRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
-      if (salesRes.ok) setSales(await salesRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
+      
+      // ⚡ Fix: Map certs_declared to certs_allocated for all sales
+      if (salesRes.ok) {
+          const rawSales = await salesRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || []));
+          const mappedSales = rawSales.map((s: any) => ({
+              ...s,
+              certs_allocated: s.certs_declared ?? s.certs_allocated
+          }));
+          setSales(mappedSales);
+      }
+      
       if (blendsRes.ok) setBlends(await blendsRes.json().then(d => Array.isArray(d) ? d : (d.data || d.rows || [])));
-      if (declarationsRes.ok) setDeclarations(await declarationsRes.json().then(d => d.data || []));
+      
+      if (allocationsRes.ok) {
+        const rawAllocations = await allocationsRes.json().then(d => d.data || []);
+        
+        // O(N) Optimization: Map DB declared fields to UI allocated fields
+        const mappedAllocations = rawAllocations.map((d: any) => ({
+            ...d,
+            rfa_allocated_weight: d.rfa_declared_weight,
+            eudr_allocated_weight: d.eudr_declared_weight,
+            cafe_allocated_weight: d.cafe_declared_weight,
+            impact_allocated_weight: d.impact_declared_weight,
+            aaa_allocated_weight: d.aaa_declared_weight,
+            aaa_rs_allocated_weight: d.aaa_rs_declared_weight,
+            netzero_allocated_weight: d.netzero_declared_weight,
+        }));
+        setallocations(mappedAllocations);
+      }
     } catch (error) {
       console.error("Error fetching data:", error);
     } finally {
@@ -791,37 +823,37 @@ export default function CertificationsPage() {
     }
   }, []);
 
+  
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
   useEffect(() => {
-    function onDownloadOutside(event: MouseEvent) {
+    function handleClickOutside(event: MouseEvent) {
       if (downloadWrapRef.current && !downloadWrapRef.current.contains(event.target as Node)) setDownloadOpen(false);
+      if (regionFilterRef.current && !regionFilterRef.current.contains(event.target as Node)) setIsRegionFilterOpen(false);
     }
-    if (downloadOpen) document.addEventListener("mousedown", onDownloadOutside);
-    return () => document.removeEventListener("mousedown", onDownloadOutside);
-  }, [downloadOpen]);
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [downloadOpen, isRegionFilterOpen]);
 
   // ⚡ O(N) ENHANCED STOCKS RECONCILIATION
-  // Fixes missing declared weights by hydrating stocks directly from the active declarations array.
-  // This absolutely guarantees that the available volume everywhere reflects active frontend declarations perfectly.
   const enhancedStocks = useMemo(() => {
       const declMap = new Map<number, any>();
-      declarations.forEach(d => {
+      allocations.forEach(d => {
           if (!declMap.has(d.stock_id)) {
               declMap.set(d.stock_id, {
                   aaa_rs: 0, aaa: 0, rfa: 0, cafe: 0, eudr: 0, netzero: 0, impact: 0
               });
           }
           const s = declMap.get(d.stock_id);
-          s.aaa_rs += asNumber(d.aaa_rs_declared_weight);
-          s.aaa += asNumber(d.aaa_declared_weight);
-          s.rfa += asNumber(d.rfa_declared_weight);
-          s.cafe += asNumber(d.cafe_declared_weight);
-          s.eudr += asNumber(d.eudr_declared_weight);
-          s.netzero += asNumber(d.netzero_declared_weight);
-          s.impact += asNumber(d.impact_declared_weight);
+          s.aaa_rs += asNumber(d.aaa_rs_allocated_weight);
+          s.aaa += asNumber(d.aaa_allocated_weight);
+          s.rfa += asNumber(d.rfa_allocated_weight);
+          s.cafe += asNumber(d.cafe_allocated_weight);
+          s.eudr += asNumber(d.eudr_allocated_weight);
+          s.netzero += asNumber(d.netzero_allocated_weight);
+          s.impact += asNumber(d.impact_allocated_weight);
       });
 
       return stocks.map(stock => {
@@ -830,435 +862,103 @@ export default function CertificationsPage() {
               const safeDecl = (frontendVal: number, backendVal: any) => frontendVal > 0 ? frontendVal : asNumber(backendVal);
               return {
                   ...stock,
-                  aaa_rs_declared_weight: safeDecl(decls.aaa_rs, stock.aaa_rs_declared_weight),
-                  aaa_declared_weight: safeDecl(decls.aaa, stock.aaa_declared_weight),
-                  rfa_declared_weight: safeDecl(decls.rfa, stock.rfa_declared_weight),
-                  cafe_declared_weight: safeDecl(decls.cafe, stock.cafe_declared_weight),
-                  eudr_declared_weight: safeDecl(decls.eudr, stock.eudr_declared_weight),
-                  netzero_declared_weight: safeDecl(decls.netzero, stock.netzero_declared_weight),
-                  impact_declared_weight: safeDecl(decls.impact, stock.impact_declared_weight)
+                  aaa_rs_allocated_weight: safeDecl(decls.aaa_rs, stock.aaa_rs_allocated_weight),
+                  aaa_allocated_weight: safeDecl(decls.aaa, stock.aaa_allocated_weight),
+                  rfa_allocated_weight: safeDecl(decls.rfa, stock.rfa_allocated_weight),
+                  cafe_allocated_weight: safeDecl(decls.cafe, stock.cafe_allocated_weight),
+                  eudr_allocated_weight: safeDecl(decls.eudr, stock.eudr_allocated_weight),
+                  netzero_allocated_weight: safeDecl(decls.netzero, stock.netzero_allocated_weight),
+                  impact_allocated_weight: safeDecl(decls.impact, stock.impact_allocated_weight)
               };
           }
           return stock;
       });
-  }, [stocks, declarations]);
+  }, [stocks, allocations]);
+
+  // ⚡ Filter Valid Lots for Replacement in O(N)
+  const replacementValidStocks = useMemo(() => {
+      if (!replaceModalState.isOpen) return [];
+      
+      const reqCerts = replaceModalState.contractCerts.map(c => c.toUpperCase());
+      const isNespresso = reqCerts.includes('AAA') && reqCerts.includes('CAFE');
+      
+      let baseField = 'purchased_weight';
+      if (reqCerts.includes('AAA')) baseField = 'aaa_volume';
+      else if (reqCerts.includes('AAA-RS')) baseField = 'aaa_rs_volume';
+      
+      const todayStr = new Date().toISOString().slice(0, 10);
+      
+      return enhancedStocks.filter(stock => {
+          // Exclude the lot currently being replaced
+          if (stock.id === replaceModalState.oldStockId) return false;
+          
+          let lotCap = asNumber((stock as any)[baseField]);
+          if (lotCap <= 0) return false;
+          
+          // Strict Nespresso rule
+          if (!isNespresso && bool(stock.aaa_project) && bool(stock.cafe_certified)) return false;
+          
+          for (const cert of reqCerts) {
+              let cField = '', dField = '', eField = '';
+              switch(cert) {
+                  case 'AAA': cField = 'aaa_project'; dField = 'aaa_allocated_weight'; break;
+                  case 'AAA-RS': cField = 'aaa_rs_volume'; dField = 'aaa_rs_allocated_weight'; break;
+                  case 'NET ZERO': cField = 'netzero_project'; dField = 'netzero_allocated_weight'; break;
+                  case 'RFA': cField = 'rfa_certified'; dField = 'rfa_allocated_weight'; eField = 'rfa_expiry_date'; break;
+                  case 'CAFE': cField = 'cafe_certified'; dField = 'cafe_allocated_weight'; eField = 'cafe_expiry_date'; break;
+                  case 'EUDR': cField = 'eudr_certified'; dField = 'eudr_allocated_weight'; eField = 'eudr_expiry_date'; break;
+                  case 'IMPACT': cField = 'impact_certified'; dField = 'impact_allocated_weight'; eField = 'impact_expiry_date'; break;
+              }
+              
+              if (eField && (stock as any)[eField] && (stock as any)[eField] < todayStr) return false;
+              
+              if (cert === 'AAA') { if (!bool(stock.aaa_project)) return false; }
+              else if (cert === 'AAA-RS') { if (asNumber(stock.aaa_rs_volume) <= 0) return false; }
+              else { if (!bool((stock as any)[cField])) return false; }
+              
+              const alreadyallocated = asNumber((stock as any)[dField]);
+              const certCap = asNumber((stock as any)[baseField]) - alreadyallocated;
+              
+              if (certCap <= 0) return false;
+              if (certCap < lotCap) lotCap = certCap;
+          }
+          
+          stock._replacementCap = lotCap;
+          return lotCap > 0;
+      }).sort((a, b) => new Date(a.recorded_date || 0).getTime() - new Date(b.recorded_date || 0).getTime());
+  }, [replaceModalState, enhancedStocks]);
+
+  const selectedReplacementWeight = useMemo(() => {
+      let total = 0;
+      replacementValidStocks.forEach(s => {
+          if (replacementSelected.has(s.id)) total += (s._replacementCap || 0);
+      });
+      return total;
+  }, [replacementSelected, replacementValidStocks]);
 
 
-  // ⚡ Extract Unique Regions and Grades in O(N) using useMemo and Set
-  const { uniqueRegions, uniqueGrades } = useMemo(() => {
+  // ⚡ Extract Unique Regions and Grades dynamically from the stock tracker DB entries in O(N)
+  const { uniqueRegions, uniqueGrades, uniqueSeasons, uniqueWetmills } = useMemo(() => {
       const regions = new Set<string>();
       const grades = new Set<string>();
+      const seasons = new Set<string>();
+      const wetmills = new Set<string>();
+      
       enhancedStocks.forEach(s => {
           if (s.county) regions.add(s.county);
           if (s.grade) grades.add(s.grade);
+          if (s.season) seasons.add(s.season);
+          if (s.wet_mill) wetmills.add(s.wet_mill);
       });
       return {
           uniqueRegions: Array.from(regions).sort(),
-          uniqueGrades: Array.from(grades).sort()
+          uniqueGrades: Array.from(grades).sort(),
+          uniqueSeasons: Array.from(seasons).sort(),
+          uniqueWetmills: Array.from(wetmills).sort()
       };
   }, [enhancedStocks]);
 
-  const openDeclarationConfig = (contractId: number) => {
-      setDeclaringContractId(contractId);
-      setSelectedRegions(new Set(uniqueRegions));
-      setSelectedGrades(new Set(uniqueGrades));
-      setIsDeclaringConfigOpen(true);
-  };
-
-  const submitDeclareCertificates = async () => {
-    if (!declaringContractId) return;
-    const contractId = declaringContractId;
-
-    setIsDeclaringConfigOpen(false);
-    setIsDeclaringCertId(contractId);
-
-    try {
-      const payload = { 
-          sale_contract_id: contractId,
-          regions: Array.from(selectedRegions),
-          grades: Array.from(selectedGrades)
-      };
-
-      const response = await fetch('/api/declare_certificates', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || "Failed to declare certificates");
-      }
-      
-      const failedCerts = response.headers.get('X-Failed-Certificates');
-      const contentType = response.headers.get('Content-Type');
-      
-      if (contentType && contentType.includes('application/json')) {
-         const data = await response.json();
-         console.log("Declaration successful, JSON response received:", data);
-         showToast('success', 'Declaration logged', 'Declaration parameters successfully sent to backend!');
-      } else {
-         if (failedCerts) {
-             const details = failedCerts.split(',').map(f => {
-                 const [cert, shortfall] = f.split(':');
-                 return <li key={cert} className="ml-4 list-disc"><strong>{cert.toUpperCase()}</strong>: Short by {formatNumber(Number(shortfall))} {unitText(unit)}</li>;
-             });
-             showToast('warning', 'Partial Declaration', <div><p className="mb-1">Not enough volume for these certificates (they were skipped):</p><ul>{details}</ul></div>);
-         } else {
-             showToast('success', 'Fully Declared', 'All certificates successfully declared and report downloaded!');
-             // Instantly update local UI state to hide the fully declared contract
-             setSales(prev => prev.map(s => s.id === contractId ? { ...s, certs_declared: true } : s));
-         }
-         
-         const blob = await response.blob();
-         const disposition = response.headers.get('Content-Disposition');
-         let filename = `Declaration_Contract_${contractId}.xlsx`;
-         
-         if (disposition && disposition.includes('filename=')) {
-             const matches = /filename="([^"]+)"/.exec(disposition);
-             if (matches && matches[1]) filename = matches[1];
-         }
-         
-         const url = window.URL.createObjectURL(blob);
-         const a = document.createElement("a");
-         a.href = url;
-         a.download = filename;
-         document.body.appendChild(a);
-         a.click();
-         document.body.removeChild(a);
-         window.URL.revokeObjectURL(url);
-      }
-      
-      // Auto update data in the background
-      await fetchData(true);
-      
-    } catch (error: any) {
-      showToast('error', 'Declaration Failed', error.message);
-    } finally {
-      setIsDeclaringCertId(null);
-      setDeclaringContractId(null);
-    }
-  };
-
-  const openDeclarationView = (contractId: number, firstCert: string) => {
-     setViewingDeclarationContract(contractId);
-     setDeclarationModalCert(firstCert);
-  };
-
-  const handleDeleteDeclaration = async () => {
-    if (!contractToDelete) return;
-    setIsDeletingDecl(true);
-    try {
-      const response = await fetch(`/api/declare_certificates?id=${contractToDelete}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error("Failed to delete declarations");
-      
-      // Optimistic updates
-      setDeclarations(prev => prev.filter(d => d.contract_id !== contractToDelete));
-      setSales(prev => prev.map(s => s.id === contractToDelete ? { ...s, certs_declared: false } : s));
-      setViewingDeclarationContract(null);
-      setContractToDelete(null);
-      showToast('success', 'Reverted', 'Declarations reverted successfully.');
-      
-      // Auto update data in the background
-      await fetchData(true);
-    } catch (error: any) {
-      showToast('error', 'Error deleting declarations', error.message);
-    } finally {
-      setIsDeletingDecl(false);
-    }
-  };
-
-  // ⚡ O(N) Memoization for Contracts Tab Filtering
-  const filteredContracts = useMemo(() => {
-    return sales.filter(sale => {
-      // ⚡ Robust fallback check for missing attributes safely utilizing the optimized bool parser
-      const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
-      
-      // Certs declared filter: Hide fully declared contracts unless the "Show All Contracts" toggle is ON
-      if (!showDeclaredContracts && isDeclared) return false;
-
-      // Search filter
-      if (contractSearch) {
-        const q = contractSearch.toLowerCase();
-        const match = [
-          sale.contract_number,
-          sale.client,
-          sale.quality,
-          sale.strategy,
-          sale.grade,
-          sale.blend_name
-        ].some(val => String(val || '').toLowerCase().includes(q));
-        if (!match) return false;
-      }
-      return true;
-    });
-  }, [sales, contractSearch, showDeclaredContracts]);
-
-  const uniqueClients = useMemo(() => {
-      const clients = sales.map(s => s.client).filter(Boolean) as string[];
-      return Array.from(new Set(clients)).sort();
-  }, [sales]);
-
-  // ⚡ O(N) EXECUTIVE SUMMARY AGGREGATION
-  const executiveSummary = useMemo(() => {
-    const summaryMap = new Map<string, {
-      combo: string;
-      sold: number;
-      declared: number;
-      pending: number;
-      available: number;
-    }>();
-
-    // 1. Process Contracts FIRST to explicitly define the allowed table rows
-    sales.forEach(sale => {
-      const certs = parseCerts(sale.certifications)
-        .map(c => c.toUpperCase().trim())
-        .filter(c => c !== 'UNCERTIFIED'); 
-      
-      const combo = certs.length > 0 ? certs.sort().join(', ') : 'UNCERTIFIED';
-      
-      // Skip uncertified contracts from the Executive Certificates Summary
-      if (combo === 'UNCERTIFIED') return;
-
-      if (!summaryMap.has(combo)) {
-        summaryMap.set(combo, { combo, sold: 0, declared: 0, pending: 0, available: 0 });
-      }
-
-      const record = summaryMap.get(combo)!;
-      const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
-      const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
-
-      record.sold += weight;
-      if (isDeclared) {
-        record.declared += weight;
-      } else {
-        record.pending += weight;
-      }
-    });
-
-    // Extract the allowed combos to cleanly evaluate subsets
-    const allowedCombos = Array.from(summaryMap.values()).map(row => ({
-      combo: row.combo,
-      requiredCerts: row.combo.split(', ')
-    }));
-
-    // 2. Process Stocks
-    const today = new Date();
-    const currentMonth = today.getMonth(); 
-    const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
-    const seasonStartDate = new Date(startYear, 8, 1).getTime();
-    const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
-
-    enhancedStocks.forEach(stock => {
-      // Filter stocks by crop year if toggle is active
-      if (positionView === 'crop_year') {
-         if (!stock.recorded_date) return;
-         const recTime = new Date(stock.recorded_date).getTime();
-         if (Number.isNaN(recTime) || recTime < seasonStartDate || recTime > seasonEndDate) return;
-      }
-
-      // Collect the active certificates for this stock lot using an O(1) Set lookup
-      const stockCerts = new Set<string>();
-      if (isPureAAA(stock)) stockCerts.add('AAA');
-      if (asNumber(stock.aaa_rs_volume) > 0) stockCerts.add('AAA-RS');
-      if (bool(stock.cafe_certified)) stockCerts.add('CAFE');
-      if (bool(stock.eudr_certified)) stockCerts.add('EUDR');
-      if (bool(stock.netzero_project)) stockCerts.add('NET ZERO');
-      if (bool(stock.rfa_certified)) stockCerts.add('RFA');
-      
-      if (stockCerts.size === 0) return;
-
-      // ⚡ FAST SUBSET MATCHING ALGORITHM
-      allowedCombos.forEach(({ combo, requiredCerts }) => {
-          const canSatisfyCombo = requiredCerts.every(cert => stockCerts.has(cert));
-          
-          if (canSatisfyCombo) {
-              let minComboBalance = Infinity;
-              
-              requiredCerts.forEach(cert => {
-                  let baseVolume = 0;
-                  let declaredVolume = 0;
-                  
-                  if (cert === 'AAA') {
-                      baseVolume = asNumber(stock.aaa_volume);
-                      declaredVolume = asNumber(stock.aaa_declared_weight);
-                  } else if (cert === 'AAA-RS') {
-                      baseVolume = asNumber(stock.aaa_rs_volume);
-                      declaredVolume = asNumber(stock.aaa_rs_declared_weight);
-                  } else {
-                      baseVolume = asNumber(stock.purchased_weight);
-                      
-                      const c = cert.replace(/[^A-Z0-9-]/g, '');
-                      let fieldName = '';
-                      if (c === 'NETZERO') fieldName = 'netzero_declared_weight';
-                      else fieldName = `${c.toLowerCase()}_declared_weight`;
-                      
-                      declaredVolume = asNumber(stock[fieldName as keyof CertifiedStock]);
-                  }
-                  
-                  const certBalance = Math.max(0, baseVolume - declaredVolume);
-                  if (certBalance < minComboBalance) {
-                      minComboBalance = certBalance;
-                  }
-              });
-
-              if (minComboBalance > 0 && minComboBalance !== Infinity) {
-                  summaryMap.get(combo)!.available += minComboBalance;
-              }
-          }
-      });
-    });
-
-    return Array.from(summaryMap.values())
-      .map(r => ({
-        ...r,
-        net: r.available - r.pending
-      }))
-      .sort((a, b) => a.combo.localeCompare(b.combo));
-  }, [sales, enhancedStocks, positionView]);
-
-
-  const { tableData, uniqueMonths, kpis } = useMemo(() => {
-    const certFlagMap: Record<CertType, keyof CertifiedStock> = {
-      'RFA': 'rfa_certified',
-      'CAFE': 'cafe_certified',
-      'NET ZERO': 'netzero_project',
-      'EUDR': 'eudr_certified',
-      'AAA': 'aaa_project',
-      'AAA-RS': 'aaa_rs_volume'
-    };
-    const flag = certFlagMap[activeCert];
-
-    const certHolderMap: Partial<Record<CertType, keyof CertifiedStock>> = {
-      'RFA': 'rfa_certificate_holder',
-      'CAFE': 'cafe_certificate_holder',
-      'EUDR': 'eudr_certificate_holder',
-    };
-    const holderFlag = certHolderMap[activeCert];
-
-    const strategyMap = new Map<string, {
-      strategy: string;
-      available: number;
-      shipmentsByMonth: Record<string, number>;
-      totalShipment: number;
-    }>();
-
-    let totalStockKg = 0;
-    let totalShortsKg = 0;
-    let totalSupplyChainKg = 0; 
-    const monthsSet = new Set<string>();
-
-    // ⚡ PRE-CALCULATED CROP YEAR BOUNDS
-    const today = new Date();
-    const currentMonth = today.getMonth();
-    const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
-    const seasonStartDate = new Date(startYear, 8, 1).getTime();
-    const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
-
-    enhancedStocks.forEach(stock => {
-      // ⚡ STRICT EVALUATION without Regex replacements
-      let isCertified = false;
-      if (activeCert === 'AAA') isCertified = isPureAAA(stock);
-      else if (activeCert === 'AAA-RS') isCertified = asNumber(stock.aaa_rs_volume) > 0;
-      else isCertified = bool(stock[flag]);
-      
-      if (isCertified) {
-        if (positionView === 'crop_year') {
-           if (!stock.recorded_date) return;
-           const recTime = new Date(stock.recorded_date).getTime();
-           if (Number.isNaN(recTime) || recTime < seasonStartDate || recTime > seasonEndDate) return;
-        }
-
-        const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
-        if (isDual && activeCert === 'AAA') return; 
-
-        // ⚡ EXPLICIT BASE vs DECLARED MAPPING (Guarantees Total Stock captures differences)
-        let rawWeight = 0;
-        let declaredWeight = 0;
-        
-        if (activeCert === 'AAA') {
-            rawWeight = asNumber(stock.aaa_volume);
-            declaredWeight = asNumber(stock.aaa_declared_weight);
-        } else if (activeCert === 'AAA-RS') {
-            rawWeight = asNumber(stock.aaa_rs_volume);
-            declaredWeight = asNumber(stock.aaa_rs_declared_weight);
-        } else {
-            rawWeight = asNumber(stock.purchased_weight);
-            const field = certToField(activeCert);
-            declaredWeight = field ? asNumber(stock[field as keyof CertifiedStock]) : 0;
-        }
-
-        const weight = Math.max(0, rawWeight - declaredWeight); 
-        
-        // Skip allocation evaluation if volume is fully depleted
-        if (weight <= 0) return; 
-
-        const strat = stock.strategy || 'Unassigned';
-        if (!strategyMap.has(strat)) strategyMap.set(strat, { strategy: strat, available: 0, shipmentsByMonth: {}, totalShipment: 0 });
-        
-        const record = strategyMap.get(strat)!;
-        record.available += weight;
-        totalStockKg += weight; // Total Stock precisely tracks the isolated difference logic
-
-        if (holderFlag && stock[holderFlag]) {
-          const holderName = String(stock[holderFlag]).toLowerCase();
-          if (holderName.includes('kenyacof')) {
-            totalSupplyChainKg += weight;
-          }
-        }
-      }
-    });
-
-    sales.forEach(sale => {
-      // Only deduct volumes for contracts that have NOT been fully declared
-      const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
-      if (isDeclared) return;
-
-      const certList = parseCerts(sale.certifications);
-      const isMatch = certList.includes(activeCert);
-
-      if (isMatch) {
-        const strat = sale.quality || sale.strategy || 'Unassigned'; 
-        const monthKey = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
-        
-        if (!strategyMap.has(strat)) strategyMap.set(strat, { strategy: strat, available: 0, shipmentsByMonth: {}, totalShipment: 0 });
-        
-        const record = strategyMap.get(strat)!;
-        const rawSaleWeight = String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '');
-        const weight = Math.abs(Number(rawSaleWeight) || 0); 
-        
-        record.shipmentsByMonth[monthKey] = (record.shipmentsByMonth[monthKey] || 0) + weight;
-        record.totalShipment += weight;
-        
-        totalShortsKg += weight;
-        monthsSet.add(monthKey); 
-      }
-    });
-
-    const sortedMonths = Array.from(monthsSet).sort((a, b) => {
-      if (a === 'Unscheduled') return 1;
-      if (b === 'Unscheduled') return -1;
-      return new Date(a).getTime() - new Date(b).getTime();
-    });
-
-    const rows = Array.from(strategyMap.values()).map(row => ({
-      ...row,
-      netPosition: row.available - row.totalShipment
-    })).sort((a, b) => a.strategy.localeCompare(b.strategy)); 
-
-    return {
-      tableData: rows,
-      uniqueMonths: sortedMonths,
-      kpis: {
-        stock: totalStockKg,
-        supplyChainStock: totalSupplyChainKg, 
-        shorts: totalShortsKg,
-        net: totalStockKg - totalShortsKg
-      }
-    };
-  }, [activeCert, enhancedStocks, sales, positionView]); 
-
-  // --- TRACKER TAB MEMOS ---
+  // --- TRACKER TAB MEMOS RESTORED ---
   const trackerVisibleStocks = useMemo(() => {
     return enhancedStocks
       .filter((stock) => {
@@ -1270,8 +970,24 @@ export default function CertificationsPage() {
          if (isDual && trackerCerts.includes('AAA') && !trackerCerts.includes('CAFE')) return false;
          return true;
       })
-      .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true));
-  }, [enhancedStocks, trackerCerts, trackerDateStartFilter, trackerDateEndFilter]);
+      .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true))
+      .filter((stock) => {
+         if (trackerSearchLot && !(stock.lot_number || '').toLowerCase().includes(trackerSearchLot.toLowerCase())) return false;
+         if (trackerFilterCounty && stock.county !== trackerFilterCounty) return false;
+         if (trackerFilterWetmill && stock.wet_mill !== trackerFilterWetmill) return false;
+         if (trackerFilterGrade && stock.grade !== trackerFilterGrade) return false;
+         if (trackerFilterSeason && stock.season !== trackerFilterSeason) return false;
+         
+         if (trackerFilterExpiry !== 'ALL') {
+            const expiryInfo = getTrackerDisplayedExpiry(stock, trackerPrimaryCert);
+            const isExpired = expiryInfo.days !== null && expiryInfo.days < 0;
+            if (trackerFilterExpiry === 'EXPIRED' && !isExpired) return false;
+            if (trackerFilterExpiry === 'VALID' && isExpired) return false;
+         }
+
+         return true;
+      });
+  }, [enhancedStocks, trackerCerts, trackerDateStartFilter, trackerDateEndFilter, trackerSearchLot, trackerFilterCounty, trackerFilterWetmill, trackerFilterGrade, trackerFilterSeason, trackerFilterExpiry, trackerPrimaryCert]);
 
   const trackerTableColumns = useMemo(() => getTrackerColumns(trackerPrimaryCert, unit), [trackerPrimaryCert, unit]);
 
@@ -1332,24 +1048,45 @@ export default function CertificationsPage() {
   const trackerVisibleRows = useMemo(() => trackerVisibleStocks.map((stock) => buildTrackerRow(stock, trackerPrimaryCert)), [trackerVisibleStocks, trackerPrimaryCert]);
 
   const trackerAllocationSummary = useMemo(() => {
-    const summary: Record<string, { label: string, lotKg: number, lotCount: number, contractCount: number, declaredKg: number, balanceKg: number }> = {
-      RFA: { label: "RFA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      CAFE: { label: "CAFE", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      "NET ZERO": { label: "NET ZERO", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      EUDR: { label: "EUDR", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      AAA: { label: "AAA", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      "AAA/CP": { label: "AAA/CP", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
-      "AAA-RS": { label: "AAA-RS", lotKg: 0, lotCount: 0, contractCount: 0, declaredKg: 0, balanceKg: 0 },
+    const summary: Record<string, { label: string, lotKg: number, expiredKg: number, lotCount: number, contractCount: number, allocatedKg: number, balanceKg: number }> = {
+      RFA: { label: "RFA", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
+      CAFE: { label: "CAFE", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
+      "NET ZERO": { label: "NET ZERO", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
+      EUDR: { label: "EUDR", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
+      AAA: { label: "AAA", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
+      "AAA/CP": { label: "AAA/CP", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
+      "AAA-RS": { label: "AAA-RS", lotKg: 0, expiredKg: 0, lotCount: 0, contractCount: 0, allocatedKg: 0, balanceKg: 0 },
     };
 
     const visibleStockIds = new Set(trackerVisibleStocks.map(s => s.id));
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const isExpired = (dateStr?: string) => dateStr ? dateStr < todayStr : false;
 
     trackerVisibleStocks.forEach(stock => {
       const cafe = bool(stock.cafe_certified);
-      if (bool(stock.rfa_certified)) { summary.RFA.lotCount++; summary.RFA.lotKg += getEffectiveWeight(stock, 'RFA'); }
-      if (cafe) { summary.CAFE.lotCount++; summary.CAFE.lotKg += getEffectiveWeight(stock, 'CAFE'); }
-      if (bool(stock.netzero_project)) { summary["NET ZERO"].lotCount++; summary["NET ZERO"].lotKg += getEffectiveWeight(stock, 'NET ZERO'); }
-      if (bool(stock.eudr_certified)) { summary.EUDR.lotCount++; summary.EUDR.lotKg += getEffectiveWeight(stock, 'EUDR'); }
+      
+      if (bool(stock.rfa_certified)) { 
+          summary.RFA.lotCount++; 
+          const w = getEffectiveWeight(stock, 'RFA');
+          summary.RFA.lotKg += w; 
+          if (isExpired(stock.rfa_expiry_date)) summary.RFA.expiredKg += w;
+      }
+      if (cafe) { 
+          summary.CAFE.lotCount++; 
+          const w = getEffectiveWeight(stock, 'CAFE');
+          summary.CAFE.lotKg += w; 
+          if (isExpired(stock.cafe_expiry_date)) summary.CAFE.expiredKg += w;
+      }
+      if (bool(stock.netzero_project)) { 
+          summary["NET ZERO"].lotCount++; 
+          summary["NET ZERO"].lotKg += getEffectiveWeight(stock, 'NET ZERO'); 
+      }
+      if (bool(stock.eudr_certified)) { 
+          summary.EUDR.lotCount++; 
+          const w = getEffectiveWeight(stock, 'EUDR');
+          summary.EUDR.lotKg += w; 
+          if (isExpired(stock.eudr_expiry_date)) summary.EUDR.expiredKg += w;
+      }
       
       if (asNumber(stock.aaa_rs_volume) > 0) {
          summary["AAA-RS"].lotCount++; 
@@ -1358,26 +1095,27 @@ export default function CertificationsPage() {
       
       if (isPureAAA(stock)) {
          if (cafe) { summary["AAA/CP"].lotCount++; summary["AAA/CP"].lotKg += getEffectiveWeight(stock, 'AAA'); }
+
          else { summary.AAA.lotCount++; summary.AAA.lotKg += getEffectiveWeight(stock, 'AAA'); }
       }
     });
 
-    declarations.forEach(decl => {
+    allocations.forEach(decl => {
        if (!visibleStockIds.has(decl.stock_id)) return;
-       summary.RFA.declaredKg += asNumber(decl.rfa_declared_weight);
-       summary.CAFE.declaredKg += asNumber(decl.cafe_declared_weight);
-       summary["NET ZERO"].declaredKg += asNumber(decl.netzero_declared_weight);
-       summary.EUDR.declaredKg += asNumber(decl.eudr_declared_weight);
-       summary["AAA-RS"].declaredKg += asNumber(decl.aaa_rs_declared_weight);
+       summary.RFA.allocatedKg += asNumber(decl.rfa_allocated_weight);
+       summary.CAFE.allocatedKg += asNumber(decl.cafe_allocated_weight);
+       summary["NET ZERO"].allocatedKg += asNumber(decl.netzero_allocated_weight);
+       summary.EUDR.allocatedKg += asNumber(decl.eudr_allocated_weight);
+       summary["AAA-RS"].allocatedKg += asNumber(decl.aaa_rs_allocated_weight);
        
-       if (asNumber(decl.aaa_declared_weight) > 0) {
-           if (asNumber(decl.cafe_declared_weight) > 0) summary["AAA/CP"].declaredKg += asNumber(decl.aaa_declared_weight);
-           else summary.AAA.declaredKg += asNumber(decl.aaa_declared_weight);
+       if (asNumber(decl.aaa_allocated_weight) > 0) {
+           if (asNumber(decl.cafe_allocated_weight) > 0) summary["AAA/CP"].allocatedKg += asNumber(decl.aaa_allocated_weight);
+           else summary.AAA.allocatedKg += asNumber(decl.aaa_allocated_weight);
        }
     });
 
     const visibleContractIds = new Set(
-      declarations.filter(d => visibleStockIds.has(d.stock_id)).map(d => d.contract_id)
+      allocations.filter(d => visibleStockIds.has(d.stock_id)).map(d => d.contract_id)
     );
     sales.forEach(sale => {
       if (!visibleContractIds.has(sale.id)) return;
@@ -1394,13 +1132,13 @@ export default function CertificationsPage() {
     });
 
     (Object.keys(summary) as Array<keyof typeof summary>).forEach(k => {
-       summary[k].balanceKg = summary[k].lotKg - summary[k].declaredKg;
+       summary[k].balanceKg = summary[k].lotKg - summary[k].allocatedKg;
     });
 
     return summary;
-  }, [trackerVisibleStocks, sales, declarations]);
+  }, [trackerVisibleStocks, sales, allocations]);
 
-  const trackerIntersectionCard = useMemo((): { label: string; lotKg: number; lotCount: number; contractCount: number; declaredKg: number; balanceKg: number } | null => {
+  const trackerIntersectionCard = useMemo((): { label: string; lotKg: number; expiredKg: number; lotCount: number; contractCount: number; allocatedKg: number; balanceKg: number } | null => {
     if (trackerCerts.length < 2) return null;
 
     const visibleStockIds = new Set(trackerVisibleStocks.map(s => s.id));
@@ -1413,17 +1151,23 @@ export default function CertificationsPage() {
       lotKg += useAaaVolume ? asNumber(stock.aaa_volume) : asNumber(stock.purchased_weight);
     });
 
-    let declaredKg = 0;
-    declarations.forEach(decl => {
+    let allocatedKg = 0;
+    allocations.forEach(decl => {
       if (!visibleStockIds.has(decl.stock_id)) return;
+      
+      let maxDeclForCombo = 0;
       trackerCerts.forEach(cert => {
         const field = certToField(cert);
-        if (field) declaredKg += asNumber((decl as any)[field]);
+        if (field) {
+            const val = asNumber((decl as any)[field]);
+            if (val > maxDeclForCombo) maxDeclForCombo = val;
+        }
       });
+      allocatedKg += maxDeclForCombo;
     });
 
     const visibleContractIds = new Set(
-      declarations.filter(d => visibleStockIds.has(d.stock_id)).map(d => d.contract_id)
+      allocations.filter(d => visibleStockIds.has(d.stock_id)).map(d => d.contract_id)
     );
     const selectedSet = new Set<string>(trackerCerts);
     let contractCount = 0;
@@ -1436,33 +1180,130 @@ export default function CertificationsPage() {
     return {
       label: trackerCerts.join(" + "),
       lotKg,
+      expiredKg: 0,
       lotCount,
       contractCount,
-      declaredKg,
-      balanceKg: lotKg - declaredKg,
+      allocatedKg,
+      balanceKg: lotKg - allocatedKg,
     };
-  }, [trackerCerts, trackerVisibleStocks, declarations, sales]);
+  }, [trackerCerts, trackerVisibleStocks, allocations, sales]);
 
-  const renderAllocationCard = (label: string, bucket: { lotKg: number, lotCount: number, contractCount: number, declaredKg: number, balanceKg: number }) => (
-    <div key={label} className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
+  const renderAllocationCard = (label: string, bucket: { lotKg: number, expiredKg: number, lotCount: number, contractCount: number, allocatedKg: number, balanceKg: number }) => (
+    <div key={label} className="rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4 flex flex-col h-full">
       <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">{label}</div>
       <div className="mt-2 text-2xl font-bold text-[#51534a]">{formatQty(bucket.lotKg, unit)} <span className="text-sm font-normal text-[#968C83]">{unitText(unit)}</span></div>
-      <div className="mt-4 space-y-1 text-xs text-[#51534a]">
+      <div className="mt-auto space-y-1 text-xs text-[#51534a] pt-4">
         <div className="flex items-center justify-between gap-2"><span>Stock lots</span><span className="font-bold">{bucket.lotCount}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Linked contracts</span><span className="font-bold">{bucket.contractCount}</span></div>
-        <div className="flex items-center justify-between gap-2"><span>Declared</span><span className="font-bold">{formatQty(bucket.declaredKg, unit)} {unitText(unit)}</span></div>
-        <div className="flex items-center justify-between gap-2 pt-1"><span>Balance</span><span className={`font-bold ${bucket.balanceKg >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{bucket.balanceKg > 0 ? "+" : ""}{formatQty(bucket.balanceKg, unit)} {unitText(unit)}</span></div>
+        <div className="flex items-center justify-between gap-2"><span>allocated</span><span className="font-bold">{formatQty(bucket.allocatedKg, unit)}</span></div>
+        <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#D6D2C4]/50 mt-1"><span>Balance</span><span className={`font-bold ${bucket.balanceKg >= 0 ? "text-[#007680]" : "text-[#B9975B]"}`}>{bucket.balanceKg > 0 ? "+" : ""}{formatQty(bucket.balanceKg, unit)}</span></div>
+        <div className="flex items-center justify-between gap-2 pt-1">
+            <span className="text-red-500/80">Expired Volume</span>
+            <span className="font-bold text-red-500/80">{formatQty(bucket.expiredKg, unit)}</span>
+        </div>
       </div>
     </div>
   );
 
-  const declaredContractsSummary = useMemo(() => {
+  const openDeclarationConfig = (contractId: number) => {
+      setDeclaringContractId(contractId);
+      
+      const contract = sales.find(s => s.id === contractId);
+      if (contract && contract.region && contract.region.trim() !== '') {
+          setSelectedRegions(new Set([contract.region]));
+      } else {
+          setSelectedRegions(new Set(uniqueRegions));
+      }
+      
+      setSelectedGrades(new Set(uniqueGrades));
+      setIsDeclaringConfigOpen(true);
+  };
+
+  const submitDeclareCertificates = async () => {
+    if (!declaringContractId) return;
+    const contractId = declaringContractId;
+
+    setIsDeclaringConfigOpen(false);
+    setIsDeclaringCertId(contractId);
+
+    try {
+      const payload = { 
+          sale_contract_id: contractId,
+          regions: Array.from(selectedRegions),
+          grades: Array.from(selectedGrades)
+      };
+
+      const response = await fetch('/api/declare_certificates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Failed to declare certificates");
+      }
+      
+      const failedCerts = response.headers.get('X-Failed-Certificates');
+      const contentType = response.headers.get('Content-Type');
+      
+      if (contentType && contentType.includes('application/json')) {
+         const data = await response.json();
+         console.log("Declaration successful, JSON response received:", data);
+         showToast('success', 'Declaration logged', 'Declaration parameters successfully sent to backend!');
+      } else {
+         if (failedCerts) {
+             const details = failedCerts.split(',').map(f => {
+                 const [cert, shortfall] = f.split(':');
+                 return <li key={cert} className="ml-4 list-disc"><strong>{cert.toUpperCase()}</strong>: Short by {formatNumber(Number(shortfall))} {unitText(unit)}</li>;
+             });
+             showToast('warning', 'Partial Declaration', <div><p className="mb-1">Not enough volume for these certificates (they were skipped):</p><ul>{details}</ul></div>);
+         } else {
+             showToast('success', 'Fully allocated', 'All certificates successfully allocated and report downloaded!');
+             setSales(prev => prev.map(s => s.id === contractId ? { ...s, certs_allocated: true } : s));
+         }
+         
+         const blob = await response.blob();
+         const disposition = response.headers.get('Content-Disposition');
+         let filename = `Declaration_Contract_${contractId}.xlsx`;
+         
+         if (disposition && disposition.includes('filename=')) {
+             const matches = /filename="([^"]+)"/.exec(disposition);
+             if (matches && matches[1]) filename = matches[1];
+         }
+         
+         const url = window.URL.createObjectURL(blob);
+         const a = document.createElement("a");
+         a.href = url;
+         a.download = filename;
+         document.body.appendChild(a);
+         a.click();
+         document.body.removeChild(a);
+         window.URL.revokeObjectURL(url);
+      }
+      
+      await fetchData(true);
+      
+    } catch (error: any) {
+      showToast('error', 'Declaration Failed', error.message);
+    } finally {
+      setIsDeclaringCertId(null);
+      setDeclaringContractId(null);
+    }
+  };
+
+  const openDeclarationView = (contractId: number, firstCert: string) => {
+     setViewingDeclarationContract(contractId);
+     setDeclarationModalCert(firstCert);
+  };
+
+  const allocatedContractsSummary = useMemo(() => {
     const map = new Map<number, {
        contract_id: number; contract_number: string; client: string; contract_weight: number;
        shipping_date: string; certs: Set<string>; lots: DeclarationRow[];
     }>();
 
-    declarations.forEach((row) => {
+    allocations.forEach((row) => {
        if (!map.has(row.contract_id)) {
            map.set(row.contract_id, {
                contract_id: row.contract_id, contract_number: row.contract_number, client: row.client,
@@ -1473,167 +1314,624 @@ export default function CertificationsPage() {
        const c = map.get(row.contract_id)!;
        c.lots.push(row);
        
-       if (asNumber(row.rfa_declared_weight) > 0) c.certs.add('RFA');
-       if (asNumber(row.eudr_declared_weight) > 0) c.certs.add('EUDR');
-       if (asNumber(row.cafe_declared_weight) > 0) c.certs.add('CAFE');
-       if (asNumber(row.impact_declared_weight) > 0) c.certs.add('Impact');
-       if (asNumber(row.aaa_declared_weight) > 0) c.certs.add('AAA');
-       if (asNumber(row.aaa_rs_declared_weight) > 0) c.certs.add('AAA-RS');
-       if (asNumber(row.netzero_declared_weight) > 0) c.certs.add('NET ZERO');
+       if (asNumber(row.rfa_allocated_weight) > 0) c.certs.add('RFA');
+       if (asNumber(row.eudr_allocated_weight) > 0) c.certs.add('EUDR');
+       if (asNumber(row.cafe_allocated_weight) > 0) c.certs.add('CAFE');
+       if (asNumber(row.impact_allocated_weight) > 0) c.certs.add('Impact');
+       if (asNumber(row.aaa_allocated_weight) > 0) c.certs.add('AAA');
+       if (asNumber(row.aaa_rs_allocated_weight) > 0) c.certs.add('AAA-RS');
+       if (asNumber(row.netzero_allocated_weight) > 0) c.certs.add('NET ZERO');
     });
     
     return Array.from(map.values()).sort((a, b) => b.contract_id - a.contract_id);
-  }, [declarations]);
+  }, [allocations]);
 
+  // ⚡ Dynamic Client-Side Download Builder
+  const handleDownloadDeclaration = (contractId: number) => {
+      const contract = allocatedContractsSummary.find(c => c.contract_id === contractId);
+      if (!contract) return;
+      
+      const reqCerts = Array.from(contract.certs) as string[];
+      const combinedRows: any[] = [];
+      const certData: Record<string, any[]> = {};
+      reqCerts.forEach(c => certData[c] = []);
+      
+      contract.lots.forEach(decl => {
+          const stock = enhancedStocks.find(s => s.id === decl.stock_id);
+          if (!stock) return;
+          
+          const baseField = reqCerts.includes('AAA') ? 'aaa_volume' : (reqCerts.includes('AAA-RS') ? 'aaa_rs_volume' : 'purchased_weight');
+          const baseVol = asNumber((stock as any)[baseField]);
+          
+          let maxDeclForLotInContract = 0;
+          
+          reqCerts.forEach(cert => {
+              const field = certToField(cert);
+              const valInThisContract = asNumber((decl as any)[field]);
+              if (valInThisContract > maxDeclForLotInContract) maxDeclForLotInContract = valInThisContract;
+              
+              if (valInThisContract > 0) {
+                  certData[cert].push({
+                      'Season': stock.season || '',
+                      'Outturn': stock.outturn || '',
+                      'Grower Code': stock.grower_code || '',
+                      'Grade': stock.grade || '',
+                      'Weight': baseVol,
+                      'Wetmill': stock.wet_mill || '',
+                      'County': stock.county || '',
+                      'Cooperative': stock.cooperative || '',
+                      'Purchased Weight': asNumber(stock.purchased_weight),
+                      'Lot Number': stock.lot_number || '',
+                      'Strategy': stock.strategy || '',
+                      'allocated Weight': valInThisContract,
+                      'Balance': baseVol - asNumber((stock as any)[field])
+                  });
+              }
+          });
+          
+          if (maxDeclForLotInContract > 0) {
+              combinedRows.push({
+                  'Season': stock.season || '',
+                  'Outturn': stock.outturn || '',
+                  'Grower Code': stock.grower_code || '',
+                  'Grade': stock.grade || '',
+                  'Weight': baseVol,
+                  'Wetmill': stock.wet_mill || '',
+                  'County': stock.county || '',
+                  'Cooperative': stock.cooperative || '',
+                  'Purchased Weight': asNumber(stock.purchased_weight),
+                  'Lot Number': stock.lot_number || '',
+                  'Strategy': stock.strategy || '',
+                  'allocated Weight': maxDeclForLotInContract,
+                  'Balance': stock._replacementCap || (baseVol - maxDeclForLotInContract) 
+              });
+          }
+      });
+      
+      const wb = xlsx.utils.book_new();
+      
+      const combinedWs = xlsx.utils.json_to_sheet(combinedRows);
+      if (combinedRows.length > 0) combinedWs['!cols'] = Object.keys(combinedRows[0]).map(k => ({ wch: Math.max(k.length + 5, 15) }));
+      xlsx.utils.book_append_sheet(wb, combinedWs, 'COMBINED DECLARATION');
+      
+      reqCerts.forEach(cert => {
+          const ws = xlsx.utils.json_to_sheet(certData[cert]);
+          if (certData[cert].length > 0) ws['!cols'] = Object.keys(certData[cert][0]).map(k => ({ wch: Math.max(k.length + 5, 15) }));
+          xlsx.utils.book_append_sheet(wb, ws, cert.toUpperCase());
+      });
+      
+      const cleanName = String(contract.contract_number).replace(/[^a-zA-Z0-9!@#&()-_=+]/g, '_');
+      xlsx.writeFile(wb, `Declaration_${cleanName}_Downloaded.xlsx`);
+  };
+
+  const submitReplacement = async () => {
+      setIsReplacing(true);
+      try {
+          const res = await fetch('/api/declare_certificates', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                  sale_contract_id: replaceModalState.contractId,
+                  old_stock_id: replaceModalState.oldStockId,
+                  new_stock_ids: Array.from(replacementSelected)
+              })
+          });
+          
+          // ⚡ OPTIMIZATION: Safely extract response. If the PUT method is missing or the backend crashes, 
+          // this prevents the confusing "Unexpected end of JSON input" error and unmasks the real HTTP status.
+          const text = await res.text();
+          let data;
+          try {
+              data = text ? JSON.parse(text) : {};
+          } catch (e) {
+              throw new Error(`Server returned HTTP ${res.status}. (The PUT endpoint may be missing or crashed). Response: ${text.slice(0, 100)}`);
+          }
+
+          if (!res.ok) throw new Error(data.error || `HTTP Status ${res.status}`);
+          
+          showToast('success', 'Replaced Successfully', `Replaced ${formatQty(data.replaced_weight, unit)} ${unitText(unit)} using new lots.`);
+          setReplaceModalState(prev => ({...prev, isOpen: false}));
+          setReplacementSelected(new Set());
+          await fetchData(true);
+      } catch (e: any) {
+          showToast('error', 'Replacement Failed', e.message);
+      } finally {
+          setIsReplacing(false);
+      }
+  };
+
+  const handleDeleteDeclaration = async () => {
+    if (!contractToDelete) return;
+    setIsDeletingDecl(true);
+    try {
+      const response = await fetch(`/api/declare_certificates?id=${contractToDelete}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error("Failed to delete allocations");
+      
+      setallocations(prev => prev.filter(d => d.contract_id !== contractToDelete));
+      setSales(prev => prev.map(s => s.id === contractToDelete ? { ...s, certs_allocated: false } : s));
+      setViewingDeclarationContract(null);
+      setContractToDelete(null);
+      showToast('success', 'Reverted', 'allocations reverted successfully.');
+      
+      await fetchData(true);
+    } catch (error: any) {
+      showToast('error', 'Error deleting allocations', error.message);
+    } finally {
+      setIsDeletingDecl(false);
+    }
+  };
 
   const handleUploadSol = async () => {
-    if (!solFile) return;
-    const formData = new FormData();
-    formData.append('sol_file', solFile);
+      if (!solFile) return;
+      const formData = new FormData();
+      formData.append('sol_file', solFile);
 
-    try {
-      const response = await fetch('http://localhost:8100/api/upload_sol_report', {
-          method: 'POST',
-          body: formData, 
-      });
+      try {
+        const response = await fetch('http://localhost:8100/api/upload_sol_report', {
+            method: 'POST',
+            body: formData, 
+        });
 
-      if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.detail || "Failed to upload SOL report.");
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.detail || "Failed to upload SOL report.");
+        }
+        
+        alert("SOL Report uploaded successfully!");
+        setSolFile(null);
+        setIsAddModalOpen(false);
+        await fetchData(true);
+        
+      } catch (error: any) {
+        console.error("Upload error:", error);
+        alert(`Error uploading file: ${error.message}`);
       }
-      
-      alert("SOL Report uploaded successfully!");
-      setSolFile(null);
-      setIsAddModalOpen(false);
-      // Auto update data in the background
-      await fetchData(true);
-      
-    } catch (error: any) {
-      console.error("Upload error:", error);
-      alert(`Error uploading file: ${error.message}`);
-    }
   };
 
   const handleUploadPurchasesSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!purchaseFile) return;
-    
-    const formData = new FormData();
-    formData.append('xbs_file', purchaseFile);
-    if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
+      e.preventDefault();
+      if (!purchaseFile) return;
+      
+      const formData = new FormData();
+      formData.append('xbs_file', purchaseFile);
+      if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
 
-    try {
-      const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
-      if (!response.ok) throw new Error("Failed to upload purchases.");
-      
-      alert("Purchases uploaded successfully!");
-      setIsPurchaseModalOpen(false);
-      setIsAddModalOpen(false);
-      setPurchaseFile(null);
-      setPurchaseSaleNumber('');
-      setIsDirectSale(true);
-      
-      // Auto update data in the background
-      await fetchData(true);
-    } catch (error) {
-      alert("Error uploading file. Please try again.");
-    }
+      try {
+        const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
+        if (!response.ok) throw new Error("Failed to upload purchases.");
+        
+        alert("Purchases uploaded successfully!");
+        setIsPurchaseModalOpen(false);
+        setIsAddModalOpen(false);
+        setPurchaseFile(null);
+        setPurchaseSaleNumber('');
+        setIsDirectSale(true);
+        
+        await fetchData(true);
+      } catch (error) {
+        alert("Error uploading file. Please try again.");
+      }
   };
 
   const handleManualSaleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+      e.preventDefault();
 
-    try {
-      const response = await fetch('/api/contracts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(manualSaleForm)
-      });
-      if (!response.ok) throw new Error("Failed to save sale.");
-      const data = await response.json();
-      
-      // Optimistic update
-      if (data.success && data.sale) {
-        setSales(prev => [...prev, data.sale]);
+      try {
+        const response = await fetch('/api/contracts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(manualSaleForm)
+        });
+        if (!response.ok) throw new Error("Failed to save sale.");
+        const data = await response.json();
+        
+        if (data.success && data.sale) {
+          setSales(prev => [...prev, data.sale]);
+        }
+        
+        setIsManualSalesModalOpen(false);
+        setManualSaleForm({ contractNumber: '', client: '', weight: '', quality: '', grade: '', region: '', shippingDate: '', certifications: [] });
+        
+        await fetchData(true);
+      } catch (error) {
+        alert("Failed to save manual sale.");
       }
-      
-      setIsManualSalesModalOpen(false);
-      setManualSaleForm({ contractNumber: '', client: '', weight: '', quality: '', grade: '', shippingDate: '', certifications: [] });
-      
-      // Auto update data in the background
-      await fetchData(true);
-    } catch (error) {
-      alert("Failed to save manual sale.");
-    }
   };
 
   const handleEditClick = (sale: SaleContract) => {
-      setEditingContractId(sale.id);
-      setEditForm({
-          quality: sale.quality || sale.strategy || '',
-          grade: sale.grade || '',
-          certifications: parseCerts(sale.certifications),
-          blend_id: sale.blend_id || ''
-      });
+        setEditingContractId(sale.id);
+        setEditForm({
+            quality: sale.quality || sale.strategy || '',
+            grade: sale.grade || '',
+            region: sale.region || '',
+            certifications: parseCerts(sale.certifications),
+            blend_id: sale.blend_id || ''
+        });
   };
 
   const handleCancelEdit = () => {
-      setEditingContractId(null);
+        setEditingContractId(null);
   };
 
   const handleSaveEdit = async (id: number) => {
-      try {
-          const payloadBlendId = editForm.blend_id === '' ? null : editForm.blend_id;
+        try {
+            const payloadBlendId = editForm.blend_id === '' ? null : editForm.blend_id;
 
-          const response = await fetch('/api/contracts', {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id, ...editForm, blend_id: payloadBlendId })
-          });
-          
-          if (!response.ok) throw new Error("Failed to update");
-          
-          const selectedBlend = blends.find(b => b.id === Number(editForm.blend_id));
-          
-          // Optimistic update
-          setSales(prev => prev.map(sale => 
-              sale.id === id ? { 
-                  ...sale, 
-                  quality: editForm.quality, 
-                  grade: editForm.grade, 
-                  certifications: editForm.certifications,
-                  blend_id: payloadBlendId !== null ? Number(payloadBlendId) : undefined,
-                  blend_name: selectedBlend ? selectedBlend.name : undefined
-              } : sale
-          ));
-          setEditingContractId(null);
-          showToast('success', 'Updated', 'Contract updated successfully');
-          
-          // Auto update data in the background
-          await fetchData(true);
-      } catch (e) {
-          showToast('error', 'Error', 'Failed to update contract');
-      }
+            const response = await fetch('/api/contracts', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, ...editForm, blend_id: payloadBlendId })
+            });
+            
+            if (!response.ok) throw new Error("Failed to update");
+            
+            const selectedBlend = blends.find(b => b.id === Number(editForm.blend_id));
+            
+            setSales(prev => prev.map(sale => 
+                sale.id === id ? { 
+                    ...sale, 
+                    quality: editForm.quality, 
+                    grade: editForm.grade, 
+                    region: editForm.region,
+                    certifications: editForm.certifications,
+                    blend_id: payloadBlendId !== null ? Number(payloadBlendId) : undefined,
+                    blend_name: selectedBlend ? selectedBlend.name : undefined
+                } : sale
+            ));
+            setEditingContractId(null);
+            showToast('success', 'Updated', 'Contract updated successfully');
+            
+            await fetchData(true);
+        } catch (e) {
+            showToast('error', 'Error', 'Failed to update contract');
+        }
   };
 
   function downloadTrackerView(format: "csv" | "excel") {
-    const columns = getTrackerColumns(trackerPrimaryCert, unit);
-    const rows = getTrackerExportRows(trackerVisibleRows, columns);
-    const rangeSlug = [trackerDateStartFilter || "start", trackerDateEndFilter || "end"].filter(Boolean).join("-");
-    const title = `certified-stock-tracker-${trackerSelectedLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}${trackerDateStartFilter || trackerDateEndFilter ? `-${rangeSlug}` : ""}`;
-    const downloadTitle = title.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
-    const filename = format === "csv" ? `${downloadTitle}.csv` : `${downloadTitle}.xls`;
-    const blob = format === "csv"
-      ? new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8;" })
-      : new Blob([toExcelHtml(`Certified Stock Tracker - ${trackerSelectedLabel}`, rows)], { type: "application/vnd.ms-excel;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename || `certified-stock-tracker.${format}`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setDownloadOpen(false);
+      const columns = getTrackerColumns(trackerPrimaryCert, unit);
+      const rows = getTrackerExportRows(trackerVisibleRows, columns);
+      const rangeSlug = [trackerDateStartFilter || "start", trackerDateEndFilter || "end"].filter(Boolean).join("-");
+      const title = `certified-stock-tracker-${trackerSelectedLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-")}${trackerDateStartFilter || trackerDateEndFilter ? `-${rangeSlug}` : ""}`;
+      const downloadTitle = title.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+      const filename = format === "csv" ? `${downloadTitle}.csv` : `${downloadTitle}.xls`;
+      const blob = format === "csv"
+        ? new Blob([toCsv(rows)], { type: "text/csv;charset=utf-8;" })
+        : new Blob([toExcelHtml(`Certified Stock Tracker - ${trackerSelectedLabel}`, rows)], { type: "application/vnd.ms-excel;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename || `certified-stock-tracker.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setDownloadOpen(false);
   }
+
+  const filteredContracts = useMemo(() => {
+    return sales.filter(sale => {
+      const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+      if (!showallocatedContracts && isallocated) return false;
+
+      if (contractSearch) {
+        const q = contractSearch.toLowerCase();
+        const match = [
+          sale.contract_number,
+          sale.client,
+          sale.quality,
+          sale.strategy,
+          sale.grade,
+          sale.region,
+          sale.blend_name
+        ].some(val => String(val || '').toLowerCase().includes(q));
+        if (!match) return false;
+      }
+      
+      if (contractFilterClient && sale.client !== contractFilterClient) return false;
+      if (contractFilterRegion && sale.region !== contractFilterRegion) return false;
+      if (contractFilterBlend && String(sale.blend_id || '') !== contractFilterBlend) return false;
+      if (contractFilterShipMonth) {
+          const m = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
+          if (m !== contractFilterShipMonth) return false;
+      }
+
+      return true;
+    });
+  }, [sales, contractSearch, showallocatedContracts, contractFilterClient, contractFilterRegion, contractFilterBlend, contractFilterShipMonth]);
+
+  const uniqueClients = useMemo(() => {
+      const clients = sales.map(s => s.client).filter(Boolean) as string[];
+      return Array.from(new Set(clients)).sort();
+  }, [sales]);
+
+  const uniqueShipMonths = useMemo(() => {
+      const months = sales.map(s => s.shipping_date ? formatDateToMonthYear(s.shipping_date) : 'Unscheduled');
+      return Array.from(new Set(months)).sort();
+  }, [sales]);
+
+  // ⚡ O(N) EXECUTIVE SUMMARY AGGREGATION
+  const executiveSummary = useMemo(() => {
+    const summaryMap = new Map<string, {
+      combo: string;
+      sold: number;
+      allocated: number;
+      pending: number;
+      available: number;
+    }>();
+
+    // 1. Process Contracts FIRST to explicitly define the allowed table rows
+    sales.forEach(sale => {
+      // Opt-in Region Filter
+      if (applyRegionToExecSummary && positionRegions.size > 0) {
+          const saleMatches = positionRegions.has(sale.region || '') || (positionRegions.has('Anywhere') && (!sale.region || sale.region.trim() === ''));
+          if (!saleMatches) return;
+      }
+
+      const certs = parseCerts(sale.certifications)
+        .map(c => c.toUpperCase().trim())
+        .filter(c => c !== 'UNCERTIFIED'); 
+      
+      const combo = certs.length > 0 ? certs.sort().join(', ') : 'UNCERTIFIED';
+      
+      if (combo === 'UNCERTIFIED') return;
+
+      if (!summaryMap.has(combo)) {
+        summaryMap.set(combo, { combo, sold: 0, allocated: 0, pending: 0, available: 0 });
+      }
+
+      const record = summaryMap.get(combo)!;
+      const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
+      const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+
+      record.sold += weight;
+      if (isallocated) {
+        record.allocated += weight;
+      } else {
+        record.pending += weight;
+      }
+    });
+
+    const allowedCombos = Array.from(summaryMap.values()).map(row => ({
+      combo: row.combo,
+      requiredCerts: row.combo.split(', ')
+    }));
+
+    // 2. Process Stocks
+    const today = new Date();
+    const todayStr = today.toISOString().slice(0, 10);
+    const isExpired = (dateStr?: string) => dateStr ? dateStr < todayStr : false;
+    const currentMonth = today.getMonth(); 
+    const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
+    const seasonStartDate = new Date(startYear, 8, 1).getTime();
+    const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
+
+    enhancedStocks.forEach(stock => {
+      // Opt-in Region Filter (Anywhere matches all stocks, meaning unassigned contracts can pool from everywhere)
+      if (applyRegionToExecSummary && positionRegions.size > 0) {
+          const stockMatches = positionRegions.has(stock.county || '') || positionRegions.has('Anywhere');
+          if (!stockMatches) return;
+      }
+
+      if (positionView === 'crop_year') {
+         if (!stock.recorded_date) return;
+         const recTime = new Date(stock.recorded_date).getTime();
+         if (Number.isNaN(recTime) || recTime < seasonStartDate || recTime > seasonEndDate) return;
+      }
+
+      const stockCerts = new Set<string>();
+      if (isPureAAA(stock)) stockCerts.add('AAA');
+      if (asNumber(stock.aaa_rs_volume) > 0) stockCerts.add('AAA-RS');
+      if (bool(stock.cafe_certified)) stockCerts.add('CAFE');
+      if (bool(stock.eudr_certified)) stockCerts.add('EUDR');
+      if (bool(stock.netzero_project)) stockCerts.add('NET ZERO');
+      if (bool(stock.rfa_certified)) stockCerts.add('RFA');
+      
+      if (stockCerts.size === 0) return;
+
+      allowedCombos.forEach(({ combo, requiredCerts }) => {
+          const canSatisfyCombo = requiredCerts.every(cert => stockCerts.has(cert));
+          
+          if (canSatisfyCombo) {
+              let minComboBalance = Infinity;
+              
+              requiredCerts.forEach(cert => {
+                  let expiryField = '';
+                  if (cert === 'RFA') expiryField = 'rfa_expiry_date';
+                  if (cert === 'CAFE') expiryField = 'cafe_expiry_date';
+                  if (cert === 'EUDR') expiryField = 'eudr_expiry_date';
+                  if (cert === 'IMPACT') expiryField = 'impact_expiry_date';
+                  
+                  // Exclude expired lots from the available volume calculation
+                  if (expiryField && isExpired(stock[expiryField as keyof CertifiedStock] as string)) {
+                      minComboBalance = 0;
+                      return;
+                  }
+
+                  let baseVolume = 0;
+                  let allocatedVolume = 0;
+                  
+                  if (cert === 'AAA') {
+                      baseVolume = asNumber(stock.aaa_volume);
+                      allocatedVolume = asNumber(stock.aaa_allocated_weight);
+                  } else if (cert === 'AAA-RS') {
+                      baseVolume = asNumber(stock.aaa_rs_volume);
+                      allocatedVolume = asNumber(stock.aaa_rs_allocated_weight);
+                  } else {
+                      baseVolume = asNumber(stock.purchased_weight);
+                      const c = cert.replace(/[^A-Z0-9-]/g, '');
+                      let fieldName = '';
+                      if (c === 'NETZERO') fieldName = 'netzero_allocated_weight';
+                      else fieldName = `${c.toLowerCase()}_allocated_weight`;
+                      
+                      allocatedVolume = asNumber(stock[fieldName as keyof CertifiedStock]);
+                  }
+                  
+                  const certBalance = Math.max(0, baseVolume - allocatedVolume);
+                  if (certBalance < minComboBalance) {
+                      minComboBalance = certBalance;
+                  }
+              });
+
+              if (minComboBalance > 0 && minComboBalance !== Infinity) {
+                  summaryMap.get(combo)!.available += minComboBalance;
+              }
+          }
+      });
+    });
+
+    return Array.from(summaryMap.values())
+      .map(r => ({ ...r, net: r.available - r.pending }))
+      .sort((a, b) => a.combo.localeCompare(b.combo));
+  }, [sales, enhancedStocks, positionView, positionRegions, applyRegionToExecSummary]);
+
+
+  // ⚡ ENHANCED POSITION TABLE GENERATOR
+  const { tableData, uniqueMonths, kpis } = useMemo(() => {
+    const certFlagMap: Record<CertType, keyof CertifiedStock> = {
+      'RFA': 'rfa_certified',
+      'CAFE': 'cafe_certified',
+      'NET ZERO': 'netzero_project',
+      'EUDR': 'eudr_certified',
+      'AAA': 'aaa_project',
+      'AAA-RS': 'aaa_rs_volume'
+    };
+    const flag = certFlagMap[activeCert];
+
+    const certHolderMap: Partial<Record<CertType, keyof CertifiedStock>> = {
+      'RFA': 'rfa_certificate_holder',
+      'CAFE': 'cafe_certificate_holder',
+      'EUDR': 'eudr_certificate_holder',
+    };
+    const holderFlag = certHolderMap[activeCert];
+
+    // Single unified row object 
+    const unifiedRecord = { available: 0, shipmentsByMonth: {} as Record<string, number>, totalShipment: 0 };
+
+    let totalStockKg = 0;
+    let totalShortsKg = 0;
+    let totalSupplyChainKg = 0; 
+    const monthsSet = new Set<string>();
+
+    const today = new Date();
+    const todayStr = today.toISOString().slice(0, 10);
+    const isExpired = (dateStr?: string) => dateStr ? dateStr < todayStr : false;
+
+    const currentMonth = today.getMonth();
+    const startYear = currentMonth < 8 ? today.getFullYear() - 1 : today.getFullYear();
+    const seasonStartDate = new Date(startYear, 8, 1).getTime();
+    const seasonEndDate = new Date(startYear + 1, 7, 31, 23, 59, 59, 999).getTime();
+
+    enhancedStocks.forEach(stock => {
+      if (positionRegions.size > 0) {
+          const stockMatches = positionRegions.has(stock.county || '') || positionRegions.has('Anywhere');
+          if (!stockMatches) return;
+      }
+
+      let isCertified = false;
+      if (activeCert === 'AAA') isCertified = isPureAAA(stock);
+      else if (activeCert === 'AAA-RS') isCertified = asNumber(stock.aaa_rs_volume) > 0;
+      else isCertified = bool(stock[flag]);
+      
+      if (isCertified) {
+        const expiryFieldMap: Record<CertType, keyof CertifiedStock | null> = {
+            'RFA': 'rfa_expiry_date',
+            'CAFE': 'cafe_expiry_date',
+            'EUDR': 'eudr_expiry_date',
+            'NET ZERO': null,
+            'AAA': null,
+            'AAA-RS': null
+        };
+        const expField = expiryFieldMap[activeCert];
+        
+        if (expField && isExpired(stock[expField] as string)) {
+            return;
+        }
+
+        if (positionView === 'crop_year') {
+           if (!stock.recorded_date) return;
+           const recTime = new Date(stock.recorded_date).getTime();
+           if (Number.isNaN(recTime) || recTime < seasonStartDate || recTime > seasonEndDate) return;
+        }
+
+        const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
+        if (isDual && activeCert === 'AAA') return; 
+
+        let rawWeight = 0;
+        let allocatedWeight = 0;
+        
+        if (activeCert === 'AAA') {
+            rawWeight = asNumber(stock.aaa_volume);
+            allocatedWeight = asNumber(stock.aaa_allocated_weight);
+        } else if (activeCert === 'AAA-RS') {
+            rawWeight = asNumber(stock.aaa_rs_volume);
+            allocatedWeight = asNumber(stock.aaa_rs_allocated_weight);
+        } else {
+            rawWeight = asNumber(stock.purchased_weight);
+            const field = certToField(activeCert);
+            allocatedWeight = field ? asNumber(stock[field as keyof CertifiedStock]) : 0;
+        }
+
+        const weight = Math.max(0, rawWeight - allocatedWeight); 
+        if (weight <= 0) return; 
+
+        unifiedRecord.available += weight;
+        totalStockKg += weight; 
+
+        if (holderFlag && stock[holderFlag]) {
+          const holderName = String(stock[holderFlag]).toLowerCase();
+          if (holderName.includes('kenyacof')) {
+            totalSupplyChainKg += weight;
+          }
+        }
+      }
+    });
+
+    sales.forEach(sale => {
+      if (positionRegions.size > 0) {
+          const saleMatches = positionRegions.has(sale.region || '') || (positionRegions.has('Anywhere') && (!sale.region || sale.region.trim() === ''));
+          if (!saleMatches) return;
+      }
+
+      const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+      if (isallocated) return;
+
+      const certList = parseCerts(sale.certifications);
+      const isMatch = certList.includes(activeCert);
+
+      if (isMatch) {
+        const monthKey = sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : 'Unscheduled';
+        const rawSaleWeight = String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '');
+        const weight = Math.abs(Number(rawSaleWeight) || 0); 
+        
+        unifiedRecord.shipmentsByMonth[monthKey] = (unifiedRecord.shipmentsByMonth[monthKey] || 0) + weight;
+        unifiedRecord.totalShipment += weight;
+        
+        totalShortsKg += weight;
+        monthsSet.add(monthKey); 
+      }
+    });
+
+    const sortedMonths = Array.from(monthsSet).sort((a, b) => {
+      if (a === 'Unscheduled') return 1;
+      if (b === 'Unscheduled') return -1;
+      return new Date(a).getTime() - new Date(b).getTime();
+    });
+
+    const rows = [{
+      ...unifiedRecord,
+      netPosition: unifiedRecord.available - unifiedRecord.totalShipment
+    }];
+
+    return {
+      tableData: rows,
+      uniqueMonths: sortedMonths,
+      kpis: {
+        stock: totalStockKg,
+        supplyChainStock: totalSupplyChainKg, 
+        shorts: totalShortsKg,
+        net: totalStockKg - totalShortsKg
+      }
+    };
+  }, [activeCert, enhancedStocks, sales, positionView, positionRegions]); 
+
 
   if (loading) {
     return (
@@ -1679,7 +1977,221 @@ export default function CertificationsPage() {
         </div>
       </div>
 
-      {/* --- MODALS --- */}
+      {/* --- REPLACEMENT MODAL --- */}
+      {replaceModalState.isOpen && (
+         <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+            <div className="bg-white w-full max-w-5xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 max-h-[90vh]">
+               <div className="flex items-center justify-between px-6 py-4 bg-[#51534a] text-white">
+                  <div>
+                      <h3 className="font-bold text-lg">Replace Lot {replaceModalState.oldLotNumber}</h3>
+                      <p className="text-xs text-white/70">Select valid lots to replace the {formatQty(replaceModalState.replacedVolume, unit)} {unit} allocated from this lot.</p>
+                  </div>
+                  <div className="flex items-center gap-4">
+                      <div className="flex flex-col items-end mr-4">
+                          <span className="text-[10px] uppercase tracking-wider font-bold text-white/70">Selected Weight</span>
+                          <span className={`text-xl font-bold ${selectedReplacementWeight >= replaceModalState.replacedVolume ? 'text-[#97D700]' : 'text-white'}`}>
+                              {formatQty(selectedReplacementWeight, unit)} <span className="text-sm font-normal text-white/70">/ {formatQty(replaceModalState.replacedVolume, unit)} {unit}</span>
+                          </span>
+                      </div>
+                      <button onClick={() => { setReplaceModalState(prev => ({...prev, isOpen: false})); setReplacementSelected(new Set()); }} className="text-white hover:text-red-400 p-1 rounded-full bg-white/10 hover:bg-white/20 transition-all">
+                          <X size={20} />
+                      </button>
+                  </div>
+               </div>
+               
+               <div className="flex-1 overflow-y-auto p-0 bg-[#F5F5F3]">
+                   <table className="w-full text-sm text-left whitespace-nowrap">
+                       <thead className="bg-[#EFEFE9] text-[#51534a] font-bold sticky top-0 z-10 text-[10px] uppercase tracking-wider border-b border-[#D6D2C4]">
+                           <tr>
+                               <th className="py-3 px-4 w-12 text-center">Sel</th>
+                               <th className="py-3 px-4">Lot Number</th>
+                               <th className="py-3 px-4">Grade</th>
+                               <th className="py-3 px-4">Cooperative / Wet Mill</th>
+                               <th className="py-3 px-4 text-right">Physical Capacity</th>
+                               <th className="py-3 px-4 text-right bg-[#A4DBE8]/20 border-l border-[#D6D2C4]/50">Available Bottleneck</th>
+                           </tr>
+                       </thead>
+                       <tbody className="divide-y divide-[#D6D2C4]">
+                           {replacementValidStocks.length > 0 ? replacementValidStocks.map(stock => (
+                               <tr key={stock.id} onClick={() => {
+                                   const newSet = new Set(replacementSelected);
+                                   if (newSet.has(stock.id)) newSet.delete(stock.id);
+                                   else newSet.add(stock.id);
+                                   setReplacementSelected(newSet);
+                               }} className={`cursor-pointer transition-colors ${replacementSelected.has(stock.id) ? 'bg-[#007680]/10' : 'bg-white hover:bg-[#D6D2C4]/20'}`}>
+                                   <td className="py-3 px-4 text-center">
+                                       <input type="checkbox" readOnly checked={replacementSelected.has(stock.id)} className="w-4 h-4 accent-[#007680] text-[#007680] rounded" />
+                                   </td>
+                                   <td className="py-3 px-4 font-bold text-[#007680]">{stock.lot_number}</td>
+                                   <td className="py-3 px-4 text-[#51534a]">{stock.grade || '-'}</td>
+                                   <td className="py-3 px-4 text-[#51534a]">
+                                       <div className="flex flex-col">
+                                           <span>{stock.cooperative || '-'}</span>
+                                           <span className="text-[10px] text-[#968C83]">{stock.wet_mill || '-'}</span>
+                                       </div>
+                                   </td>
+                                   <td className="py-3 px-4 text-right text-[#968C83]">{formatQty(stock.purchased_weight, unit)}</td>
+                                   <td className="py-3 px-4 text-right font-bold text-[#5B3427] bg-[#A4DBE8]/10 border-l border-[#D6D2C4]/50">
+                                       {formatQty(stock._replacementCap || 0, unit)}
+                                   </td>
+                               </tr>
+                           )) : (
+                               <tr><td colSpan={6} className="py-12 text-center text-[#968C83] italic">No valid replacement lots exist in the physical stock pool that meet the strict requirements of this contract.</td></tr>
+                           )}
+                       </tbody>
+                   </table>
+               </div>
+               
+               <div className="p-4 border-t border-[#D6D2C4] bg-white flex justify-end gap-3 items-center">
+                   {selectedReplacementWeight < replaceModalState.replacedVolume && replacementSelected.size > 0 && (
+                       <span className="text-xs font-bold text-[#B9975B] mr-4">Select more lots to cover the deficit.</span>
+                   )}
+                   <button type="button" onClick={() => { setReplaceModalState(prev => ({...prev, isOpen: false})); setReplacementSelected(new Set()); }} className="px-5 py-2 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
+                   <button 
+                       type="button" 
+                       onClick={submitReplacement}
+                       disabled={isReplacing || selectedReplacementWeight < replaceModalState.replacedVolume}
+                       className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm flex items-center gap-2 disabled:opacity-50"
+                   >
+                       {isReplacing ? <RefreshCw size={16} className="animate-spin" /> : <Check size={16} />}
+                       Confirm Replacement
+                   </button>
+               </div>
+            </div>
+         </div>
+      )}
+
+      {/* --- DECLARATION VIEW MODAL --- */}
+      {viewingDeclarationContract && (() => {
+          const contract = allocatedContractsSummary.find(c => c.contract_id === viewingDeclarationContract);
+          if (!contract) return null;
+          
+          const activeLots = contract.lots.filter(l => {
+              const field = certToField(declarationModalCert);
+              return field && asNumber(l[field as keyof DeclarationRow]) > 0;
+          });
+          
+          const totalallocated = activeLots.reduce((sum, l) => sum + asNumber(l[certToField(declarationModalCert) as keyof DeclarationRow]), 0);
+          
+          return (
+              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+                  <div className="bg-white w-full max-w-6xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8 max-h-[90vh]">
+                      <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-[#F5F5F3]">
+                          <div>
+                              <h3 className="font-bold text-[#51534a] text-lg">Declaration Details: {contract.contract_number}</h3>
+                              <p className="text-xs text-[#968C83]">Client: {contract.client || '-'} · Contract Weight: {formatQty(contract.contract_weight, unit)} {unitText(unit)}</p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                              <button 
+                                onClick={() => handleDownloadDeclaration(contract.contract_id)}
+                                className="bg-[#007680] text-white hover:bg-[#007680]/90 px-4 py-2 rounded-lg text-sm font-bold transition-all shadow-sm flex items-center gap-2"
+                              >
+                                  <Download size={14} /> Export Report
+                              </button>
+                              <div className="w-px h-6 bg-[#D6D2C4] mx-1"></div>
+                              <button 
+                                onClick={() => setContractToDelete(contract.contract_id)} 
+                                className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors"
+                              >
+                                  Delete Allocation
+                              </button>
+                              <button onClick={() => setViewingDeclarationContract(null)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/50 ml-1">
+                                  <X size={20} />
+                              </button>
+                          </div>
+                      </div>
+                      
+                      <div className="flex border-b border-[#D6D2C4] px-6 bg-white overflow-x-auto">
+                          {Array.from(contract.certs).map(cert => (
+                              <button 
+                                  key={cert}
+                                  onClick={() => setDeclarationModalCert(cert as string)}
+                                  className={`px-4 py-3 text-sm font-bold border-b-2 transition-colors ${declarationModalCert === cert ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a]'}`}
+                              >
+                                  {cert as string}
+                              </button>
+                          ))}
+                          {contract.certs.size === 0 && (
+                             <span className="py-3 text-sm font-medium text-[#968C83] italic">No active certifications recorded.</span>
+                          )}
+                      </div>
+                      
+                      <div className="p-6 overflow-y-auto bg-[#F5F5F3] flex-1">
+                          <div className="bg-white border border-[#D6D2C4] rounded-xl overflow-hidden shadow-sm">
+                              <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
+                                  <table className="w-full text-sm text-left whitespace-nowrap">
+                                      <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
+                                          <tr>
+                                              <th className="py-3 px-4">Lot Number</th>
+                                              <th className="py-3 px-4">Grade</th>
+                                              <th className="py-3 px-4">Strategy</th>
+                                              <th className="py-3 px-4">Cooperative / Wet Mill</th>
+                                              <th className="py-3 px-4 text-right">Lot Purch. Weight</th>
+                                              <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">allocated ({unitText(unit)})</th>
+                                              <th className="py-3 px-4 text-center border-l border-white/10">Actions</th>
+                                          </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-[#D6D2C4]">
+                                          {activeLots.length > 0 ? activeLots.map((lot, idx) => (
+                                              <tr key={lot.stock_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
+                                                  <td className="py-3 px-4 font-bold text-[#007680]">{lot.lot_number}</td>
+                                                  <td className="py-3 px-4 text-[#51534a]">{lot.grade || '-'}</td>
+                                                  <td className="py-3 px-4 text-[#51534a]">{lot.strategy || '-'}</td>
+                                                  <td className="py-3 px-4 text-[#51534a]">
+                                                      <div className="flex flex-col">
+                                                          <span>{lot.cooperative || '-'}</span>
+                                                          <span className="text-[10px] text-[#968C83]">{lot.wet_mill || '-'}</span>
+                                                      </div>
+                                                  </td>
+                                                  <td className="py-3 px-4 text-right text-[#968C83]">{formatQty(asNumber(lot.lot_purchased_weight), unit)}</td>
+                                                  <td className="py-3 px-4 text-right font-bold text-[#007680] bg-[#A4DBE8]/10 border-l border-[#D6D2C4]/50">
+                                                      {formatQty(asNumber(lot[certToField(declarationModalCert) as keyof DeclarationRow]), unit)}
+                                                  </td>
+                                                  <td className="py-3 px-4 text-center border-l border-[#D6D2C4]/50">
+                                                      <button 
+                                                          onClick={() => {
+                                                              let maxVol = 0;
+                                                              const allallocatedFields = ['rfa_allocated_weight', 'eudr_allocated_weight', 'cafe_allocated_weight', 'impact_allocated_weight', 'aaa_allocated_weight', 'aaa_rs_allocated_weight', 'netzero_allocated_weight'];
+                                                              allallocatedFields.forEach(f => {
+                                                                  const v = asNumber(lot[f as keyof DeclarationRow]);
+                                                                  if (v > maxVol) maxVol = v;
+                                                              });
+                                                              setReplaceModalState({
+                                                                  isOpen: true,
+                                                                  contractId: contract.contract_id,
+                                                                  oldStockId: lot.stock_id,
+                                                                  contractCerts: Array.from(contract.certs) as string[],
+                                                                  replacedVolume: maxVol,
+                                                                  oldLotNumber: lot.lot_number
+                                                              });
+                                                          }}
+                                                          className="text-[#B9975B] hover:text-[#5B3427] font-bold text-[11px] uppercase tracking-wider underline underline-offset-2 transition-colors"
+                                                      >
+                                                          Replace Lot
+                                                      </button>
+                                                  </td>
+                                              </tr>
+                                          )) : (
+                                              <tr><td colSpan={7} className="py-8 text-center text-[#968C83] italic">No lots found for the {declarationModalCert} certification.</td></tr>
+                                          )}
+                                      </tbody>
+                                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
+                                          <tr>
+                                              <td colSpan={5} className="py-3 px-4 text-right">TOTAL {declarationModalCert} allocated:</td>
+                                              <td className="py-3 px-4 text-right text-[#007680] border-l border-[#D6D2C4]/50">{formatQty(totalallocated, unit)}</td>
+                                              <td className="py-3 px-4 bg-[#EFEFE9] border-l border-[#D6D2C4]/50"></td>
+                                          </tr>
+                                      </tfoot>
+                                  </table>
+                              </div>
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          );
+      })()}
+
+      {/* --- REMAINDER OF UI MODALS --- */}
       {isAddModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
           <div className="bg-[#EFEFE9] w-full max-w-4xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
@@ -1773,7 +2285,6 @@ export default function CertificationsPage() {
         </div>
       )}
 
-      {/* --- DECLARATION CONFIGURATION MODAL --- */}
       {isDeclaringConfigOpen && (() => {
         const declaringContract = sales.find(s => s.id === declaringContractId);
         return (
@@ -1802,7 +2313,6 @@ export default function CertificationsPage() {
             </div>
             
             <div className="p-5 flex flex-col sm:flex-row gap-5">
-              {/* Region Section */}
               <div className="flex-1 bg-white border border-[#D6D2C4] rounded-xl flex flex-col overflow-hidden shadow-sm">
                  <div className="px-4 py-3 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
                     <h4 className="font-bold text-[#51534a] text-sm">Region (County)</h4>
@@ -1815,7 +2325,7 @@ export default function CertificationsPage() {
                              <label key={region} className="flex items-start gap-2 p-2 hover:bg-[#F5F5F3] rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[#D6D2C4]/50">
                                 <input 
                                    type="checkbox" 
-                                   className="w-4 h-4 mt-0.5 text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                   className="w-4 h-4 mt-0.5 accent-[#007680] text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
                                    checked={selectedRegions.has(region)}
                                    onChange={(e) => {
                                       const newSet = new Set(selectedRegions);
@@ -1841,7 +2351,6 @@ export default function CertificationsPage() {
                  </div>
               </div>
 
-              {/* Grade Section */}
               <div className="flex-1 bg-white border border-[#D6D2C4] rounded-xl flex flex-col overflow-hidden shadow-sm">
                  <div className="px-4 py-3 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
                     <h4 className="font-bold text-[#51534a] text-sm">Grade</h4>
@@ -1854,7 +2363,7 @@ export default function CertificationsPage() {
                              <label key={grade} className="flex items-start gap-2 p-2 hover:bg-[#F5F5F3] rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[#D6D2C4]/50">
                                 <input 
                                    type="checkbox" 
-                                   className="w-4 h-4 mt-0.5 text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                   className="w-4 h-4 mt-0.5 accent-[#007680] text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
                                    checked={selectedGrades.has(grade)}
                                    onChange={(e) => {
                                       const newSet = new Set(selectedGrades);
@@ -1897,7 +2406,6 @@ export default function CertificationsPage() {
         );
       })()}
 
-      {/* --- MANUAL ADD SALES MODAL --- */}
       {isManualSalesModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-md rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
@@ -1970,14 +2478,27 @@ export default function CertificationsPage() {
                 </select>
               </div>
 
-              <div>
-                <label className="text-xs font-bold text-[#51534a] mb-1 block">Grade</label>
-                <input 
-                  type="text" placeholder="e.g. FAQ, AA, AB"
-                  className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none text-[#51534a]"
-                  value={manualSaleForm.grade}
-                  onChange={(e) => setManualSaleForm({...manualSaleForm, grade: e.target.value})}
-                />
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-bold text-[#51534a] mb-1 block">Grade</label>
+                  <input 
+                    type="text" placeholder="e.g. FAQ, AA, AB"
+                    className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none text-[#51534a]"
+                    value={manualSaleForm.grade}
+                    onChange={(e) => setManualSaleForm({...manualSaleForm, grade: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-[#51534a] mb-1 block">Region (County)</label>
+                  <select 
+                    className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                    value={manualSaleForm.region}
+                    onChange={(e) => setManualSaleForm({...manualSaleForm, region: e.target.value})}
+                  >
+                    <option value="">Unassigned</option>
+                    {uniqueRegions.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
               </div>
 
               <div>
@@ -2030,7 +2551,6 @@ export default function CertificationsPage() {
         </div>
       )}
 
-      {/* --- PURCHASE CONFIG MODAL --- */}
       {isPurchaseModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-sm rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
@@ -2046,7 +2566,7 @@ export default function CertificationsPage() {
                 <input 
                   type="checkbox" checked={isDirectSale} 
                   onChange={(e) => { setIsDirectSale(e.target.checked); if (e.target.checked) setPurchaseSaleNumber(''); }} 
-                  className="w-4 h-4 text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680] focus:ring-2" 
+                  className="w-4 h-4 accent-[#007680] text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680] focus:ring-2" 
                 />
                 <div className="flex flex-col">
                   <span className="text-sm font-bold text-[#51534a]">Direct Sale (DS)</span>
@@ -2072,104 +2592,6 @@ export default function CertificationsPage() {
           </div>
         </div>
       )}
-
-      {/* --- DECLARATION VIEW MODAL --- */}
-      {viewingDeclarationContract && (() => {
-          const contract = declaredContractsSummary.find(c => c.contract_id === viewingDeclarationContract);
-          if (!contract) return null;
-          
-          const activeLots = contract.lots.filter(l => {
-              const field = certToField(declarationModalCert);
-              return field && asNumber(l[field as keyof DeclarationRow]) > 0;
-          });
-          
-          const totalDeclared = activeLots.reduce((sum, l) => sum + asNumber(l[certToField(declarationModalCert) as keyof DeclarationRow]), 0);
-          
-          return (
-              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
-                  <div className="bg-white w-full max-w-5xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8 max-h-[90vh]">
-                      <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-[#F5F5F3]">
-                          <div>
-                              <h3 className="font-bold text-[#51534a] text-lg">Declaration Details: {contract.contract_number}</h3>
-                              <p className="text-xs text-[#968C83]">Client: {contract.client || '-'} · Contract Weight: {formatQty(contract.contract_weight, unit)} {unitText(unit)}</p>
-                          </div>
-                          <div className="flex items-center gap-3">
-                              <button 
-                                onClick={() => setContractToDelete(contract.contract_id)} 
-                                className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-3 py-1.5 rounded-lg text-sm font-bold transition-colors"
-                              >
-                                  Delete Allocation
-                              </button>
-                              <button onClick={() => setViewingDeclarationContract(null)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/50">
-                                  <X size={20} />
-                              </button>
-                          </div>
-                      </div>
-                      
-                      <div className="flex border-b border-[#D6D2C4] px-6 bg-white overflow-x-auto">
-                          {Array.from(contract.certs).map(cert => (
-                              <button 
-                                  key={cert}
-                                  onClick={() => setDeclarationModalCert(cert as string)}
-                                  className={`px-4 py-3 text-sm font-bold border-b-2 transition-colors ${declarationModalCert === cert ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a]'}`}
-                              >
-                                  {cert as string}
-                              </button>
-                          ))}
-                          {contract.certs.size === 0 && (
-                             <span className="py-3 text-sm font-medium text-[#968C83] italic">No active certifications recorded.</span>
-                          )}
-                      </div>
-                      
-                      <div className="p-6 overflow-y-auto bg-[#F5F5F3] flex-1">
-                          <div className="bg-white border border-[#D6D2C4] rounded-xl overflow-hidden shadow-sm">
-                              <div className="overflow-x-auto max-h-[50vh] overflow-y-auto">
-                                  <table className="w-full text-sm text-left whitespace-nowrap">
-                                      <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
-                                          <tr>
-                                              <th className="py-3 px-4">Lot Number</th>
-                                              <th className="py-3 px-4">Grade</th>
-                                              <th className="py-3 px-4">Strategy</th>
-                                              <th className="py-3 px-4">Cooperative / Wet Mill</th>
-                                              <th className="py-3 px-4 text-right">Lot Purch. Weight</th>
-                                              <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">Declared ({unitText(unit)})</th>
-                                          </tr>
-                                      </thead>
-                                      <tbody className="divide-y divide-[#D6D2C4]">
-                                          {activeLots.length > 0 ? activeLots.map((lot, idx) => (
-                                              <tr key={lot.stock_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
-                                                  <td className="py-3 px-4 font-bold text-[#007680]">{lot.lot_number}</td>
-                                                  <td className="py-3 px-4 text-[#51534a]">{lot.grade || '-'}</td>
-                                                  <td className="py-3 px-4 text-[#51534a]">{lot.strategy || '-'}</td>
-                                                  <td className="py-3 px-4 text-[#51534a]">
-                                                      <div className="flex flex-col">
-                                                          <span>{lot.cooperative || '-'}</span>
-                                                          <span className="text-[10px] text-[#968C83]">{lot.wet_mill || '-'}</span>
-                                                      </div>
-                                                  </td>
-                                                  <td className="py-3 px-4 text-right text-[#968C83]">{formatQty(asNumber(lot.lot_purchased_weight), unit)}</td>
-                                                  <td className="py-3 px-4 text-right font-bold text-[#007680] bg-[#A4DBE8]/10 border-l border-[#D6D2C4]/50">
-                                                      {formatQty(asNumber(lot[certToField(declarationModalCert) as keyof DeclarationRow]), unit)}
-                                                  </td>
-                                              </tr>
-                                          )) : (
-                                              <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No lots found for the {declarationModalCert} certification.</td></tr>
-                                          )}
-                                      </tbody>
-                                      <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
-                                          <tr>
-                                              <td colSpan={5} className="py-3 px-4 text-right">TOTAL {declarationModalCert} DECLARED:</td>
-                                              <td className="py-3 px-4 text-right text-[#007680] border-l border-[#D6D2C4]/50">{formatQty(totalDeclared, unit)}</td>
-                                          </tr>
-                                      </tfoot>
-                                  </table>
-                              </div>
-                          </div>
-                      </div>
-                  </div>
-              </div>
-          );
-      })()}
 
       {/* --- DELETE CONFIRMATION MODAL --- */}
       {contractToDelete && (
@@ -2211,7 +2633,7 @@ export default function CertificationsPage() {
               </div>
               Certification Positions
             </h1>
-            <p className="text-[#968C83] text-sm mt-1">Certification, Tracker, Contracts & Declarations</p>
+            <p className="text-[#968C83] text-sm mt-1">Certification, Tracker, Contracts & allocations</p>
           </div>
           
           <div className="flex items-center gap-2">
@@ -2249,14 +2671,7 @@ export default function CertificationsPage() {
           >
             <ListChecks size={16} /> Positions
           </button>
-          <button
-            onClick={() => setActiveTab('tracker')}
-            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'tracker' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
-            }`}
-          >
-            <Users size={16} /> Certified Stock Tracker
-          </button>
+          
           <button
             onClick={() => setActiveTab('contracts')}
             className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
@@ -2265,13 +2680,23 @@ export default function CertificationsPage() {
           >
             <FileSpreadsheet size={16} /> Contracts
           </button>
+
           <button
-            onClick={() => setActiveTab('declarations')}
+            onClick={() => setActiveTab('tracker')}
             className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
-              activeTab === 'declarations' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
+              activeTab === 'tracker' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
             }`}
           >
-            <FileCheck size={16} /> Declarations
+            <Users size={16} /> Certified Stock Tracker
+          </button>
+          
+          <button
+            onClick={() => setActiveTab('allocations')}
+            className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-4 transition-colors whitespace-nowrap ${
+              activeTab === 'allocations' ? 'border-[#007680] text-[#007680]' : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:border-[#968C83]/30'
+            }`}
+          >
+            <FileCheck size={16} /> Allocations
           </button>
         </div>
 
@@ -2289,7 +2714,7 @@ export default function CertificationsPage() {
                       <tr>
                         <th className="py-3 px-4">Contract Certificates</th>
                         <th className="py-3 px-4 text-right">Sold volume ({unitText(unit)})</th>
-                        <th className="py-3 px-4 text-right">Declared</th>
+                        <th className="py-3 px-4 text-right">allocated</th>
                         <th className="py-3 px-4 text-right">Pending Declaration</th>
                         <th className="py-3 px-4 text-right bg-[#007680] border-l border-white/10">Available volume</th>
                         <th className="py-3 px-4 text-right bg-[#B9975B] border-l border-white/10">Net position</th>
@@ -2300,7 +2725,7 @@ export default function CertificationsPage() {
                         <tr key={row.combo} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
                           <td className="py-2 px-4 font-bold text-[#007680]">{row.combo}</td>
                           <td className="py-2 px-4 text-right text-[#51534a]">{formatQty(row.sold, unit)}</td>
-                          <td className="py-2 px-4 text-right text-[#968C83]">{formatQty(row.declared, unit)}</td>
+                          <td className="py-2 px-4 text-right text-[#968C83]">{formatQty(row.allocated, unit)}</td>
                           <td className="py-2 px-4 text-right text-[#5B3427] font-medium">{formatQty(row.pending, unit)}</td>
                           <td className="py-2 px-4 text-right font-bold text-[#007680] bg-[#A4DBE8]/10 border-l border-[#D6D2C4]/50">{formatQty(row.available, unit)}</td>
                           <td className={`py-2 px-4 text-right font-bold border-l border-[#D6D2C4]/50 ${row.net >= 0 ? 'text-[#97D700]' : 'text-red-500'}`}>{formatQty(row.net, unit)}</td>
@@ -2327,29 +2752,125 @@ export default function CertificationsPage() {
                     </div>
                   </div>
 
-                  {/* View Mode Toggle */}
-                  <div className="flex bg-[#F5F5F3] p-1 rounded-lg border border-[#D6D2C4] shadow-sm">
-                    <button
-                      onClick={() => setPositionView('true_position')}
-                      className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
-                        positionView === 'true_position' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
-                      }`}
-                    >
-                      True Position
-                    </button>
-                    <button
-                      onClick={() => setPositionView('crop_year')}
-                      className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
-                        positionView === 'crop_year' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
-                      }`}
-                    >
-                      Crop Year
-                    </button>
+                  {/* View Mode Toggles & Global Region Filter */}
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="flex items-center gap-3">
+                      <div className="flex flex-col gap-1 items-end relative" ref={regionFilterRef}>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setIsRegionFilterOpen(!isRegionFilterOpen)}
+                            className="flex items-center gap-2 bg-[#F5F5F3] px-3 py-1.5 rounded-lg border border-[#D6D2C4] shadow-sm"
+                          >
+                            <MapPin size={14} className="text-[#968C83]" />
+                            <span className="text-xs font-bold text-[#007680]">
+                              {positionRegions.size === 0 ? "All Regions" : `${positionRegions.size} Selected`}
+                            </span>
+                            <ChevronDown size={14} className="text-[#968C83]" />
+                          </button>
+                          
+                          <label className="flex items-center gap-1.5 cursor-pointer bg-white px-2 py-1.5 rounded border border-[#D6D2C4] shadow-sm hover:bg-[#F5F5F3] transition-colors">
+                              <input 
+                                type="checkbox" 
+                                className="w-3.5 h-3.5 text-[#007680] accent-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                checked={applyRegionToExecSummary}
+                                onChange={e => setApplyRegionToExecSummary(e.target.checked)}
+                              />
+                              <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">Apply to Summary</span>
+                          </label>
+                        </div>
+
+                        {isRegionFilterOpen && (
+                            <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-[#D6D2C4] rounded-lg shadow-xl z-50 p-2 max-h-60 overflow-y-auto">
+                                <label className="flex items-center gap-2 p-1.5 hover:bg-[#F5F5F3] rounded cursor-pointer transition-colors">
+                                    <input
+                                      type="checkbox"
+                                      className="w-4 h-4 text-[#007680] accent-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                      checked={positionRegions.size === 0}
+                                      onChange={() => setPositionRegions(new Set())}
+                                    />
+                                    <span className="text-sm font-medium text-[#51534a]">All Regions</span>
+                                </label>
+                                <div className="h-px bg-[#D6D2C4] my-1"></div>
+                                <label className="flex items-center gap-2 p-1.5 hover:bg-[#F5F5F3] rounded cursor-pointer transition-colors">
+                                    <input
+                                      type="checkbox"
+                                      className="w-4 h-4 text-[#007680] accent-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                      checked={positionRegions.has('Anywhere')}
+                                      onChange={(e) => {
+                                          const next = new Set(positionRegions);
+                                          if (e.target.checked) next.add('Anywhere');
+                                          else next.delete('Anywhere');
+                                          setPositionRegions(next);
+                                      }}
+                                    />
+                                    <span className="text-sm font-bold text-[#51534a]">Anywhere (Unassigned)</span>
+                                </label>
+                                {uniqueRegions.map(r => (
+                                    <label key={r} className="flex items-center gap-2 p-1.5 hover:bg-[#F5F5F3] rounded cursor-pointer transition-colors">
+                                      <input
+                                          type="checkbox"
+                                          className="w-4 h-4 text-[#007680] accent-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
+                                          checked={positionRegions.has(r)}
+                                          onChange={(e) => {
+                                              const next = new Set(positionRegions);
+                                              if (e.target.checked) next.add(r);
+                                              else next.delete(r);
+                                              setPositionRegions(next);
+                                          }}
+                                      />
+                                      <span className="text-sm font-medium text-[#51534a] truncate">{r}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                      </div>
+
+                      <div className="flex bg-[#F5F5F3] p-1 rounded-lg border border-[#D6D2C4] shadow-sm">
+                        <button
+                          onClick={() => setPositionView('true_position')}
+                          className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
+                            positionView === 'true_position' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
+                          }`}
+                        >
+                          True Position
+                        </button>
+                        <button
+                          onClick={() => setPositionView('crop_year')}
+                          className={`px-4 py-1.5 rounded-md text-xs font-bold transition-all ${
+                            positionView === 'crop_year' ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'
+                          }`}
+                        >
+                          Crop Year
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Selected Region Badges */}
+                    {positionRegions.size > 0 && (
+                       <div className="flex flex-wrap justify-end gap-1.5 mt-1 max-w-[400px]">
+                          {Array.from(positionRegions).map(r => (
+                             <span key={r} className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-[#007680]/10 text-[#007680] border border-[#007680]/20 text-[10px] font-bold rounded-full">
+                               {r === 'Anywhere' ? 'Anywhere (Unassigned)' : r}
+                               <button 
+                                 type="button"
+                                 onClick={() => {
+                                   const next = new Set(positionRegions);
+                                   next.delete(r);
+                                   setPositionRegions(next);
+                                 }}
+                                 className="hover:text-red-500 hover:bg-red-50 rounded-full p-0.5 transition-colors"
+                               >
+                                 <X size={10} />
+                               </button>
+                             </span>
+                          ))}
+                       </div>
+                    )}
                   </div>
                 </div>
                 
                 <div className="text-xs text-[#968C83] italic">
-                  Showing {positionView === 'crop_year' ? 'Current Season' : 'All-Time'} undeclared balances for {activeCert} {PROJECTS_LIST.includes(activeCert as any) ? 'project' : 'certificate'} strategies.
+                  Showing {positionView === 'crop_year' ? 'Current Season' : 'All-Time'} unallocated balances for {positionRegions.size === 0 ? 'all regions' : `${positionRegions.size} selected region(s)`} on {activeCert} {PROJECTS_LIST.includes(activeCert as any) ? 'project' : 'certificate'} strategies.
                 </div>
               </div>
             </>
@@ -2399,8 +2920,7 @@ export default function CertificationsPage() {
                 <table className="w-full text-sm text-left whitespace-nowrap">
                   <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
                     <tr>
-                      <th className="py-2 px-4 w-1/4">Strategy</th>
-                      <th className="py-2 px-4 text-right">Available ({unit})</th>
+                      <th className="py-2 px-4 text-right w-1/4">Available ({unit})</th>
                       {uniqueMonths.map(month => (
                         <th key={month} className="py-2 px-4 text-right bg-[#5B3427]">{month}</th>
                       ))}
@@ -2409,39 +2929,50 @@ export default function CertificationsPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#D6D2C4]">
-                    {tableData.length > 0 ? tableData.map((row) => (
-                      <tr key={row.strategy} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
-                        <td className="py-1.5 px-4 font-medium text-[#007680]">{row.strategy}</td>
-                        <td className="py-1.5 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
-                        {uniqueMonths.map(month => {
-                          const val = row.shipmentsByMonth[month] || 0;
-                          return <td key={month} className="py-1.5 px-4 text-right text-[#968C83]">{Math.abs(val) > 0.01 ? formatNumber(convertQty(val, unit)) : '-'}</td>;
-                        })}
-                        <td className="py-1.5 px-4 text-right font-medium text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
-                        <td className={`py-1.5 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                          {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
-                        </td>
-                      </tr>
-                    )) : (
-                      <tr><td colSpan={uniqueMonths.length + 4} className="py-8 text-center text-[#968C83] italic">No {activeCert} positions found.</td></tr>
+                    {tableData.length > 0 && (kpis.stock > 0 || kpis.shorts > 0) ? tableData.map((row, idx) => {
+                      let rollingBalance = row.available;
+                      
+                      return (
+                        <tr key={idx} className="bg-white hover:bg-[#D6D2C4]/20 transition-colors group">
+                          <td className="py-3 px-4 text-right font-bold text-[#51534a] bg-[#F5F5F3]">{formatNumber(convertQty(row.available, unit))}</td>
+                          {uniqueMonths.map(month => {
+                            const val = row.shipmentsByMonth[month] || 0;
+                            let display = <span className="text-[#D6D2C4]">-</span>;
+
+                            if (Math.abs(val) > 0.01) {
+                                const previousBal = rollingBalance;
+                                rollingBalance -= val;
+                                
+                                if (previousBal <= 0.01) {
+                                    // Ran out of volume completely
+                                    display = <span className="text-red-500 font-bold">-{formatNumber(convertQty(val, unit))}</span>;
+                                } else if (rollingBalance < -0.01) {
+                                    // Have some volume, but less than needed (became short)
+                                    const shortfall = Math.abs(rollingBalance);
+                                    display = (
+                                        <div className="flex flex-col items-end leading-tight text-red-500">
+                                            <span className="text-[10px] font-bold">Short: {formatNumber(convertQty(shortfall, unit))}</span>
+                                            <span className="font-bold">{formatNumber(convertQty(val, unit))}</span>
+                                        </div>
+                                    );
+                                } else {
+                                    // Enough volume
+                                    display = <span className="text-[#968C83] font-medium">{formatNumber(convertQty(val, unit))}</span>;
+                                }
+                            }
+                            
+                            return <td key={month} className="py-3 px-4 text-right align-middle">{display}</td>;
+                          })}
+                          <td className="py-3 px-4 text-right font-bold text-[#5B3427] bg-[#B9975B]/5 border-l border-[#D6D2C4]/50">{formatNumber(convertQty(row.totalShipment, unit))}</td>
+                          <td className={`py-3 px-4 text-right font-bold border-l border-[#D6D2C4]/50 bg-[#A4DBE8]/10 ${row.netPosition >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
+                            {row.netPosition > 0 ? '+' : ''}{formatNumber(convertQty(row.netPosition, unit))}
+                          </td>
+                        </tr>
+                      );
+                    }) : (
+                      <tr><td colSpan={uniqueMonths.length + 3} className="py-8 text-center text-[#968C83] italic">No positions found for the selected view.</td></tr>
                     )}
                   </tbody>
-                  {tableData.length > 0 && (
-                     <tfoot className="bg-[#EFEFE9] sticky bottom-0 border-t-2 border-[#D6D2C4] shadow-inner font-bold text-[#51534a]">
-                        <tr>
-                           <td className="py-2 px-4">TOTALS</td>
-                           <td className="py-2 px-4 text-right">{formatNumber(convertQty(kpis.stock, unit))}</td>
-                           {uniqueMonths.map(month => {
-                              const monthTotal = tableData.reduce((sum, row) => sum + (row.shipmentsByMonth[month] || 0), 0);
-                              return <td key={month} className="py-2 px-4 text-right text-[#5B3427]">{Math.abs(monthTotal) > 0.01 ? formatNumber(convertQty(monthTotal, unit)) : '-'}</td>;
-                           })}
-                           <td className="py-2 px-4 text-right text-[#5B3427] border-l border-[#D6D2C4]/50">{formatNumber(convertQty(kpis.shorts, unit))}</td>
-                           <td className={`py-2 px-4 text-right border-l border-[#D6D2C4]/50 ${kpis.net >= 0 ? 'text-[#007680]' : 'text-[#B9975B]'}`}>
-                              {kpis.net > 0 ? '+' : ''}{formatNumber(convertQty(kpis.net, unit))}
-                           </td>
-                        </tr>
-                     </tfoot>
-                  )}
                 </table>
               </div>
             </Card>
@@ -2500,7 +3031,7 @@ export default function CertificationsPage() {
                       type="button"
                       onClick={() => {
                         setTrackerDateStartFilter(trackerDateStartDraft);
-                        setTrackerDateEndFilter(trackerDateEndFilter);
+                        setTrackerDateEndFilter(trackerDateEndDraft);
                       }}
                       disabled={!trackerDateStartDraft && !trackerDateEndDraft}
                       className="rounded-lg bg-[#007680] px-4 py-2 text-sm font-bold text-white shadow-sm disabled:opacity-50"
@@ -2532,60 +3063,28 @@ export default function CertificationsPage() {
                   <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                     <div className="flex items-start justify-between gap-4">
                       <div>
-                        <div className="text-sm font-bold text-[#51534a]">Expiring Soon</div>
-                        <div className="mt-1 text-xs text-[#968C83]">Expiry status for the current tracker view</div>
+                        <div className="text-sm font-bold text-[#51534a]">Data Distribution</div>
+                        <div className="mt-1 text-xs text-[#968C83]">Current visible volume allocations</div>
                       </div>
                       <div className="rounded-full bg-[#A4DBE8]/30 px-3 py-1 text-xs font-bold text-[#007680]">
                         {trackerSelectedLabel}
                       </div>
                     </div>
 
-                    <div className="mt-5 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
-                      <div className="rounded-2xl bg-[#F5F5F3] p-4">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-[#968C83]">Expiry counts</div>
-                        <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-                          <div className="rounded-xl bg-white p-3">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">Expired</div>
-                            <div className="mt-1 text-2xl font-bold text-[#B9975B]">{trackerExpirySummary.expired}</div>
-                          </div>
-                          <div className="rounded-xl bg-white p-3">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">0-7 days</div>
-                            <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within7}</div>
-                          </div>
-                          <div className="rounded-xl bg-white p-3">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">8-30 days</div>
-                            <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within30}</div>
-                          </div>
-                          <div className="rounded-xl bg-white p-3">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">31-60 days</div>
-                            <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within60}</div>
-                          </div>
-                          <div className="rounded-xl bg-white p-3">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">61-90 days</div>
-                            <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within90}</div>
-                          </div>
-                          <div className="rounded-xl bg-white p-3">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[#968C83]">91-120 days</div>
-                            <div className="mt-1 text-2xl font-bold text-[#007680]">{trackerExpirySummary.within120}</div>
-                          </div>
+                    <div className="mt-5 space-y-3 rounded-2xl border border-[#D6D2C4] bg-[#FCF7EA] p-4 text-sm text-[#51534a]">
+                      <div className="flex justify-between gap-3"><span>Total lots in view</span><span className="font-bold">{trackerVisibleRecordCount}</span></div>
+                      <div className="flex justify-between gap-3"><span>Lots with expiry dates</span><span className="font-bold">{trackerExpirySummary.totalWithExpiry}</span></div>
+                      <div className="flex justify-between gap-3"><span>Lots without expiry</span><span className="font-bold">{trackerExpirySummary.noExpiry}</span></div>
+                      <div className="flex justify-between gap-3"><span>Next expiry lot</span><span className="font-bold">{trackerExpirySummary.nextExpiryLot}</span></div>
+                      <div className="flex justify-between gap-3"><span>Next expiry date</span><span className="font-bold">{trackerExpirySummary.nextExpiryLabel}</span></div>
+                      <div className="flex justify-between gap-3"><span>Next expiry status</span><span className="font-bold">{trackerExpirySummary.nextExpiryDays === null ? "—" : trackerExpirySummary.nextExpiryDays < 0 ? "Expired" : `${trackerExpirySummary.nextExpiryDays} days`}</span></div>
+                      <div className="flex justify-between gap-3"><span>Average expiry days</span><span className="font-bold">{trackerExpirySummary.averageDays === null ? "—" : `${trackerExpirySummary.averageDays} days`}</span></div>
+                      
+                      {trackerExpirySummary.totalWithExpiry === 0 ? (
+                        <div className="rounded-xl bg-white p-3 text-xs text-[#968C83]">
+                          No expiry dates are available for this view. AAA allocations are tracked separately from the certificate expiry fields.
                         </div>
-                      </div>
-
-                      <div className="space-y-3 rounded-2xl border border-[#D6D2C4] bg-[#FCF7EA] p-4 text-sm text-[#51534a]">
-                        <div className="flex justify-between gap-3"><span>Total lots in view</span><span className="font-bold">{trackerVisibleRecordCount}</span></div>
-                        <div className="flex justify-between gap-3"><span>Lots with expiry dates</span><span className="font-bold">{trackerExpirySummary.totalWithExpiry}</span></div>
-                        <div className="flex justify-between gap-3"><span>Lots without expiry</span><span className="font-bold">{trackerExpirySummary.noExpiry}</span></div>
-                        <div className="flex justify-between gap-3"><span>Next expiry lot</span><span className="font-bold">{trackerExpirySummary.nextExpiryLot}</span></div>
-                        <div className="flex justify-between gap-3"><span>Next expiry date</span><span className="font-bold">{trackerExpirySummary.nextExpiryLabel}</span></div>
-                        <div className="flex justify-between gap-3"><span>Next expiry status</span><span className="font-bold">{trackerExpirySummary.nextExpiryDays === null ? "—" : trackerExpirySummary.nextExpiryDays < 0 ? "Expired" : `${trackerExpirySummary.nextExpiryDays} days`}</span></div>
-                        <div className="flex justify-between gap-3"><span>Average expiry days</span><span className="font-bold">{trackerExpirySummary.averageDays === null ? "—" : `${trackerExpirySummary.averageDays} days`}</span></div>
-                        
-                        {trackerExpirySummary.totalWithExpiry === 0 ? (
-                          <div className="rounded-xl bg-white p-3 text-xs text-[#968C83]">
-                            No expiry dates are available for this view. AAA allocations are tracked separately from the certificate expiry fields.
-                          </div>
-                        ) : null}
-                      </div>
+                      ) : null}
                     </div>
 
                     <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -2612,7 +3111,7 @@ export default function CertificationsPage() {
                     <div className="mt-5 rounded-2xl border border-[#D6D2C4] bg-[#F5F5F3] p-4">
                       <div className="mb-4 text-[11px] font-bold uppercase tracking-wider text-[#968C83]">Holder concentration</div>
                       <TrackerDonutChart 
-                         data={trackerHolderRows.map((row, i) => ({ ...row, color: ["#007680", "#B9975B", "#51534a", "#968C83", "#A4DBE8", "#5B3427"][i % 6] }))} 
+                         data={trackerHolderRows.map((row: { name: string; value: number }, i: number) => ({ ...row, color: ["#007680", "#B9975B", "#51534a", "#968C83", "#A4DBE8", "#5B3427"][i % 6] }))} 
                          unit={unit} 
                       />
                     </div>
@@ -2641,28 +3140,89 @@ export default function CertificationsPage() {
                       </div>
                     }
                   >
-                    <div className="overflow-x-auto rounded-xl border border-[#D6D2C4]">
+                    
+                    <div className="flex flex-wrap gap-2 mb-4">
+                        <div className="relative w-full sm:w-48">
+                            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
+                            <input 
+                                type="text" 
+                                placeholder="Search lot number..." 
+                                value={trackerSearchLot}
+                                onChange={(e) => setTrackerSearchLot(e.target.value)}
+                                className="w-full border border-[#D6D2C4] rounded-lg pl-8 pr-2 py-1.5 text-xs focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                            />
+                        </div>
+                        <select 
+                            value={trackerFilterExpiry} 
+                            onChange={e => setTrackerFilterExpiry(e.target.value as any)} 
+                            className="border border-[#D6D2C4] rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                        >
+                            <option value="ALL">All Expiry Status</option>
+                            <option value="VALID">Valid Lots Only</option>
+                            <option value="EXPIRED">Expired Lots Only</option>
+                        </select>
+                        <select 
+                            value={trackerFilterSeason} 
+                            onChange={e => setTrackerFilterSeason(e.target.value)} 
+                            className="border border-[#D6D2C4] rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                        >
+                            <option value="">All Seasons</option>
+                            {uniqueSeasons.map(s => <option key={s} value={s}>{s}</option>)}
+                        </select>
+                        <select 
+                            value={trackerFilterCounty} 
+                            onChange={e => setTrackerFilterCounty(e.target.value)} 
+                            className="border border-[#D6D2C4] rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                        >
+                            <option value="">All Counties</option>
+                            {uniqueRegions.map(r => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                        <select 
+                            value={trackerFilterWetmill} 
+                            onChange={e => setTrackerFilterWetmill(e.target.value)} 
+                            className="border border-[#D6D2C4] rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                        >
+                            <option value="">All Wet Mills</option>
+                            {uniqueWetmills.map(w => <option key={w} value={w}>{w}</option>)}
+                        </select>
+                        <select 
+                            value={trackerFilterGrade} 
+                            onChange={e => setTrackerFilterGrade(e.target.value)} 
+                            className="border border-[#D6D2C4] rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                        >
+                            <option value="">All Grades</option>
+                            {uniqueGrades.map(g => <option key={g} value={g}>{g}</option>)}
+                        </select>
+                    </div>
+
+                    <div className="overflow-x-auto overflow-y-auto max-h-[60vh] rounded-xl border border-[#D6D2C4]">
                       <table className="min-w-[1400px] w-full text-xs">
-                        <thead className="sticky top-0 bg-[#51534a] text-white">
+                        <thead className="sticky top-0 bg-[#51534a] text-white z-10">
                           <tr>
                             {trackerTableColumns.map((column) => (
                               <th key={column.key} className={`px-3 py-2 ${column.align === "right" ? "text-right" : column.align === "center" ? "text-center" : "text-left"}`}>{column.label}</th>
                             ))}
                           </tr>
                         </thead>
-                        <tbody>
-                          {trackerVisibleRows.length > 0 ? trackerVisibleRows.map((row, idx) => (
-                            <tr key={row.id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA]"}>
-                              {trackerTableColumns.map((column) => (
-                                <td key={column.key} className={`px-3 py-2 ${column.align === "right" ? "text-right" : column.align === "center" ? "text-center" : "text-left"}`}>
-                                  {column.render(row)}
-                                </td>
-                              ))}
-                            </tr>
-                          )) : (
+                        <tbody className="divide-y divide-[#D6D2C4]">
+                          {trackerVisibleRows.length > 0 ? trackerVisibleRows.map((row: any, idx: number) => {
+                            const isExpired = row.tracker_expiry_days !== null && row.tracker_expiry_days < 0;
+                            const rowClass = isExpired 
+                                ? "bg-red-50 hover:bg-red-100 transition-colors" 
+                                : (idx % 2 === 0 ? "bg-white hover:bg-[#D6D2C4]/20 transition-colors" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors");
+                            return (
+                                <tr key={row.id} className={rowClass}>
+                                  {trackerTableColumns.map((column: any) => (
+                                    <td key={column.key} className={`px-3 py-2 ${column.align === "right" ? "text-right" : column.align === "center" ? "text-center" : "text-left"}`}>
+                                      {column.render(row)}
+                                    </td>
+                                  ))}
+                                </tr>
+                            );
+                          }) : (
                             <tr>
                               <td colSpan={trackerTableColumns.length} className="px-3 py-8 text-center italic text-[#968C83]">
-                                No certified stock records match the selected certification or date range.
+                                No certified stock records match the selected filters.
                               </td>
                             </tr>
                           )}
@@ -2678,22 +3238,60 @@ export default function CertificationsPage() {
           {/* --- CONTRACTS TAB --- */}
           {activeTab === 'contracts' && (
             <div className="space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div className="relative w-full sm:w-96">
-                      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
-                      <input 
-                          type="text" 
-                          placeholder="Search contracts, clients, qualities..." 
-                          value={contractSearch}
-                          onChange={(e) => setContractSearch(e.target.value)}
-                          className="w-full border border-[#D6D2C4] rounded-lg pl-9 pr-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
-                      />
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-1">
+                      <div className="relative w-full sm:w-64 shrink-0">
+                          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
+                          <input 
+                              type="text" 
+                              placeholder="Search contracts, client..." 
+                              value={contractSearch}
+                              onChange={(e) => setContractSearch(e.target.value)}
+                              className="w-full border border-[#D6D2C4] rounded-lg pl-9 pr-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                          />
+                      </div>
+                      
+                      <div className="flex flex-wrap gap-2 flex-1">
+                          <select 
+                              value={contractFilterClient} 
+                              onChange={(e) => setContractFilterClient(e.target.value)}
+                              className="border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                          >
+                              <option value="">All Clients</option>
+                              {uniqueClients.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <select 
+                              value={contractFilterShipMonth} 
+                              onChange={(e) => setContractFilterShipMonth(e.target.value)}
+                              className="border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                          >
+                              <option value="">All Ship Dates</option>
+                              {uniqueShipMonths.map(m => <option key={m} value={m}>{m}</option>)}
+                          </select>
+                          <select 
+                              value={contractFilterRegion} 
+                              onChange={(e) => setContractFilterRegion(e.target.value)}
+                              className="border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                          >
+                              <option value="">All Regions</option>
+                              {uniqueRegions.map(r => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                          <select 
+                              value={contractFilterBlend} 
+                              onChange={(e) => setContractFilterBlend(e.target.value)}
+                              className="border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#007680] outline-none bg-white text-[#51534a]"
+                          >
+                              <option value="">All Blends</option>
+                              {blends.map(b => <option key={b.id} value={String(b.id)}>{b.name}</option>)}
+                          </select>
+                      </div>
                   </div>
-                  <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-2 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] transition-colors shadow-sm">
+
+                  <label className="flex items-center gap-3 cursor-pointer bg-white px-4 py-2 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] transition-colors shadow-sm shrink-0">
                       <input 
                           type="checkbox" 
-                          checked={showDeclaredContracts}
-                          onChange={(e) => setShowDeclaredContracts(e.target.checked)}
+                          checked={showallocatedContracts}
+                          onChange={(e) => setShowallocatedContracts(e.target.checked)}
                           className="w-4 h-4 text-[#007680] rounded focus:ring-[#007680]"
                       />
                       <span className="text-sm font-bold text-[#51534a]">Show All Contracts</span>
@@ -2707,10 +3305,11 @@ export default function CertificationsPage() {
                       <tr>
                         <th className="py-3 px-4">Contract</th>
                         <th className="py-3 px-4">Client</th>
-                        <th className="py-3 px-4 text-right">Weight (kg)</th>
+                        <th className="py-3 px-4 text-right">Weight ({unitText(unit)})</th>
                         <th className="py-3 px-4">Ship Date</th>
                         <th className="py-3 px-4">Quality</th>
                         <th className="py-3 px-4">Grade</th>
+                        <th className="py-3 px-4">Region</th>
                         <th className="py-3 px-4 w-1/4">Certifications</th>
                         <th className="py-3 px-4">Blend</th>
                         <th className="py-3 px-4 text-center">Actions</th>
@@ -2720,14 +3319,14 @@ export default function CertificationsPage() {
                       {filteredContracts.length > 0 ? filteredContracts.map((sale) => {
                         const isEditing = editingContractId === sale.id;
                         const displayCerts = parseCerts(sale.certifications);
-                        const isDeclared = bool(sale.certs_declared ?? (sale as any).certsDeclared);
+                        const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
 
                         return (
-                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isDeclared ? 'opacity-60' : ''}`}>
+                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isallocated ? 'opacity-60' : ''}`}>
                             <td className="py-3 px-4 font-bold text-[#51534a]">
                                 <div className="flex items-center gap-2">
-                                  {isDeclared && (
-                                     <span className="flex items-center justify-center text-[#007680]" title="Fully Declared">
+                                  {isallocated && (
+                                     <span className="flex items-center justify-center text-[#007680]" title="Fully allocated">
                                          <CheckCircle size={14} />
                                      </span>
                                   )}
@@ -2736,7 +3335,7 @@ export default function CertificationsPage() {
                             </td>
                             <td className="py-3 px-4 text-[#51534a]">{sale.client || '-'}</td>
                             <td className="py-3 px-4 text-right font-medium text-[#5B3427]">
-                                {formatNumber(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')))}
+                                {formatQty(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')), unit)}
                             </td>
                             <td className="py-3 px-4 text-[#968C83]">{sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : '-'}</td>
                             
@@ -2766,6 +3365,21 @@ export default function CertificationsPage() {
                                 />
                               ) : (
                                 <span className="text-[#51534a]">{sale.grade || '-'}</span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4">
+                              {isEditing ? (
+                                <select 
+                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
+                                  value={editForm.region}
+                                  onChange={(e) => setEditForm({...editForm, region: e.target.value})}
+                                >
+                                  <option value="">Unassigned</option>
+                                  {uniqueRegions.map(r => <option key={r} value={r}>{r}</option>)}
+                                </select>
+                              ) : (
+                                <span className="text-[#51534a]">{sale.region || '-'}</span>
                               )}
                             </td>
 
@@ -2864,7 +3478,7 @@ export default function CertificationsPage() {
                           </tr>
                         );
                       }) : (
-                        <tr><td colSpan={9} className="py-8 text-center text-[#968C83] italic">No contracts match your search or filter.</td></tr>
+                        <tr><td colSpan={10} className="py-8 text-center text-[#968C83] italic">No contracts match your search or filter.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -2873,9 +3487,9 @@ export default function CertificationsPage() {
             </div>
           )}
 
-          {/* --- DECLARATIONS TAB --- */}
-          {activeTab === "declarations" && (
-            <SectionCard title="Active Declarations" subtitle="Overview of all contracts with registered stock declarations.">
+          {/* --- allocations TAB --- */}
+          {activeTab === "allocations" && (
+            <SectionCard title="Active allocations" subtitle="Overview of all contracts with registered stock allocations.">
               <div className="overflow-x-auto max-h-[75vh] overflow-y-auto">
                 <table className="w-full text-sm text-left whitespace-nowrap">
                   <thead className="bg-[#51534a] text-white font-medium sticky top-0 z-10 text-xs uppercase tracking-wider">
@@ -2884,12 +3498,12 @@ export default function CertificationsPage() {
                       <th className="py-3 px-4">Client</th>
                       <th className="py-3 px-4 text-right">Weight ({unitText(unit)})</th>
                       <th className="py-3 px-4">Ship Date</th>
-                      <th className="py-3 px-4">Declared Certs</th>
+                      <th className="py-3 px-4">allocated Certs</th>
                       <th className="py-3 px-4 text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#D6D2C4]">
-                    {declaredContractsSummary.length > 0 ? declaredContractsSummary.map((c, idx) => (
+                    {allocatedContractsSummary.length > 0 ? allocatedContractsSummary.map((c, idx) => (
                       <tr key={c.contract_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
                         <td className="py-3 px-4 font-bold text-[#007680]">{c.contract_number}</td>
                         <td className="py-3 px-4 text-[#51534a]">{c.client || '-'}</td>
@@ -2908,14 +3522,14 @@ export default function CertificationsPage() {
                             <button 
                                 onClick={() => openDeclarationView(c.contract_id, Array.from(c.certs)[0] as string || "")} 
                                 className="rounded-lg p-1.5 text-[#007680] hover:bg-[#007680]/10 transition-colors" 
-                                title="View Declarations"
+                                title="View allocations"
                             >
                                 <Eye size={16} />
                             </button>
                         </td>
                       </tr>
                     )) : (
-                      <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No declarations found in the database.</td></tr>
+                      <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No allocations found in the database.</td></tr>
                     )}
                   </tbody>
                 </table>
