@@ -699,6 +699,11 @@ export default function CertificationsPage() {
   const [declaringContractId, setDeclaringContractId] = useState<number | null>(null);
   const [selectedRegions, setSelectedRegions] = useState<Set<string>>(new Set());
   const [selectedGrades, setSelectedGrades] = useState<Set<string>>(new Set());
+ 
+  const [selectedWetMills, setSelectedWetMills] = useState<Set<string>>(new Set());
+  const [wetMillSearch, setWetMillSearch] = useState('');
+  const [customVolume, setCustomVolume] = useState<string>('');
+  const [customVolumeUnit, setCustomVolumeUnit] = useState<Unit>('kg');
 
   const [isDeclaringCertId, setIsDeclaringCertId] = useState<number | null>(null);
 
@@ -741,6 +746,7 @@ export default function CertificationsPage() {
   const [trackerFilterGrade, setTrackerFilterGrade] = useState("");
   const [trackerFilterSeason, setTrackerFilterSeason] = useState("");
   const [trackerFilterExpiry, setTrackerFilterExpiry] = useState<'ALL' | 'VALID' | 'EXPIRED'>('ALL');
+  const [showAaaCpLots, setShowAaaCpLots] = useState(false);
 
   // Custom position dropdown states
   const [isRegionFilterOpen, setIsRegionFilterOpen] = useState(false);
@@ -875,6 +881,24 @@ export default function CertificationsPage() {
       });
   }, [stocks, allocations]);
 
+
+
+  // ⚡ Contract Allocation Stats (For tracking % dynamically per contract)
+  const contractAllocationStats = useMemo(() => {
+    const stats: Record<number, Record<string, number>> = {};
+    allocations.forEach(decl => {
+      if (!stats[decl.contract_id]) stats[decl.contract_id] = {};
+      const c = stats[decl.contract_id];
+      c['RFA'] = (c['RFA'] || 0) + asNumber(decl.rfa_allocated_weight);
+      c['EUDR'] = (c['EUDR'] || 0) + asNumber(decl.eudr_allocated_weight);
+      c['CAFE'] = (c['CAFE'] || 0) + asNumber(decl.cafe_allocated_weight);
+      c['IMPACT'] = (c['IMPACT'] || 0) + asNumber(decl.impact_allocated_weight);
+      c['AAA'] = (c['AAA'] || 0) + asNumber(decl.aaa_allocated_weight);
+      c['AAA-RS'] = (c['AAA-RS'] || 0) + asNumber(decl.aaa_rs_allocated_weight);
+      c['NET ZERO'] = (c['NET ZERO'] || 0) + asNumber(decl.netzero_allocated_weight);
+    });
+    return stats;
+  }, [allocations]);
   // ⚡ Filter Valid Lots for Replacement in O(N)
   const replacementValidStocks = useMemo(() => {
       if (!replaceModalState.isOpen) return [];
@@ -959,6 +983,7 @@ export default function CertificationsPage() {
   }, [enhancedStocks]);
 
   // --- TRACKER TAB MEMOS RESTORED ---
+  
   const trackerVisibleStocks = useMemo(() => {
     return enhancedStocks
       .filter((stock) => {
@@ -967,7 +992,10 @@ export default function CertificationsPage() {
       })
       .filter((stock) => {
          const isDual = bool(stock.aaa_project) && bool(stock.cafe_certified);
-         if (isDual && trackerCerts.includes('AAA') && !trackerCerts.includes('CAFE')) return false;
+         // If AAA is selected but CAFE is not, only show the AAA/CP dual lots if the toggle is ON
+         if (isDual && trackerCerts.includes('AAA') && !trackerCerts.includes('CAFE')) {
+             return showAaaCpLots;
+         }
          return true;
       })
       .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true))
@@ -987,8 +1015,8 @@ export default function CertificationsPage() {
 
          return true;
       });
-  }, [enhancedStocks, trackerCerts, trackerDateStartFilter, trackerDateEndFilter, trackerSearchLot, trackerFilterCounty, trackerFilterWetmill, trackerFilterGrade, trackerFilterSeason, trackerFilterExpiry, trackerPrimaryCert]);
-
+  }, [enhancedStocks, trackerCerts, trackerDateStartFilter, trackerDateEndFilter, trackerSearchLot, trackerFilterCounty, trackerFilterWetmill, trackerFilterGrade, trackerFilterSeason, trackerFilterExpiry, trackerPrimaryCert, showAaaCpLots]);
+  
   const trackerTableColumns = useMemo(() => getTrackerColumns(trackerPrimaryCert, unit), [trackerPrimaryCert, unit]);
 
   const trackerHolderRows = useMemo(() => {
@@ -1216,6 +1244,10 @@ export default function CertificationsPage() {
       }
       
       setSelectedGrades(new Set(uniqueGrades));
+      setSelectedWetMills(new Set()); // Default empty means ALL
+      setWetMillSearch('');
+      setCustomVolume('');
+      setCustomVolumeUnit(unit); // Matches current global unit
       setIsDeclaringConfigOpen(true);
   };
 
@@ -1227,10 +1259,21 @@ export default function CertificationsPage() {
     setIsDeclaringCertId(contractId);
 
     try {
+      let volumeInKg: number | undefined = undefined;
+      if (customVolume && parseFloat(customVolume) > 0) {
+          const vol = parseFloat(customVolume);
+          if (customVolumeUnit === 'mt') volumeInKg = vol * 1000;
+          else if (customVolumeUnit === 'bag') volumeInKg = vol * 60;
+          else volumeInKg = vol;
+      }
+
       const payload = { 
           sale_contract_id: contractId,
           regions: Array.from(selectedRegions),
-          grades: Array.from(selectedGrades)
+          grades: Array.from(selectedGrades),
+          wet_mills: Array.from(selectedWetMills),
+          custom_volume: volumeInKg
+      
       };
 
       const response = await fetch('/api/declare_certificates', {
@@ -1606,21 +1649,29 @@ export default function CertificationsPage() {
       setDownloadOpen(false);
   }
 
+ 
   const filteredContracts = useMemo(() => {
     return sales.filter(sale => {
-      const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
-      if (!showallocatedContracts && isallocated) return false;
+      const reqWeight = Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, ''));
+      const reqCerts = parseCerts(sale.certifications);
+      
+      // Check if EVERY required cert has met the volume
+      let isFullyAllocated = reqCerts.length > 0;
+      if (reqCerts.length === 0) {
+         isFullyAllocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+      } else {
+         reqCerts.forEach(cert => {
+             const alloc = (contractAllocationStats[sale.id] || {})[cert.toUpperCase()] || 0;
+             if (alloc < reqWeight - 0.01) isFullyAllocated = false; // Partial or Zero
+         });
+      }
+
+      if (!showallocatedContracts && isFullyAllocated) return false;
 
       if (contractSearch) {
         const q = contractSearch.toLowerCase();
         const match = [
-          sale.contract_number,
-          sale.client,
-          sale.quality,
-          sale.strategy,
-          sale.grade,
-          sale.region,
-          sale.blend_name
+          sale.contract_number, sale.client, sale.quality, sale.strategy, sale.grade, sale.region, sale.blend_name
         ].some(val => String(val || '').toLowerCase().includes(q));
         if (!match) return false;
       }
@@ -1635,7 +1686,7 @@ export default function CertificationsPage() {
 
       return true;
     });
-  }, [sales, contractSearch, showallocatedContracts, contractFilterClient, contractFilterRegion, contractFilterBlend, contractFilterShipMonth]);
+  }, [sales, contractSearch, showallocatedContracts, contractFilterClient, contractFilterRegion, contractFilterBlend, contractFilterShipMonth, contractAllocationStats]);
 
   const uniqueClients = useMemo(() => {
       const clients = sales.map(s => s.client).filter(Boolean) as string[];
@@ -1658,6 +1709,7 @@ export default function CertificationsPage() {
     }>();
 
     // 1. Process Contracts FIRST to explicitly define the allowed table rows
+    // 1. Process Contracts FIRST to explicitly define the allowed table rows
     sales.forEach(sale => {
       // Opt-in Region Filter
       if (applyRegionToExecSummary && positionRegions.size > 0) {
@@ -1679,14 +1731,20 @@ export default function CertificationsPage() {
 
       const record = summaryMap.get(combo)!;
       const weight = Math.abs(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')));
-      const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+      
+      // O(1) Fetch max allocated volume for this specific combo
+      let maxAllocForContract = 0;
+      certs.forEach(c => {
+          const alloc = (contractAllocationStats[sale.id] || {})[c] || 0;
+          if (alloc > maxAllocForContract) maxAllocForContract = alloc;
+      });
+
+      const actualAllocated = Math.min(weight, maxAllocForContract);
+      const pendingVolume = weight - actualAllocated;
 
       record.sold += weight;
-      if (isallocated) {
-        record.allocated += weight;
-      } else {
-        record.pending += weight;
-      }
+      record.allocated += actualAllocated;
+      record.pending += pendingVolume;
     });
 
     const allowedCombos = Array.from(summaryMap.values()).map(row => ({
@@ -1890,9 +1948,6 @@ export default function CertificationsPage() {
           if (!saleMatches) return;
       }
 
-      const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
-      if (isallocated) return;
-
       const certList = parseCerts(sale.certifications);
       const isMatch = certList.includes(activeCert);
 
@@ -1901,14 +1956,19 @@ export default function CertificationsPage() {
         const rawSaleWeight = String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '');
         const weight = Math.abs(Number(rawSaleWeight) || 0); 
         
-        unifiedRecord.shipmentsByMonth[monthKey] = (unifiedRecord.shipmentsByMonth[monthKey] || 0) + weight;
-        unifiedRecord.totalShipment += weight;
+        // O(1) Subtraction: Only add the volume that is left to allocate
+        const allocWeightForCert = (contractAllocationStats[sale.id] || {})[activeCert] || 0;
+        const remainingToAllocate = Math.max(0, weight - allocWeightForCert);
+
+        if (remainingToAllocate <= 0.01) return; // Fully allocated for this cert
         
-        totalShortsKg += weight;
+        unifiedRecord.shipmentsByMonth[monthKey] = (unifiedRecord.shipmentsByMonth[monthKey] || 0) + remainingToAllocate;
+        unifiedRecord.totalShipment += remainingToAllocate;
+        
+        totalShortsKg += remainingToAllocate;
         monthsSet.add(monthKey); 
       }
     });
-
     const sortedMonths = Array.from(monthsSet).sort((a, b) => {
       if (a === 'Unscheduled') return 1;
       if (b === 'Unscheduled') return -1;
@@ -2288,8 +2348,8 @@ export default function CertificationsPage() {
       {isDeclaringConfigOpen && (() => {
         const declaringContract = sales.find(s => s.id === declaringContractId);
         return (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
-          <div className="bg-[#F5F5F3] w-full max-w-3xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-[#F5F5F3] w-full max-w-5xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
               <div>
                  <h3 className="font-bold text-[#51534a] text-lg">Declaration: {declaringContract?.contract_number}</h3>
@@ -2302,9 +2362,6 @@ export default function CertificationsPage() {
                             {cert}
                         </span>
                     ))}
-                    {parseCerts(declaringContract?.certifications).length === 0 && (
-                        <span className="text-[10px] italic text-[#968C83]">Uncertified</span>
-                    )}
                  </div>
               </div>
               <button onClick={() => setIsDeclaringConfigOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/50">
@@ -2312,91 +2369,154 @@ export default function CertificationsPage() {
               </button>
             </div>
             
-            <div className="p-5 flex flex-col sm:flex-row gap-5">
-              <div className="flex-1 bg-white border border-[#D6D2C4] rounded-xl flex flex-col overflow-hidden shadow-sm">
-                 <div className="px-4 py-3 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
-                    <h4 className="font-bold text-[#51534a] text-sm">Region (County)</h4>
-                    <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-2 py-0.5 rounded text-[#007680]">{selectedRegions.size} Selected</span>
-                 </div>
-                 <div className="p-3 max-h-[35vh] overflow-y-auto">
-                    {uniqueRegions.length > 0 ? (
-                       <div className="grid grid-cols-2 gap-2">
-                          {uniqueRegions.map(region => (
-                             <label key={region} className="flex items-start gap-2 p-2 hover:bg-[#F5F5F3] rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[#D6D2C4]/50">
-                                <input 
-                                   type="checkbox" 
-                                   className="w-4 h-4 mt-0.5 accent-[#007680] text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
-                                   checked={selectedRegions.has(region)}
-                                   onChange={(e) => {
-                                      const newSet = new Set(selectedRegions);
-                                      if (e.target.checked) newSet.add(region);
-                                      else newSet.delete(region);
-                                      setSelectedRegions(newSet);
-                                   }}
-                                />
-                                <span className="text-sm font-medium text-[#51534a] leading-tight">{region}</span>
-                             </label>
-                          ))}
-                       </div>
-                    ) : <div className="p-4 text-xs text-[#968C83] italic text-center">No region data available</div>}
-                 </div>
-                 <div className="border-t border-[#D6D2C4] p-3 bg-[#F5F5F3] flex justify-end">
-                    <button 
-                       type="button" 
-                       className="text-[10px] font-bold uppercase tracking-wider text-[#007680] hover:text-[#005a61] transition-colors flex items-center gap-1 bg-white px-3 py-1.5 rounded border border-[#D6D2C4] shadow-sm"
-                       onClick={() => setSelectedRegions(selectedRegions.size === uniqueRegions.length ? new Set() : new Set(uniqueRegions))}
-                    >
-                       {selectedRegions.size === uniqueRegions.length ? 'Deselect All' : 'Select All'}
-                    </button>
-                 </div>
+            <div className="p-5 flex flex-col gap-4">
+              
+              {/* --- 1. COMPACT VOLUME INPUT SECTION --- */}
+              <div className="bg-white border border-[#D6D2C4] rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+                  <div>
+                     <h4 className="font-bold text-[#51534a] text-sm">Volume to Allocate</h4>
+                     <p className="text-xs text-[#968C83] mt-0.5">Leave empty to allocate full contract weight: <span className="font-bold text-[#007680]">{formatQty(declaringContract?.weight_kilos || declaringContract?.weight || 0, customVolumeUnit)} {unitText(customVolumeUnit)}</span></p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                     <input 
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="Enter specific volume..."
+                        value={customVolume}
+                        onChange={e => setCustomVolume(e.target.value)}
+                        className="w-48 border border-[#D6D2C4] rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-[#007680] outline-none text-[#51534a]"
+                     />
+                     <div className="flex items-center bg-[#F5F5F3] p-1 rounded-lg border border-[#D6D2C4]">
+                        {(['kg', 'bag', 'mt'] as Unit[]).map((u) => (
+                           <button
+                              key={u} type="button" onClick={() => setCustomVolumeUnit(u)}
+                              className={`px-3 py-1 rounded text-[10px] uppercase font-bold transition-colors ${customVolumeUnit === u ? 'bg-[#007680] text-white shadow-sm' : 'text-[#968C83] hover:text-[#51534a]'}`}
+                           >
+                              {u}
+                           </button>
+                        ))}
+                     </div>
+                  </div>
               </div>
 
-              <div className="flex-1 bg-white border border-[#D6D2C4] rounded-xl flex flex-col overflow-hidden shadow-sm">
-                 <div className="px-4 py-3 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
-                    <h4 className="font-bold text-[#51534a] text-sm">Grade</h4>
-                    <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-2 py-0.5 rounded text-[#007680]">{selectedGrades.size} Selected</span>
-                 </div>
-                 <div className="p-3 max-h-[35vh] overflow-y-auto">
-                    {uniqueGrades.length > 0 ? (
-                       <div className="grid grid-cols-2 gap-2">
-                          {uniqueGrades.map(grade => (
-                             <label key={grade} className="flex items-start gap-2 p-2 hover:bg-[#F5F5F3] rounded-lg cursor-pointer transition-colors border border-transparent hover:border-[#D6D2C4]/50">
-                                <input 
-                                   type="checkbox" 
-                                   className="w-4 h-4 mt-0.5 accent-[#007680] text-[#007680] rounded border-[#D6D2C4] focus:ring-[#007680]"
-                                   checked={selectedGrades.has(grade)}
-                                   onChange={(e) => {
-                                      const newSet = new Set(selectedGrades);
-                                      if (e.target.checked) newSet.add(grade);
-                                      else newSet.delete(grade);
-                                      setSelectedGrades(newSet);
-                                   }}
-                                />
-                                <span className="text-sm font-medium text-[#51534a] leading-tight">{grade}</span>
-                             </label>
-                          ))}
-                       </div>
-                    ) : <div className="p-4 text-xs text-[#968C83] italic text-center">No grade data available</div>}
-                 </div>
-                 <div className="border-t border-[#D6D2C4] p-3 bg-[#F5F5F3] flex justify-end">
-                    <button 
-                       type="button" 
-                       className="text-[10px] font-bold uppercase tracking-wider text-[#007680] hover:text-[#005a61] transition-colors flex items-center gap-1 bg-white px-3 py-1.5 rounded border border-[#D6D2C4] shadow-sm"
-                       onClick={() => setSelectedGrades(selectedGrades.size === uniqueGrades.length ? new Set() : new Set(uniqueGrades))}
-                    >
-                       {selectedGrades.size === uniqueGrades.length ? 'Deselect All' : 'Select All'}
-                    </button>
-                 </div>
+              {/* --- 2. 3-COLUMN COMPACT GRID (No Page Scrolling) --- */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  
+                  {/* Regions */}
+                  <div className="bg-white border border-[#D6D2C4] rounded-xl flex flex-col shadow-sm">
+                     <div className="px-3 py-2 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
+                        <h4 className="font-bold text-[#51534a] text-xs uppercase tracking-wider">Region (County)</h4>
+                        <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-1.5 py-0.5 rounded text-[#007680]">{selectedRegions.size}</span>
+                     </div>
+                     <div className="p-2 h-[180px] overflow-y-auto">
+                        {uniqueRegions.length > 0 ? (
+                           <div className="flex flex-col gap-1">
+                              {uniqueRegions.map(region => (
+                                 <label key={region} className="flex items-center gap-2 p-1.5 hover:bg-[#F5F5F3] rounded cursor-pointer transition-colors">
+                                    <input 
+                                       type="checkbox" className="w-3.5 h-3.5 accent-[#007680] text-[#007680] rounded"
+                                       checked={selectedRegions.has(region)}
+                                       onChange={(e) => {
+                                          const newSet = new Set(selectedRegions);
+                                          if (e.target.checked) newSet.add(region); else newSet.delete(region);
+                                          setSelectedRegions(newSet);
+                                       }}
+                                    />
+                                    <span className="text-xs font-medium text-[#51534a]">{region}</span>
+                                 </label>
+                              ))}
+                           </div>
+                        ) : <div className="p-2 text-xs text-[#968C83] italic text-center">No regions</div>}
+                     </div>
+                     <div className="border-t border-[#D6D2C4] p-1.5 bg-[#F5F5F3] flex justify-center">
+                        <button type="button" onClick={() => setSelectedRegions(selectedRegions.size === uniqueRegions.length ? new Set() : new Set(uniqueRegions))} className="text-[10px] font-bold text-[#007680] hover:underline">
+                           {selectedRegions.size === uniqueRegions.length ? 'Deselect All' : 'Select All'}
+                        </button>
+                     </div>
+                  </div>
+
+                  {/* Grades */}
+                  <div className="bg-white border border-[#D6D2C4] rounded-xl flex flex-col shadow-sm">
+                     <div className="px-3 py-2 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
+                        <h4 className="font-bold text-[#51534a] text-xs uppercase tracking-wider">Grade</h4>
+                        <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-1.5 py-0.5 rounded text-[#007680]">{selectedGrades.size}</span>
+                     </div>
+                     <div className="p-2 h-[180px] overflow-y-auto">
+                        {uniqueGrades.length > 0 ? (
+                           <div className="flex flex-col gap-1">
+                              {uniqueGrades.map(grade => (
+                                 <label key={grade} className="flex items-center gap-2 p-1.5 hover:bg-[#F5F5F3] rounded cursor-pointer transition-colors">
+                                    <input 
+                                       type="checkbox" className="w-3.5 h-3.5 accent-[#007680] text-[#007680] rounded"
+                                       checked={selectedGrades.has(grade)}
+                                       onChange={(e) => {
+                                          const newSet = new Set(selectedGrades);
+                                          if (e.target.checked) newSet.add(grade); else newSet.delete(grade);
+                                          setSelectedGrades(newSet);
+                                       }}
+                                    />
+                                    <span className="text-xs font-medium text-[#51534a]">{grade}</span>
+                                 </label>
+                              ))}
+                           </div>
+                        ) : <div className="p-2 text-xs text-[#968C83] italic text-center">No grades</div>}
+                     </div>
+                     <div className="border-t border-[#D6D2C4] p-1.5 bg-[#F5F5F3] flex justify-center">
+                        <button type="button" onClick={() => setSelectedGrades(selectedGrades.size === uniqueGrades.length ? new Set() : new Set(uniqueGrades))} className="text-[10px] font-bold text-[#007680] hover:underline">
+                           {selectedGrades.size === uniqueGrades.length ? 'Deselect All' : 'Select All'}
+                        </button>
+                     </div>
+                  </div>
+
+                  {/* Wet Mills (Now miniaturized with search) */}
+                  <div className="bg-white border border-[#D6D2C4] rounded-xl flex flex-col shadow-sm">
+                     <div className="px-3 py-2 border-b border-[#D6D2C4] bg-[#EFEFE9] flex justify-between items-center">
+                        <h4 className="font-bold text-[#51534a] text-xs uppercase tracking-wider">Wet Mills <span className="text-[9px] text-[#968C83] normal-case">(Optional)</span></h4>
+                        <span className="text-[10px] font-bold bg-white border border-[#D6D2C4] px-1.5 py-0.5 rounded text-[#007680]">{selectedWetMills.size}</span>
+                     </div>
+                     <div className="p-2 flex flex-col h-[180px]">
+                        <div className="relative mb-2 shrink-0">
+                            <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-[#968C83]" />
+                            <input 
+                                type="text" placeholder="Search..." value={wetMillSearch} onChange={e => setWetMillSearch(e.target.value)}
+                                className="w-full border border-[#D6D2C4] rounded pl-6 pr-2 py-1 text-xs focus:ring-1 focus:ring-[#007680] outline-none"
+                            />
+                        </div>
+                        <div className="overflow-y-auto flex-1">
+                           {uniqueWetmills.filter(w => w.toLowerCase().includes(wetMillSearch.toLowerCase())).map(wm => (
+                               <label key={wm} className="flex items-center gap-2 p-1.5 hover:bg-[#F5F5F3] rounded cursor-pointer transition-colors">
+                                   <input 
+                                       type="checkbox" className="w-3.5 h-3.5 accent-[#007680] text-[#007680] rounded"
+                                       checked={selectedWetMills.has(wm)}
+                                       onChange={(e) => {
+                                           const next = new Set(selectedWetMills);
+                                           if (e.target.checked) next.add(wm); else next.delete(wm);
+                                           setSelectedWetMills(next);
+                                       }}
+                                   />
+                                   <span className="text-xs font-medium text-[#51534a] truncate" title={wm}>{wm}</span>
+                               </label>
+                           ))}
+                        </div>
+                     </div>
+                     <div className="border-t border-[#D6D2C4] p-1.5 bg-[#F5F5F3] flex justify-center">
+                        <button type="button" onClick={() => setSelectedWetMills(selectedWetMills.size === uniqueWetmills.length ? new Set() : new Set(uniqueWetmills))} className="text-[10px] font-bold text-[#007680] hover:underline">
+                           {selectedWetMills.size === uniqueWetmills.length ? 'Deselect All' : 'Select All'}
+                        </button>
+                     </div>
+                  </div>
+                  
               </div>
             </div>
-
-            <div className="p-5 border-t border-[#D6D2C4] bg-white flex justify-end gap-3">
-              <button type="button" onClick={() => setIsDeclaringConfigOpen(false)} className="px-5 py-2.5 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
+            
+            <div className="px-6 py-4 border-t border-[#D6D2C4] bg-white flex justify-end gap-3">
+              <button type="button" onClick={() => setIsDeclaringConfigOpen(false)} className="px-5 py-2 text-sm font-bold text-[#968C83] hover:bg-[#F5F5F3] rounded-lg transition-colors">Cancel</button>
               <button 
                  type="button" 
                  onClick={submitDeclareCertificates}
                  disabled={selectedRegions.size === 0 && selectedGrades.size === 0}
-                 className="bg-[#007680] text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50"
+                 className="bg-[#007680] text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-[#007680]/90 transition-all shadow-sm disabled:opacity-50"
               >
                  Confirm Declaration
               </button>
@@ -3119,6 +3239,7 @@ export default function CertificationsPage() {
                 </div>
 
                 <div className="min-w-0">
+                  
                   <SectionCard
                     title="Certified Stock Tracker Data"
                     subtitle={`Records currently visible for ${trackerSelectedLabel}${trackerDateStartFilter || trackerDateEndFilter ? ` · ${trackerVisibleDateLabel}` : ""}`}
@@ -3141,7 +3262,7 @@ export default function CertificationsPage() {
                     }
                   >
                     
-                    <div className="flex flex-wrap gap-2 mb-4">
+                    <div className="flex flex-wrap items-center gap-2 mb-4">
                         <div className="relative w-full sm:w-48">
                             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" />
                             <input 
@@ -3193,6 +3314,19 @@ export default function CertificationsPage() {
                             <option value="">All Grades</option>
                             {uniqueGrades.map(g => <option key={g} value={g}>{g}</option>)}
                         </select>
+
+                        {/* --- NEW: AAA/CP Toggle Button --- */}
+                        {trackerCerts.includes('AAA') && (
+                            <label className="flex items-center gap-2 cursor-pointer bg-white px-3 py-1.5 border border-[#D6D2C4] rounded-lg hover:bg-[#F5F5F3] transition-colors shadow-sm shrink-0">
+                                <input 
+                                    type="checkbox" 
+                                    checked={showAaaCpLots}
+                                    onChange={(e) => setShowAaaCpLots(e.target.checked)}
+                                    className="w-4 h-4 text-[#007680] accent-[#007680] rounded focus:ring-[#007680]"
+                                />
+                                <span className="text-xs font-bold text-[#51534a]">Show AAA/CP stocks</span>
+                            </label>
+                        )}
                     </div>
 
                     <div className="overflow-x-auto overflow-y-auto max-h-[60vh] rounded-xl border border-[#D6D2C4]">
@@ -3230,6 +3364,7 @@ export default function CertificationsPage() {
                       </table>
                     </div>
                   </SectionCard>
+                
                 </div>
               </div>
             </div>
@@ -3307,25 +3442,34 @@ export default function CertificationsPage() {
                         <th className="py-3 px-4">Client</th>
                         <th className="py-3 px-4 text-right">Weight ({unitText(unit)})</th>
                         <th className="py-3 px-4">Ship Date</th>
-                        <th className="py-3 px-4">Quality</th>
-                        <th className="py-3 px-4">Grade</th>
                         <th className="py-3 px-4">Region</th>
                         <th className="py-3 px-4 w-1/4">Certifications</th>
-                        <th className="py-3 px-4">Blend</th>
+   
                         <th className="py-3 px-4 text-center">Actions</th>
                       </tr>
                     </thead>
+
                     <tbody className="divide-y divide-[#D6D2C4]">
                       {filteredContracts.length > 0 ? filteredContracts.map((sale) => {
                         const isEditing = editingContractId === sale.id;
                         const displayCerts = parseCerts(sale.certifications);
-                        const isallocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+                        const reqWeight = Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, ''));
+                        
+                        // Check if Fully Allocated for styling
+                        let isFullyAllocated = displayCerts.length > 0;
+                        if (displayCerts.length === 0) isFullyAllocated = bool(sale.certs_allocated ?? (sale as any).certsallocated);
+                        else {
+                           displayCerts.forEach(cert => {
+                               const alloc = (contractAllocationStats[sale.id] || {})[cert.toUpperCase()] || 0;
+                               if (alloc < reqWeight - 0.01) isFullyAllocated = false;
+                           });
+                        }
 
                         return (
-                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isallocated ? 'opacity-60' : ''}`}>
+                          <tr key={sale.id} className={`bg-white hover:bg-[#D6D2C4]/20 transition-colors ${isEditing ? 'bg-[#F5F5F3]' : ''} ${isFullyAllocated ? 'opacity-60' : ''}`}>
                             <td className="py-3 px-4 font-bold text-[#51534a]">
                                 <div className="flex items-center gap-2">
-                                  {isallocated && (
+                                  {isFullyAllocated && (
                                      <span className="flex items-center justify-center text-[#007680]" title="Fully allocated">
                                          <CheckCircle size={14} />
                                      </span>
@@ -3335,38 +3479,13 @@ export default function CertificationsPage() {
                             </td>
                             <td className="py-3 px-4 text-[#51534a]">{sale.client || '-'}</td>
                             <td className="py-3 px-4 text-right font-medium text-[#5B3427]">
-                                {formatQty(Number(String(sale.weight_kilos || sale.weight || sale.SMT || 0).replace(/,/g, '')), unit)}
+                                {formatQty(reqWeight, unit)}
                             </td>
                             <td className="py-3 px-4 text-[#968C83]">{sale.shipping_date ? formatDateToMonthYear(sale.shipping_date) : '-'}</td>
                             
-                            <td className="py-3 px-4">
-                              {isEditing ? (
-                                <select 
-                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                  value={editForm.quality}
-                                  onChange={(e) => setEditForm({...editForm, quality: e.target.value})}
-                                >
-                                  <option value="" disabled>Select Quality</option>
-                                  {CONTRACT_QUALITIES.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                </select>
-                              ) : (
-                                <span className="text-[#007680] font-medium">{sale.quality || sale.strategy || '-'}</span>
-                              )}
-                            </td>
+                     
 
-                            <td className="py-3 px-4">
-                               {isEditing ? (
-                                <input 
-                                  type="text"
-                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                  value={editForm.grade}
-                                  onChange={(e) => setEditForm({...editForm, grade: e.target.value})}
-                                  placeholder="Grade"
-                                />
-                              ) : (
-                                <span className="text-[#51534a]">{sale.grade || '-'}</span>
-                              )}
-                            </td>
+                  
 
                             <td className="py-3 px-4">
                               {isEditing ? (
@@ -3383,9 +3502,9 @@ export default function CertificationsPage() {
                               )}
                             </td>
 
-                            <td className="py-3 px-4">
+                            <td className="py-3 px-4 min-w-[200px]">
                               {isEditing ? (
-                                <div className="flex flex-col gap-2 min-w-[200px]">
+                                <div className="flex flex-col gap-2">
                                     <select 
                                       className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
                                       value=""
@@ -3422,32 +3541,30 @@ export default function CertificationsPage() {
                                     </div>
                                 </div>
                               ) : (
-                                <div className="flex flex-wrap gap-1">
-                                    {displayCerts.length > 0 ? displayCerts.map(cert => (
-                                        <span key={cert} className="inline-flex px-1.5 py-0.5 bg-[#D6D2C4]/30 text-[#51534a] text-[10px] font-bold rounded-sm">
-                                          {cert}
-                                        </span>
-                                    )) : <span className="text-[#968C83] text-xs italic">Uncertified</span>}
+                                <div className="flex flex-col gap-2">
+                                    {displayCerts.length > 0 ? displayCerts.map(cert => {
+                                        const alloc = (contractAllocationStats[sale.id] || {})[cert.toUpperCase()] || 0;
+                                        const pct = reqWeight > 0 ? Math.min(100, Math.round((alloc / reqWeight) * 100)) : 0;
+                                        
+                                        return (
+                                          <div key={cert} className="flex flex-col gap-1 w-full max-w-[180px]">
+                                              <div className="flex justify-between items-center text-[10px] font-bold">
+                                                  <span className="text-[#51534a] bg-[#D6D2C4]/30 px-1.5 py-0.5 rounded-sm">{cert}</span>
+                                                  {alloc > 0 && <span className={pct >= 100 ? 'text-[#007680]' : 'text-[#B9975B]'}>{pct}%</span>}
+                                              </div>
+                                              {alloc > 0 && (
+                                                <div className="w-full bg-[#D6D2C4]/40 h-1.5 rounded-full overflow-hidden">
+                                                    <div className={`h-full rounded-full transition-all duration-500 ${pct >= 100 ? 'bg-[#007680]' : 'bg-[#B9975B]'}`} style={{ width: `${pct}%` }}></div>
+                                                </div>
+                                              )}
+                                          </div>
+                                        );
+                                    }) : <span className="text-[#968C83] text-xs italic">Uncertified</span>}
                                 </div>
                               )}
                             </td>
 
-                            <td className="py-3 px-4">
-                              {isEditing ? (
-                                <select 
-                                  className="w-full border border-[#007680] rounded px-2 py-1 text-xs focus:outline-none bg-white text-[#51534a]"
-                                  value={editForm.blend_id}
-                                  onChange={(e) => setEditForm({...editForm, blend_id: e.target.value ? Number(e.target.value) : ''})}
-                                >
-                                  <option value="">No Blend</option>
-                                  {blends.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                                </select>
-                              ) : (
-                                <span className="text-[#51534a] font-medium">
-                                  {sale.blend_name || <span className="text-[#968C83] font-normal italic">Unassigned</span>}
-                                </span>
-                              )}
-                            </td>
+                    
 
                             <td className="py-3 px-4 text-center">
                                 {isEditing ? (
@@ -3487,6 +3604,7 @@ export default function CertificationsPage() {
             </div>
           )}
 
+
           {/* --- allocations TAB --- */}
           {activeTab === "allocations" && (
             <SectionCard title="Active allocations" subtitle="Overview of all contracts with registered stock allocations.">
@@ -3496,18 +3614,35 @@ export default function CertificationsPage() {
                     <tr>
                       <th className="py-3 px-4">Contract</th>
                       <th className="py-3 px-4">Client</th>
-                      <th className="py-3 px-4 text-right">Weight ({unitText(unit)})</th>
+                      <th className="py-3 px-4 text-right">Allocated Weight ({unitText(unit)})</th>
                       <th className="py-3 px-4">Ship Date</th>
                       <th className="py-3 px-4">allocated Certs</th>
                       <th className="py-3 px-4 text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#D6D2C4]">
-                    {allocatedContractsSummary.length > 0 ? allocatedContractsSummary.map((c, idx) => (
+                    {allocatedContractsSummary.length > 0 ? allocatedContractsSummary.map((c, idx) => {
+                      
+                      // Calculate actual allocated physical weight by finding the max allocated across certs for each lot
+                      const allocatedPhysicalWeight = c.lots.reduce((sum, lot) => {
+                          return sum + Math.max(
+                              asNumber(lot.rfa_allocated_weight),
+                              asNumber(lot.eudr_allocated_weight),
+                              asNumber(lot.cafe_allocated_weight),
+                              asNumber(lot.impact_allocated_weight),
+                              asNumber(lot.aaa_allocated_weight),
+                              asNumber(lot.aaa_rs_allocated_weight),
+                              asNumber(lot.netzero_allocated_weight)
+                          );
+                      }, 0);
+
+                      return (
                       <tr key={c.contract_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
                         <td className="py-3 px-4 font-bold text-[#007680]">{c.contract_number}</td>
                         <td className="py-3 px-4 text-[#51534a]">{c.client || '-'}</td>
-                        <td className="py-3 px-4 text-right font-medium text-[#5B3427]">{formatQty(c.contract_weight, unit)}</td>
+                        <td className="py-3 px-4 text-right font-medium text-[#5B3427]">
+                            {formatQty(allocatedPhysicalWeight, unit)}
+                        </td>
                         <td className="py-3 px-4 text-[#968C83]">{formatDateToMonthYear(c.shipping_date)}</td>
                         <td className="py-3 px-4">
                             <div className="flex flex-wrap gap-1">
@@ -3528,7 +3663,8 @@ export default function CertificationsPage() {
                             </button>
                         </td>
                       </tr>
-                    )) : (
+                      );
+                    }) : (
                       <tr><td colSpan={6} className="py-8 text-center text-[#968C83] italic">No allocations found in the database.</td></tr>
                     )}
                   </tbody>
@@ -3536,7 +3672,6 @@ export default function CertificationsPage() {
               </div>
             </SectionCard>
           )}
-
         </main>
       </div>
     </div>

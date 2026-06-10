@@ -41,38 +41,16 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
     try {
         const body = await request.json();
-        const { sale_contract_id, regions = [], grades = [] } = body;
+        const { sale_contract_id, regions = [], grades = [], wet_mills = [], custom_volume } = body;
 
         if (!sale_contract_id) {
             return NextResponse.json({ error: 'sale_contract_id is required' }, { status: 400 });
         }
 
-        // 0. O(1) Reset: Revert existing declarations
-        await query({
-            query: `
-                UPDATE certified_stock_tracker cst
-                INNER JOIN sale_contract_stock_declaration scsd ON cst.id = scsd.stock_tracker_id
-                SET 
-                    cst.rfa_declared_weight = GREATEST(0, COALESCE(cst.rfa_declared_weight, 0) - COALESCE(scsd.rfa_declared_weight, 0)),
-                    cst.eudr_declared_weight = GREATEST(0, COALESCE(cst.eudr_declared_weight, 0) - COALESCE(scsd.eudr_declared_weight, 0)),
-                    cst.cafe_declared_weight = GREATEST(0, COALESCE(cst.cafe_declared_weight, 0) - COALESCE(scsd.cafe_declared_weight, 0)),
-                    cst.impact_declared_weight = GREATEST(0, COALESCE(cst.impact_declared_weight, 0) - COALESCE(scsd.impact_declared_weight, 0)),
-                    cst.aaa_declared_weight = GREATEST(0, COALESCE(cst.aaa_declared_weight, 0) - COALESCE(scsd.aaa_declared_weight, 0)),
-                    cst.aaa_rs_declared_weight = GREATEST(0, COALESCE(cst.aaa_rs_declared_weight, 0) - COALESCE(scsd.aaa_rs_declared_weight, 0)),
-                    cst.netzero_declared_weight = GREATEST(0, COALESCE(cst.netzero_declared_weight, 0) - COALESCE(scsd.netzero_declared_weight, 0))
-                WHERE scsd.sale_contract_id = ?
-            `,
-            values: [sale_contract_id]
-        });
-        await query({
-            query: `DELETE FROM sale_contract_stock_declaration WHERE sale_contract_id = ?`,
-            values: [sale_contract_id]
-        });
-
-        // 1. Fetch Contract & Required Certificates
+        /// 1. Fetch Contract & Required Certificates
         const contractRows = await query({
             query: `
-                SELECT sc.weight_kilos, sc.contract_number, c.certificate
+                SELECT sc.weight_kilos, sc.contract_number, sc.shipping_date, c.certificate
                 FROM sale_contract sc
                 LEFT JOIN sale_contract_certification scc ON sc.id = scc.sale_contract_id
                 LEFT JOIN certifications c ON scc.certification_id = c.id
@@ -85,7 +63,52 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: 'Contract not found' }, { status: 404 });
         }
 
-        const volume_to_declare = parseFloat(contractRows[0].weight_kilos);
+        // Setup Expiry Comparison Date (Fallback to today if no shipping date exists)
+        const contractShippingDateStr = contractRows[0].shipping_date;
+        const compareDate = contractShippingDateStr ? new Date(contractShippingDateStr) : new Date();
+        // 2. Fetch existing allocations for this contract to calculate remaining capacity
+        const existingDeclRows = await query({
+            query: `
+                SELECT 
+                    SUM(rfa_declared_weight) as rfa_tot,
+                    SUM(eudr_declared_weight) as eudr_tot,
+                    SUM(cafe_declared_weight) as cafe_tot,
+                    SUM(impact_declared_weight) as impact_tot,
+                    SUM(aaa_declared_weight) as aaa_tot,
+                    SUM(aaa_rs_declared_weight) as aaa_rs_tot,
+                    SUM(netzero_declared_weight) as netzero_tot
+                FROM sale_contract_stock_declaration
+                WHERE sale_contract_id = ?
+            `,
+            values: [sale_contract_id]
+        }) as any[];
+
+        const ex = existingDeclRows[0] || {};
+        const max_already_allocated = Math.max(
+            parseFloat(ex.rfa_tot || 0),
+            parseFloat(ex.eudr_tot || 0),
+            parseFloat(ex.cafe_tot || 0),
+            parseFloat(ex.impact_tot || 0),
+            parseFloat(ex.aaa_tot || 0),
+            parseFloat(ex.aaa_rs_tot || 0),
+            parseFloat(ex.netzero_tot || 0)
+        );
+
+        const contract_weight = parseFloat(contractRows[0].weight_kilos);
+        const remaining_contract_capacity = Math.max(0, contract_weight - max_already_allocated);
+
+        // Prevent allocation if contract is already fully fulfilled
+        if (remaining_contract_capacity <= 0.01) {
+            return NextResponse.json({ error: 'This contract is already fully allocated.' }, { status: 400 });
+        }
+
+        // Determine actual volume to declare, strictly capped by remaining capacity
+        let requested_volume = (custom_volume !== undefined && custom_volume !== null && parseFloat(custom_volume) > 0) 
+            ? parseFloat(custom_volume) 
+            : remaining_contract_capacity;
+
+        const volume_to_declare = Math.min(requested_volume, remaining_contract_capacity);
+
         const contract_number = contractRows[0].contract_number || sale_contract_id;
         const rawCerts = contractRows.map(r => r.certificate).filter(Boolean);
         const certificates_to_declare = Array.from(new Set(
@@ -97,7 +120,7 @@ export async function POST(request: Request) {
             return NextResponse.json({ message: 'No certificates required for this contract.' }, { status: 200 });
         }
 
-        // 2. Load Filtered Stock Pool
+        // 3. Load Filtered Stock Pool
         let stockQuery = 'SELECT * FROM certified_stock_tracker WHERE 1=1';
         const queryValues: any[] = [];
 
@@ -109,10 +132,16 @@ export async function POST(request: Request) {
             stockQuery += ` AND grade IN (${grades.map(() => '?').join(',')})`;
             queryValues.push(...grades);
         }
+        if (wet_mills.length > 0) {
+            stockQuery += ` AND wet_mill IN (${wet_mills.map(() => '?').join(',')})`;
+            queryValues.push(...wet_mills);
+        }
+
+        stockQuery += ` ORDER BY recorded_date asc`;
         
         const allStocks = await query({ query: stockQuery, values: queryValues }) as any[];
 
-        // 3. Define the Dynamic Rules & Base Volume requirements
+        // 4. Define the Dynamic Rules & Base Volume requirements
         let baseVolumeField = 'purchased_weight';
         if (certificates_to_declare.includes('aaa')) {
             baseVolumeField = 'aaa_volume';
@@ -147,7 +176,7 @@ export async function POST(request: Request) {
         const currentDate = new Date();
         const isNespresso = certificates_to_declare.includes('aaa') && certificates_to_declare.includes('cafe');
 
-        // 4. Intersection Filter: Ensure lot satisfies EVERY requested certificate
+        // 5. Intersection Filter: Ensure lot satisfies EVERY requested certificate
         const applicableStocks = allStocks.filter(s => {
             let lotCapacity = parseFloat(s[baseVolumeField] || 0);
             if (lotCapacity <= 0) return false;
@@ -178,7 +207,7 @@ export async function POST(request: Request) {
             return lotCapacity > 0;
         });
 
-        // 5. Similarity Grouping
+        // 6. Similarity Grouping
         applicableStocks.sort((a, b) => {
             const holderFields = ['rfa_certificate_holder', 'cafe_certificate_holder', 'eudr_certificate_holder'];
             const isAKenyacof = holderFields.some(f => String(a[f] || '').toLowerCase().includes('kenyacof')) ? 1 : 0;
@@ -203,7 +232,7 @@ export async function POST(request: Request) {
             return new Date(a.recorded_date || 0).getTime() - new Date(b.recorded_date || 0).getTime();
         });
 
-        // 6. Unified Allocation Loop
+        // 7. Unified Allocation Loop
         let currentAllocated = 0;
         const trackerUpdatesMap = new Map<number, any>();
         const declarationInsertsMap = new Map<number, any>();
@@ -265,17 +294,15 @@ export async function POST(request: Request) {
             });
         }
 
-        // 7. Validate holistic success
         if (currentAllocated < volume_to_declare - 0.01) {
             return NextResponse.json({ 
                 error: `Insufficient identical volume to simultaneously fulfill ALL requested certificates. Needed ${volume_to_declare}, only found ${currentAllocated.toFixed(2)}.` 
             }, { status: 400 });
         }
 
-        // 8. ⚡ O(1) Database Sync (Optimized Execution)
+        // 8. O(1) Database Sync (Optimized Execution)
         const trackerValues = Array.from(trackerUpdatesMap.values());
         
-        // Run tracker updates in parallel
         await Promise.all(trackerValues.map(update => {
             const keys = Object.keys(update).filter(k => k !== 'id');
             const setClause = keys.map(k => `${k} = ?`).join(', ');
@@ -289,21 +316,18 @@ export async function POST(request: Request) {
 
         const declValues = Array.from(declarationInsertsMap.values());
         if (declValues.length > 0) {
-            // Dynamic column mapping removes dependency on hardcoded arrays
             const insertCols = Object.keys(declValues[0]);
-            
             const placeholders = `(${insertCols.map(() => '?').join(', ')})`;
             const allPlaceholders = declValues.map(() => placeholders).join(', ');
-            
             const insertVals = declValues.flatMap(decl => insertCols.map(k => decl[k]));
             
+            // Cumulatively add to the existing declaration volume instead of overwriting
             const updateStmts = insertCols
                 .filter(col => col !== 'sale_contract_id' && col !== 'stock_tracker_id')
-                .map(col => `${col} = VALUES(${col})`);
+                .map(col => `${col} = COALESCE(${col}, 0) + VALUES(${col})`);
 
             const onDuplicateClause = updateStmts.length > 0 ? `ON DUPLICATE KEY UPDATE ${updateStmts.join(', ')}` : '';
             
-            // Single O(1) Bulk Insert
             await query({
                 query: `INSERT INTO sale_contract_stock_declaration (${insertCols.join(', ')}) VALUES ${allPlaceholders} ${onDuplicateClause}`,
                 values: insertVals

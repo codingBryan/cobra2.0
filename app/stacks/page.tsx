@@ -2934,6 +2934,7 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                             <tr>
                                 <th className="py-3 px-4 cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('date')}>Exit Date {getSortIcon('date')}</th>
                                 <th className="py-3 px-4 cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('contract_number')}>Sales Ref {getSortIcon('contract_number')}</th>
+                                <th className="py-3 px-4 cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('batch_number' as keyof SaleRecord)}>Batch {getSortIcon('batch_number')}</th>
                                 <th className="py-3 px-4 cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('client')}>Client {getSortIcon('client')}</th>
                                 <th className="py-3 px-4">Strategy</th>
                                 <th className="py-3 px-4 text-right cursor-pointer hover:bg-[#5B3427]/80 transition-colors" onClick={() => requestSort('quantity')}>Vol ({unit}) {getSortIcon('quantity')}</th>
@@ -2959,6 +2960,7 @@ function ClientAnalysisView({ unit }: { unit: Unit }) {
                                     <tr key={row.id} className="hover:bg-[#D6D2C4]/20 transition-colors">
                                         <td className="py-3 px-4 text-[#968C83] whitespace-nowrap text-xs">{formatDate(row.date)}</td>
                                         <td className="py-3 px-4 font-mono text-[#007680] font-medium text-xs">{row.contract_number}</td>
+                                        <td className="py-3 px-4 font-mono text-[#51534a] text-xs">{row.batch_number || '-'}</td>
                                         <td className="py-3 px-4 text-[#51534a] font-medium text-xs max-w-60 truncate" title={row.client}>{row.client}</td>
                                         <td className="py-3 px-4 text-[#51534a] text-xs">{row.strategy}</td>
                                         <td className="py-3 px-4 text-right text-[#51534a] font-mono text-xs">{formatNumber(convertQty(row.quantity, unit), 0)}</td>
