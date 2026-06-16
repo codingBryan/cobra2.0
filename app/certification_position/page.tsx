@@ -685,9 +685,6 @@ export default function CertificationsPage() {
       setToast({ show: true, type, title, message });
       setTimeout(() => setToast(prev => ({ ...prev, show: false })), 15000);
   };
-
-  // Modals state
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isManualSalesModalOpen, setIsManualSalesModalOpen] = useState(false);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
 
@@ -1522,7 +1519,6 @@ export default function CertificationsPage() {
         
         alert("SOL Report uploaded successfully!");
         setSolFile(null);
-        setIsAddModalOpen(false);
         await fetchData(true);
         
       } catch (error: any) {
@@ -1545,7 +1541,6 @@ export default function CertificationsPage() {
         
         alert("Purchases uploaded successfully!");
         setIsPurchaseModalOpen(false);
-        setIsAddModalOpen(false);
         setPurchaseFile(null);
         setPurchaseSaleNumber('');
         setIsDirectSale(true);
@@ -2251,99 +2246,6 @@ export default function CertificationsPage() {
           );
       })()}
 
-      {/* --- REMAINDER OF UI MODALS --- */}
-      {isAddModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-          <div className="bg-[#EFEFE9] w-full max-w-4xl rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
-              <h2 className="text-lg font-bold text-[#51534a] flex items-center gap-2">
-                <div className="w-8 h-8 bg-[#007680] rounded flex items-center justify-center text-white">
-                  <Plus size={18} />
-                </div>
-                Add / Upload Records
-              </h2>
-              <button onClick={() => setIsAddModalOpen(false)} className="text-[#968C83] hover:text-[#51534a] p-1.5 rounded-full hover:bg-[#D6D2C4]/30 transition-all">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="flex flex-col md:flex-row divide-y md:divide-y-0 md:divide-x divide-[#D6D2C4] bg-[#F5F5F3]">
-              <div className="flex-1 p-6 flex flex-col gap-6">
-                <div>
-                  <h3 className="font-bold text-[#51534a] text-sm flex items-center gap-2 mb-1">
-                    <CloudUpload size={16} className="text-[#B9975B]" />
-                    Upload Purchases
-                  </h3>
-                  <p className="text-xs text-[#968C83]">Import stock batches from Excel.</p>
-                </div>
-                <div className="space-y-4">
-                  <FileDropZone 
-                    label="XBS Upload Template (XLS/XLSX)" 
-                    accept=".xls,.xlsx" 
-                    file={purchaseFile}
-                    onFileAdded={setPurchaseFile}
-                    onRemoveFile={() => setPurchaseFile(null)}
-                  />
-                  <div className="pt-2">
-                      <button 
-                        onClick={() => setIsPurchaseModalOpen(true)}
-                        disabled={!purchaseFile}
-                        className="w-full bg-[#51534a] text-white px-4 py-2 rounded text-sm font-medium hover:bg-[#51534a]/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        Upload Purchases
-                      </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex-1 p-6 flex flex-col gap-6 bg-white/50">
-                <div>
-                  <h3 className="font-bold text-[#51534a] text-sm flex items-center gap-2 mb-1">
-                    <ListChecks size={16} className="text-[#007680]" />
-                    Add Sales
-                  </h3>
-                  <p className="text-xs text-[#968C83]">Upload logistics report or add manually.</p>
-                </div>
-                <div className="flex flex-col h-full justify-between">
-                  <div>
-                    <FileDropZone 
-                      label="SOL Logistics Report (XLS/XLSX)" 
-                      accept=".xls,.xlsx" 
-                      file={solFile}
-                      onFileAdded={setSolFile}
-                      onRemoveFile={() => setSolFile(null)}
-                    />
-                    {solFile && (
-                      <div className="mt-3 animate-in fade-in slide-in-from-top-2">
-                        <button 
-                          onClick={handleUploadSol}
-                          className="w-full bg-[#007680] text-white px-4 py-2 rounded text-sm font-medium hover:bg-[#007680]/90 transition-all flex justify-center items-center gap-2 shadow-sm"
-                        >
-                          <CloudUpload size={16}/> Upload SOL File
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-6">
-                    <div className="flex items-center gap-4 mb-4">
-                      <div className="h-px bg-[#D6D2C4] flex-1"></div>
-                      <span className="text-[10px] uppercase font-bold text-[#968C83] tracking-wider">OR</span>
-                      <div className="h-px bg-[#D6D2C4] flex-1"></div>
-                    </div>
-                    <button 
-                      onClick={() => setIsManualSalesModalOpen(true)}
-                      disabled={!!solFile}
-                      className="w-full bg-white border-2 border-[#007680] text-[#007680] px-4 py-2 rounded text-sm font-bold hover:bg-[#007680]/5 transition-all disabled:opacity-40 disabled:border-[#D6D2C4] disabled:text-[#968C83] disabled:cursor-not-allowed"
-                    >
-                      Manually add sales
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {isDeclaringConfigOpen && (() => {
         const declaringContract = sales.find(s => s.id === declaringContractId);
@@ -2751,7 +2653,7 @@ export default function CertificationsPage() {
               <div className="w-8 h-8 bg-[#007680] rounded-lg flex items-center justify-center text-white">
                 <ShieldCheck size={18} />
               </div>
-              Certification Positions
+              Certification Position
             </h1>
             <p className="text-[#968C83] text-sm mt-1">Certification, Tracker, Contracts & allocations</p>
           </div>
@@ -2771,13 +2673,7 @@ export default function CertificationsPage() {
               ))}
             </div>
 
-            <button 
-              onClick={() => setIsAddModalOpen(true)}
-              className="flex items-center justify-center w-10 h-10 bg-[#007680] text-white rounded-lg hover:bg-[#007680]/90 transition-colors shadow-sm"
-              title="Add Records"
-            >
-              <Plus size={20} />
-            </button>
+           
           </div>
         </header>
 

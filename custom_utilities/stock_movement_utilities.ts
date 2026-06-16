@@ -1,3 +1,4 @@
+import { ResultSetHeader, RowDataPacket } from 'mysql2';
 import * as XLSX from 'xlsx';
 
 // Define the structure of an aggregated process object for type safety
@@ -207,4 +208,178 @@ export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Pro
     console.error(`Error in getProcessDetails: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   }
+}
+
+
+
+/**
+ * Types representing your database tables.
+ * Extended with RowDataPacket to be fully compatible with your custom query function.
+ */
+export interface DailyStrategyProcessing extends RowDataPacket {
+    id: number;
+    process_id: number;
+    date_in: Date;
+    analysis_id: number;
+    strategy: string;
+    batch_number: string;
+    input_qty: number;
+    output_qty: number;
+    processing_loss_gain_qty: number;
+    input_differential: number;
+    output_differential: number;
+    input_hedge_level_usc_lb: number;
+    output_hedge_level_usc_lb: number;
+    input_cost_usd_50: number;
+    output_cost_usd_50: number;
+    batch_status: string;
+}
+
+export interface DailyProcess extends RowDataPacket {
+    id: number;
+    summary_id: number;
+    processing_date: Date;
+    process_type: string;
+    process_number: string;
+    input_qty: number;
+    output_qty: number;
+    milling_loss: number;
+    processing_loss_gain_qty: number;
+    input_value: number;
+    output_value: number;
+    pnl: number;
+    trade_variables_updated: boolean;
+}
+
+export interface TraceabilityResult {
+    targetBatch: string;
+    batches: DailyStrategyProcessing[];
+    processes: DailyProcess[];
+    // Edges help easily visualize the flow in a UI (e.g., React Flow or Sankey)
+    edges: {
+        sourceId: string; // Can be a batch_number or process id string
+        targetId: string; 
+        type: 'batch_to_process' | 'process_to_batch';
+    }[];
+}
+
+/**
+ * Function signature representing your custom mysql2 pool query function
+ */
+export type QueryFunction = <T extends RowDataPacket[] | ResultSetHeader>(args: {
+    query: string;
+    values?: any;
+}) => Promise<T | undefined>;
+
+/**
+ * Fetches the complete backward traceability history of a specific batch.
+ * @param executeQuery Your custom db query function
+ * @param targetBatchNumber The batch number to trace backwards
+ * @returns Object containing all historical batches, processes, and flow edges
+ */
+export async function getBatchLineage(
+    executeQuery: QueryFunction, 
+    targetBatchNumber: string
+): Promise<TraceabilityResult> {
+
+    // 1. RECURSIVE CTE: Find every batch_number in the lineage tree.
+    // This traverses backwards from Output -> Process -> Inputs recursively.
+    const lineageQuery = `
+        WITH RECURSIVE BatchLineage AS (
+            -- Base Case: The target batch and the process that generated it
+            SELECT 
+                batch_number, 
+                process_id
+            FROM daily_strategy_processing
+            WHERE batch_number = ? AND output_qty > 0
+
+            UNION
+
+            -- Recursive Step: Find input batches for the current process, 
+            -- and identify the process that created those inputs
+            SELECT 
+                inputs.batch_number, 
+                creator.process_id
+            FROM BatchLineage bl
+            JOIN daily_strategy_processing inputs
+                ON inputs.process_id = bl.process_id 
+                AND inputs.input_qty > 0
+            LEFT JOIN daily_strategy_processing creator
+                ON creator.batch_number = inputs.batch_number 
+                AND creator.output_qty > 0
+            WHERE inputs.batch_number IS NOT NULL
+        )
+        SELECT DISTINCT batch_number FROM BatchLineage;
+    `;
+
+    // Execute CTE using your custom query format
+    const lineageResult = await executeQuery<RowDataPacket[]>({
+        query: lineageQuery, 
+        values: [targetBatchNumber]
+    });
+    
+    // Safely fallback to empty array if undefined is returned
+    const rows = lineageResult || [];
+    const involvedBatchNumbers = rows.map(r => r.batch_number as string);
+
+    // Guard clause: If batch not found or has no history, return empty
+    if (involvedBatchNumbers.length === 0) {
+        return { targetBatch: targetBatchNumber, batches: [], processes: [], edges: [] };
+    }
+
+    // 2. Fetch all data points for the involved batches
+    const placeholders = involvedBatchNumbers.map(() => '?').join(',');
+    const batchesSql = `SELECT * FROM daily_strategy_processing WHERE batch_number IN (${placeholders})`;
+    
+    const allBatchesResult = await executeQuery<DailyStrategyProcessing[]>({
+        query: batchesSql, 
+        values: involvedBatchNumbers
+    });
+    const allBatches = allBatchesResult || [];
+
+    // 3. Extract unique process_ids involved and fetch their data points
+    const involvedProcessIds = [...new Set(allBatches.map(b => b.process_id))].filter(id => id != null);
+    
+    let allProcesses: DailyProcess[] = [];
+    if (involvedProcessIds.length > 0) {
+        const processPlaceholders = involvedProcessIds.map(() => '?').join(',');
+        const processesSql = `SELECT * FROM daily_processes WHERE id IN (${processPlaceholders})`;
+        
+        const allProcessesResult = await executeQuery<DailyProcess[]>({
+            query: processesSql, 
+            values: involvedProcessIds
+        });
+        allProcesses = allProcessesResult || [];
+    }
+
+    // 4. Construct Edges in-memory using the batches data 
+    // (Since daily_strategy_processing naturally acts as an edge mapping table)
+    const edges: TraceabilityResult['edges'] = [];
+
+    allBatches.forEach(batchRow => {
+        if (batchRow.input_qty > 0) {
+            // Batch is going INTO a process
+            edges.push({
+                sourceId: `batch_${batchRow.batch_number}`,
+                targetId: `process_${batchRow.process_id}`,
+                type: 'batch_to_process'
+            });
+        }
+        
+        if (batchRow.output_qty > 0) {
+            // Batch is coming OUT OF a process
+            edges.push({
+                sourceId: `process_${batchRow.process_id}`,
+                targetId: `batch_${batchRow.batch_number}`,
+                type: 'process_to_batch'
+            });
+        }
+    });
+
+    return {
+        targetBatch: targetBatchNumber,
+        batches: allBatches,
+        processes: allProcesses,
+        edges: edges
+    };
 }

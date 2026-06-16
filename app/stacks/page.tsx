@@ -28,7 +28,8 @@ import {
   Pencil,
   BarChart3,
   Cog,
-  CalendarClock
+  CalendarClock,
+  ChevronLeft
 } from 'lucide-react';
 import { Batch, LastUpdateDates, SaleRecord, StrategyAggregate } from '@/custom_utilities/custom_types';
 import { useRouter } from 'next/navigation';
@@ -1943,11 +1944,10 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
         finalCostDiff,
         pnl: pnlPerLb,
         totalPnLUSD,
-        avgDaysInStock // Expose new metric
+        avgDaysInStock
       };
     }, [selectedBatches, fobbingCost, salePriceDiff]);
 
-    // --- STRATEGY DISTRIBUTION LOGIC ---
     const strategyDistribution = useMemo(() => {
         const counts: Record<string, number> = {};
         selectedBatches.forEach(b => {
@@ -2424,24 +2424,47 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
     );
 }
 
+
 function BatchHistoryView({ unit }: { unit: Unit }) {
     const [search, setSearch] = useState('');
-    const [result, setResult] = useState<Batch | null>(null);
+    const [lineage, setLineage] = useState<any>(null);
     const [notFound, setNotFound] = useState(false);
     const [loading, setLoading] = useState(false);
+    
+    // Lineage Navigation (History View Stack)
+    const [viewHistory, setViewHistory] = useState<string[]>([]);
+    const [historyIndex, setHistoryIndex] = useState(-1);
+
+    // Pan and Zoom State
+    const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
+    const [isDragging, setIsDragging] = useState(false);
+    const dragStart = useRef({ x: 0, y: 0 });
+
+    // Modal State
+    const [selectedProcess, setSelectedProcess] = useState<any | null>(null);
 
     const handleSearch = async () => {
         if (!search.trim()) return;
         
         setLoading(true);
         setNotFound(false);
-        setResult(null);
+        setLineage(null);
+        setViewHistory([]);
+        setHistoryIndex(-1);
+        setTransform({ x: 0, y: 0, scale: 1 });
 
         try {
-            const res = await fetch(`/api/batches/batch_history?id=${encodeURIComponent(search.trim())}`);
+            const res = await fetch(`/api/traceability?batchNumber=${encodeURIComponent(search.trim())}`);
             if (res.ok) {
                 const data = await res.json();
-                setResult(data);
+                if (data.batches && data.batches.length > 0) {
+                    setLineage(data);
+                    // Initialize the view stack with the main target batch
+                    setViewHistory([data.targetBatch]);
+                    setHistoryIndex(0);
+                } else {
+                    setNotFound(true);
+                }
             } else {
                 setNotFound(true);
             }
@@ -2453,23 +2476,275 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
         }
     };
 
+    const handleExtract = () => {
+        if (!lineage) return;
+        
+        const csvRows = ['Type,ID/Number,Date,Strategy/Type,In Qty,Out Qty,Loss,PNL'];
+        
+        lineage.batches?.forEach((b: any) => {
+            csvRows.push(`Batch,${b.batch_number},${b.date_in ? new Date(b.date_in).toLocaleDateString() : ''},${b.strategy},${b.input_qty},${b.output_qty},,`);
+        });
+        
+        lineage.processes?.forEach((p: any) => {
+            csvRows.push(`Process,${p.process_number || p.id},${p.processing_date ? new Date(p.processing_date).toLocaleDateString() : ''},${p.process_type},${p.input_qty},${p.output_qty},${p.milling_loss},${p.pnl}`);
+        });
+
+        const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Traceability_${lineage.targetBatch}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
+    // --- Pan & Zoom Handlers ---
+    const handleMouseDown = (e: React.MouseEvent) => {
+        setIsDragging(true);
+        dragStart.current = { x: e.clientX - transform.x, y: e.clientY - transform.y };
+    };
+
+    const handleMouseMove = (e: React.MouseEvent) => {
+        if (!isDragging) return;
+        setTransform(prev => ({
+            ...prev,
+            x: e.clientX - dragStart.current.x,
+            y: e.clientY - dragStart.current.y
+        }));
+    };
+
+    const handleMouseUpOrLeave = () => {
+        setIsDragging(false);
+    };
+
+    const handleWheel = (e: React.WheelEvent) => {
+        const zoomSensitivity = 0.0015;
+        const delta = -e.deltaY * zoomSensitivity;
+        setTransform(prev => ({
+            ...prev,
+            scale: Math.min(Math.max(0.3, prev.scale + delta), 2.5)
+        }));
+    };
+
+    // --- O(N) Linear Graph Builder & Capper ---
+    const lineageData = useMemo(() => {
+        if (!lineage || historyIndex === -1) return null;
+
+        // The current visual target we are tracing backwards from
+        const activeTargetBatch = viewHistory[historyIndex] || lineage.targetBatch;
+
+        // 1. Build O(1) Lookup Maps
+        const batchMap = new Map();
+        lineage.batches.forEach((b: any) => batchMap.set(b.batch_number, b));
+        
+        const processMap = new Map();
+        lineage.processes.forEach((p: any) => processMap.set(p.id, p));
+        
+        const processInputs = new Map<number, any[]>();
+        const processOutputs = new Map<number, any[]>();
+        const batchCreator = new Map<string, any>();
+
+        lineage.edges.forEach((e: any) => {
+            if (e.type === 'batch_to_process') {
+                const bId = e.sourceId.replace('batch_', '');
+                const pId = Number(e.targetId.replace('process_', ''));
+                if (!processInputs.has(pId)) processInputs.set(pId, []);
+                processInputs.get(pId)!.push(batchMap.get(bId) || { batch_number: bId });
+            } else if (e.type === 'process_to_batch') {
+                const pId = Number(e.sourceId.replace('process_', ''));
+                const bId = e.targetId.replace('batch_', '');
+                if (!processOutputs.has(pId)) processOutputs.set(pId, []);
+                processOutputs.get(pId)!.push(batchMap.get(bId) || { batch_number: bId });
+                batchCreator.set(bId, processMap.get(pId));
+            }
+        });
+
+        // 2. Traverse Backwards from Target to Cap the Graph
+        let currentBatchId = activeTargetBatch;
+        const stages: any[] = [];
+        
+        const targetBatchData = batchMap.get(currentBatchId) || { batch_number: currentBatchId };
+
+        while (currentBatchId) {
+            const creatorProcess = batchCreator.get(currentBatchId);
+            
+            // If it's a raw material (no creator process), stop tracing.
+            if (!creatorProcess) {
+                break;
+            }
+
+            const inputs = processInputs.get(creatorProcess.id) || [];
+            const allOutputs = processOutputs.get(creatorProcess.id) || [];
+            
+            stages.unshift({ 
+                process: creatorProcess, 
+                inputs, 
+                allOutputs 
+            });
+
+            // CAP CONDITION: Stop traversing if the process has > 1 inputs (e.g. Blend) or 0
+            if (inputs.length > 1 || inputs.length === 0) {
+                break; 
+            }
+
+            // Continue tracing backwards linearly for 1-to-1 processes
+            currentBatchId = inputs[0].batch_number;
+        }
+
+        // Push the final target representation
+        if (targetBatchData) {
+            stages.push({ process: null, inputs: [], allOutputs: [], isTarget: true, targetBatchData });
+        }
+
+        return { stages, batchCreator };
+    }, [lineage, viewHistory, historyIndex]);
+
+    const handleTraceFurther = (batchNumber: string) => {
+        // Discard any forward history if we trace a new branch
+        const newHist = viewHistory.slice(0, historyIndex + 1);
+        newHist.push(batchNumber);
+        setViewHistory(newHist);
+        setHistoryIndex(newHist.length - 1);
+        setTransform({ x: 0, y: 0, scale: 1 }); // Reset viewport
+    };
+
     return (
-        <div className="max-w-3xl mx-auto space-y-6">
-            {/* Search Area */}
-            <Card className="p-6">
+        <div className="max-w-6xl mx-auto space-y-6 relative">
+            
+            {/* --- Process Details Modal --- */}
+            {selectedProcess && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+                        {/* Modal Header */}
+                        <div className={`px-6 py-4 flex justify-between items-center text-white ${selectedProcess.process.pnl >= 0 ? 'bg-[#007680]' : 'bg-red-500'}`}>
+                            <div>
+                                <h2 className="text-xl font-bold flex items-center gap-2">
+                                    <Cog size={20} /> Process Details: {selectedProcess.process.process_number || selectedProcess.process.id}
+                                </h2>
+                                <p className="text-sm opacity-80">{selectedProcess.process.process_type}</p>
+                            </div>
+                            <button onClick={() => setSelectedProcess(null)} className="p-2 hover:bg-white/20 rounded-full transition-colors">
+                                <X size={24} />
+                            </button>
+                        </div>
+
+                        {/* Modal Body */}
+                        <div className="p-6 overflow-y-auto flex-1 space-y-6 bg-[#F5F5F3]">
+                            {/* Process KPIs */}
+                            <div className="grid grid-cols-4 gap-4">
+                                <div className="bg-white p-3 rounded shadow-sm border border-[#D6D2C4] text-center">
+                                    <div className="text-[10px] uppercase text-[#968C83] font-bold">Total In</div>
+                                    <div className="text-lg font-bold text-[#51534a]">{selectedProcess.process.input_qty} <span className="text-xs font-normal">kg</span></div>
+                                </div>
+                                <div className="bg-white p-3 rounded shadow-sm border border-[#D6D2C4] text-center">
+                                    <div className="text-[10px] uppercase text-[#968C83] font-bold">Total Out</div>
+                                    <div className="text-lg font-bold text-[#51534a]">{selectedProcess.process.output_qty} <span className="text-xs font-normal">kg</span></div>
+                                </div>
+                                <div className="bg-white p-3 rounded shadow-sm border border-[#D6D2C4] text-center">
+                                    <div className="text-[10px] uppercase text-[#968C83] font-bold">Milling Loss</div>
+                                    <div className="text-lg font-bold text-[#B9975B]">{selectedProcess.process.milling_loss} <span className="text-xs font-normal">kg</span></div>
+                                </div>
+                                <div className={`p-3 rounded shadow-sm border text-center ${selectedProcess.process.pnl >= 0 ? 'bg-[#97D700]/10 border-[#97D700]/30' : 'bg-red-50 border-red-200'}`}>
+                                    <div className="text-[10px] uppercase text-[#51534a] font-bold">Total PNL</div>
+                                    <div className={`text-lg font-bold ${selectedProcess.process.pnl >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                                        ${selectedProcess.process.pnl}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Inputs Table */}
+                            <div>
+                                <h3 className="font-bold text-[#51534a] mb-2 flex items-center gap-2"><ArrowRight size={16} className="text-[#968C83]" /> Input Batches</h3>
+                                <div className="bg-white rounded border border-[#D6D2C4] overflow-hidden shadow-sm">
+                                    <table className="w-full text-sm text-left">
+                                        <thead className="bg-[#D6D2C4]/30 text-[#968C83] text-xs uppercase">
+                                            <tr>
+                                                <th className="py-2 px-4">Batch ID</th>
+                                                <th className="py-2 px-4">Strategy</th>
+                                                <th className="py-2 px-4 text-right">Qty Used (kg)</th>
+                                                <th className="py-2 px-4 text-right">Cost ($/50kg)</th>
+                                                <th className="py-2 px-4 text-right">Hedge (c/lb)</th>
+                                                <th className="py-2 px-4 text-right">Diff (c/lb)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-[#D6D2C4]/50">
+                                            {selectedProcess.inputs.map((b: any, i: number) => (
+                                                <tr key={i} className="hover:bg-[#F5F5F3]">
+                                                    <td className="py-2 px-4 font-mono text-[#007680] font-medium">{b.batch_number}</td>
+                                                    <td className="py-2 px-4 text-[#51534a]">{b.strategy || '-'}</td>
+                                                    <td className="py-2 px-4 text-right font-medium">{b.input_qty}</td>
+                                                    <td className="py-2 px-4 text-right">{b.input_cost_usd_50 || '-'}</td>
+                                                    <td className="py-2 px-4 text-right text-[#968C83]">{b.input_hedge_level_usc_lb || '-'}</td>
+                                                    <td className="py-2 px-4 text-right font-medium text-[#51534a]">{b.input_differential || '-'}</td>
+                                                </tr>
+                                            ))}
+                                            {selectedProcess.inputs.length === 0 && <tr><td colSpan={6} className="py-4 text-center text-[#968C83] italic">No input batches recorded</td></tr>}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Outputs Table */}
+                            <div>
+                                <h3 className="font-bold text-[#51534a] mb-2 flex items-center gap-2"><ArrowRight size={16} className="text-[#007680] rotate-180" /> Generated Output Batches</h3>
+                                <div className="bg-white rounded border border-[#D6D2C4] overflow-hidden shadow-sm">
+                                    <table className="w-full text-sm text-left">
+                                        <thead className="bg-[#007680]/10 text-[#007680] text-xs uppercase">
+                                            <tr>
+                                                <th className="py-2 px-4">Batch ID</th>
+                                                <th className="py-2 px-4">Strategy</th>
+                                                <th className="py-2 px-4 text-right">Qty Gen (kg)</th>
+                                                <th className="py-2 px-4 text-right">Cost ($/50kg)</th>
+                                                <th className="py-2 px-4 text-right">Hedge (c/lb)</th>
+                                                <th className="py-2 px-4 text-right">Diff (c/lb)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-[#D6D2C4]/50">
+                                            {selectedProcess.allOutputs.map((b: any, i: number) => (
+                                                <tr key={i} className="hover:bg-[#F5F5F3]">
+                                                    <td className="py-2 px-4 font-mono text-[#007680] font-medium">{b.batch_number}</td>
+                                                    <td className="py-2 px-4 text-[#51534a]">{b.strategy || '-'}</td>
+                                                    <td className="py-2 px-4 text-right font-medium">{b.output_qty}</td>
+                                                    <td className="py-2 px-4 text-right">{b.output_cost_usd_50 || '-'}</td>
+                                                    <td className="py-2 px-4 text-right text-[#968C83]">{b.output_hedge_level_usc_lb || '-'}</td>
+                                                    <td className="py-2 px-4 text-right font-medium text-[#51534a]">{b.output_differential || '-'}</td>
+                                                </tr>
+                                            ))}
+                                            {selectedProcess.allOutputs.length === 0 && <tr><td colSpan={6} className="py-4 text-center text-[#968C83] italic">No output batches recorded</td></tr>}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* --- Search Area --- */}
+            <Card className="p-6 relative z-10">
                 <div className="flex flex-col gap-2">
-                    <h3 className="text-lg font-bold text-[#51534a] mb-2">Batch Lookup</h3>
+                    <div className="flex justify-between items-center mb-2">
+                        <h3 className="text-lg font-bold text-[#51534a]">Batch Traceability Graph</h3>
+                        {lineage && (
+                            <button 
+                                onClick={handleExtract}
+                                className="text-xs text-[#007680] hover:text-[#007680]/80 font-medium flex items-center gap-1 bg-[#A4DBE8]/20 px-3 py-1.5 rounded border border-[#007680]/20 transition-all"
+                            >
+                                <Download size={14} /> Extract Lineage
+                            </button>
+                        )}
+                    </div>
                     <div className="flex gap-2">
                         <div className="relative flex-1">
                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" size={20} />
                              <input 
                                 type="text"
-                                placeholder="Enter Batch ID (e.g. BLEND-2023-NOV-STARBUCKS)"
+                                placeholder="Enter Batch ID (e.g. BLEND-2023-NOV)"
                                 className="w-full pl-10 pr-4 py-3 border border-[#D6D2C4] rounded-lg focus:ring-2 focus:ring-[#007680] outline-none text-lg font-mono"
                                 value={search}
                                 onChange={(e) => {
                                     setSearch(e.target.value);
-                                    setNotFound(false); // Clear error when typing
+                                    setNotFound(false);
                                 }}
                                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                              />
@@ -2479,118 +2754,197 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                             disabled={loading}
                             className="bg-[#007680] text-white px-6 rounded-lg font-medium hover:bg-[#007680]/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                            {loading ? 'Searching...' : 'Search'}
+                            {loading ? 'Tracing...' : 'Trace'}
                         </button>
                     </div>
                     {notFound && (
                         <p className="text-sm text-[#B9975B] mt-2 flex items-center gap-2 font-medium">
                             <AlertCircle size={16} />
-                            Batch "{search}" not found in history.
+                            Batch "{search}" history could not be traced.
                         </p>
                     )}
-                    <p className="text-xs text-[#968C83] mt-1">
-                        Search archived history batches only.
-                    </p>
                 </div>
             </Card>
 
-            {/* Result Area */}
-            {result && (
-                <div className="space-y-6">
-                    {/* Summary Card */}
-                    <Card className="p-6 shadow-lg" variant="dark">
-                        <div className="flex justify-between items-start mb-6">
-                            <div>
-                                <div className="flex items-center gap-3 mb-1">
-                                    {/* Display batch_number */}
-                                    <h2 className="text-2xl font-bold font-mono text-white">{result.batch_number || result.id}</h2>
-                                    {result.status === 'active' ? (
-                                        <span className="bg-[#007680] text-white text-[10px] uppercase font-bold px-2 py-1 rounded flex items-center gap-1">
-                                            <PackageCheck size={12} /> Active
-                                        </span>
-                                    ) : (
-                                        <span className="bg-[#968C83] text-white text-[10px] uppercase font-bold px-2 py-1 rounded flex items-center gap-1">
-                                            <Archive size={12} /> Archived
-                                        </span>
-                                    )}
-                                </div>
-                                <div className="text-[#A7BDB1] text-sm">{result.strategy}</div>
-                            </div>
-                            <div className="text-right">
-                                <div className="text-3xl font-bold text-white">{formatNumber(convertQty(result.quantityKg, unit), 0)} <span className="text-sm font-normal text-[#A7BDB1]">{unit.toUpperCase()}</span></div>
-                                <div className="text-[#D6D2C4] text-xs uppercase tracking-wider mt-1">Total Volume</div>
-                            </div>
+            {/* --- Interactive Pannable/Zoomable Graph Canvas --- */}
+            {lineageData && lineageData.stages.length > 0 && (
+                <Card className="shadow-lg bg-[#EFEFE9] relative border border-[#D6D2C4] overflow-hidden h-[60vh]">
+                    
+                    {/* Toolbar Overlay */}
+                    <div className="absolute top-4 left-4 z-20 flex gap-4 pointer-events-none w-full pr-8 justify-between">
+                        <div className="text-xs font-bold text-[#51534a] bg-white/80 backdrop-blur px-3 py-1.5 rounded shadow-sm border border-[#D6D2C4]">
+                            <span className="uppercase tracking-wider">Lineage Flow</span>
+                            <span className="ml-2 font-normal text-[#968C83]">Capped at multi-input processes. Drag to pan.</span>
                         </div>
-                        
-                        <div className="grid grid-cols-3 gap-4 border-t border-white/10 pt-4">
-                             <div>
-                                 <div className="text-[10px] text-[#A7BDB1] uppercase tracking-wider mb-1">Outright</div>
-                                 <div className="text-xl font-bold text-white">${formatNumber(result.outrightPrice50kg)}</div>
-                                 <div className="text-[10px] text-[#968C83]">/50kg</div>
-                             </div>
-                             <div>
-                                 <div className="text-[10px] text-[#A7BDB1] uppercase tracking-wider mb-1">Hedge</div>
-                                 <div className="text-xl font-bold text-white">{formatNumber(result.hedgeLevelUSClb)}</div>
-                                 <div className="text-[10px] text-[#968C83]">c/lb</div>
-                             </div>
-                             <div>
-                                 <div className="text-[10px] text-[#A7BDB1] uppercase tracking-wider mb-1">Differential</div>
-                                 <div className={`text-xl font-bold ${toUSClb(result.outrightPrice50kg) - result.hedgeLevelUSClb >= 0 ? 'text-[#97D700]' : 'text-[#CEB888]'}`}>
-                                    {toUSClb(result.outrightPrice50kg) - result.hedgeLevelUSClb > 0 ? '+' : ''}
-                                    {formatNumber(toUSClb(result.outrightPrice50kg) - result.hedgeLevelUSClb)}
-                                 </div>
-                                 <div className="text-[10px] text-[#968C83]">c/lb</div>
-                             </div>
+                        <div className="flex gap-2 pointer-events-auto">
+                            <button onClick={() => setTransform({ x: 0, y: 0, scale: 1 })} className="bg-white text-xs px-3 py-1 border border-[#D6D2C4] rounded shadow-sm hover:bg-[#F5F5F3]">Reset View</button>
                         </div>
-                    </Card>
+                    </div>
 
-                    {/* Composition Table (If Blend) */}
-                    {result.composition && result.composition.length > 0 ? (
-                        <Card className="p-0 overflow-hidden">
-                            <div className="p-4 bg-[#D6D2C4]/20 border-b border-[#D6D2C4] flex justify-between items-center">
-                                <h3 className="font-bold text-[#51534a]">Composition Ingredients</h3>
-                                <span className="text-xs text-[#968C83]">{result.composition.length} Batches</span>
-                            </div>
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-sm text-left">
-                                    <thead className="bg-[#51534a] text-white font-medium">
-                                        <tr>
-                                            <th className="py-3 px-4">Batch ID</th>
-                                            <th className="py-3 px-4">Strategy</th>
-                                            <th className="py-3 px-4 text-right">Price ($/50)</th>
-                                            <th className="py-3 px-4 text-right">Hedge (c/lb)</th>
-                                            <th className="py-3 px-4 text-right">Weight ({unit})</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-[#D6D2C4]">
-                                        {result.composition.map((comp: any, idx: number) => (
-                                            <tr key={idx} className="hover:bg-[#D6D2C4]/10">
-                                                <td className="py-3 px-4 font-mono text-[#007680] font-medium">{comp.batch_number}</td>
-                                                <td className="py-3 px-4 text-[#51534a]">{comp.strategy}</td>
-                                                <td className="py-3 px-4 text-right text-[#51534a]">
-                                                    {comp.outrightPrice50kg}
-                                                </td>
-                                                <td className="py-3 px-4 text-right text-[#51534a]">
-                                                    {comp.hedgeLevelUSClb}
-                                                </td>
-                                                <td className="py-3 px-4 text-right font-medium text-[#51534a]">{formatNumber(convertQty(comp.quantityKg, unit), 0)}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </Card>
-                    ) : (
-                         <div className="text-center p-8 border-2 border-dashed border-[#D6D2C4] rounded-xl text-[#968C83]">
-                            <PackageCheck size={32} className="mx-auto mb-2 opacity-50" />
-                            <p>This is a raw batch origin. No blend composition available.</p>
-                         </div>
+                    {/* Edge Navigation Arrows for View History */}
+                    {viewHistory.length > 1 && (
+                        <>
+                            <button 
+                                onClick={() => {
+                                    setHistoryIndex(i => i + 1);
+                                    setTransform({ x: 0, y: 0, scale: 1 });
+                                }}
+                                disabled={historyIndex >= viewHistory.length - 1}
+                                className={`absolute left-6 top-1/2 -translate-y-1/2 z-30 p-3 bg-white/90 backdrop-blur rounded-full shadow-lg border border-[#D6D2C4] text-[#007680] hover:bg-[#007680] hover:text-white transition-all ${historyIndex >= viewHistory.length - 1 ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+                                title="Go backward down the line (Trace older branch)"
+                            >
+                                <ChevronLeft size={28} />
+                            </button>
+
+                            <button 
+                                onClick={() => {
+                                    setHistoryIndex(i => i - 1);
+                                    setTransform({ x: 0, y: 0, scale: 1 });
+                                }}
+                                disabled={historyIndex <= 0}
+                                className={`absolute right-6 top-1/2 -translate-y-1/2 z-30 p-3 bg-white/90 backdrop-blur rounded-full shadow-lg border border-[#D6D2C4] text-[#007680] hover:bg-[#007680] hover:text-white transition-all ${historyIndex <= 0 ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
+                                title="Go forward in lineage (Return to newer target)"
+                            >
+                                <ChevronRight size={28} />
+                            </button>
+                        </>
                     )}
-                </div>
+
+                    {/* Canvas Area */}
+                    <div 
+                        className={`w-full h-full relative ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
+                        onMouseDown={handleMouseDown}
+                        onMouseMove={handleMouseMove}
+                        onMouseUp={handleMouseUpOrLeave}
+                        onMouseLeave={handleMouseUpOrLeave}
+                        onWheel={handleWheel}
+                    >
+                        {/* The Zoom/Pan Container */}
+                        <div 
+                            className="absolute top-1/2 left-24 flex items-center transition-transform duration-75 origin-left"
+                            style={{ transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})` }}
+                        >
+                            {lineageData.stages.map((stage, index) => (
+                                <React.Fragment key={index}>
+                                    
+                                    {/* 1. Render Leftmost Inputs (if this is the capped process) */}
+                                    {index === 0 && stage.process && stage.inputs.length > 0 && (
+                                        <>
+                                            <div className="flex flex-col justify-center relative">
+                                                {stage.inputs.map((inputBatch: any, idx: number) => (
+                                                    <div key={`${inputBatch.batch_number}-${idx}`} className="flex items-stretch relative">
+                                                        <div className="flex items-center py-4">
+                                                            <div className="bg-[#F5F5F3] border-2 border-[#D6D2C4] p-3 rounded-xl shadow-sm w-48 shrink-0 text-center relative z-10 flex flex-col items-center">
+                                                                <div className="text-[9px] uppercase font-bold text-[#968C83] mb-1">Input Batch</div>
+                                                                <div className="font-mono text-xs font-bold text-[#51534a] truncate w-full" title={inputBatch.batch_number}>{inputBatch.batch_number}</div>
+                                                                <div className="text-[10px] text-[#007680] mt-1 font-bold mb-3">{inputBatch.quantityKg || inputBatch.input_qty} kg</div>
+                                                                
+                                                                {/* Only show trace back if it has history (tracked in creator map) */}
+                                                                {lineageData.batchCreator.has(inputBatch.batch_number) ? (
+                                                                    <button 
+                                                                        onClick={() => handleTraceFurther(inputBatch.batch_number)}
+                                                                        className="bg-[#007680] text-white text-[10px] px-3 py-1.5 rounded-full hover:bg-[#007680]/90 font-bold flex items-center gap-1 shadow-sm transition-all pointer-events-auto"
+                                                                    >
+                                                                        <ChevronLeft size={12}/> Trace Back
+                                                                    </button>
+                                                                ) : (
+                                                                    <div className="text-[9px] text-[#968C83] italic font-medium px-2 py-1 bg-[#D6D2C4]/20 rounded-full">Origin Batch</div>
+                                                                )}
+                                                            </div>
+                                                            {/* Horizontal stem piece */}
+                                                            <div className="w-8 h-1 bg-[#968C83] rounded-full" />
+                                                        </div>
+                                                        {/* Vertical Stem mapping */}
+                                                        {stage.inputs.length > 1 && (
+                                                            <div className={`absolute right-0 w-1 bg-[#968C83] -z-10
+                                                                ${idx === 0 ? 'top-[50%] bottom-0 rounded-tl-sm' : 
+                                                                  idx === stage.inputs.length - 1 ? 'top-0 bottom-[50%] rounded-bl-sm' : 
+                                                                  'top-0 bottom-0'}`}
+                                                            />
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            {/* Final connector arrow from inputs to the process */}
+                                            {stage.inputs.length > 0 && (
+                                                <div className="w-8 h-1 bg-[#968C83] shrink-0 relative rounded-full">
+                                                    <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 border-t-4 border-r-4 border-[#968C83] rotate-45 rounded-sm"></div>
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+
+                                    {/* Arrow connecting intermediate processes */}
+                                    {index > 0 && (
+                                        <div className="w-12 h-1 bg-[#968C83] shrink-0 relative rounded-full ml-2">
+                                            <div className="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 border-t-4 border-r-4 border-[#968C83] rotate-45 rounded-sm"></div>
+                                        </div>
+                                    )}
+
+                                    {/* 2. Render Process Node */}
+                                    {stage.process && (
+                                        <div 
+                                            onClick={(e) => { e.stopPropagation(); setSelectedProcess(stage); }}
+                                            className={`p-5 rounded-2xl shadow-xl w-56 flex flex-col shrink-0 transition-transform hover:-translate-y-1 cursor-pointer pointer-events-auto border-2
+                                                ${stage.process.pnl >= 0 ? 'bg-[#007680] border-[#007680]/50 text-white' : 'bg-red-500 border-red-400 text-white'}
+                                            `}
+                                        >
+                                            <div className="flex items-center justify-between mb-3 border-b border-white/20 pb-2">
+                                                <div className="flex items-center gap-2">
+                                                    <Cog size={18} className={stage.process.pnl >= 0 ? "text-[#A4DBE8]" : "text-red-200"} />
+                                                    <div className="text-xs uppercase font-bold tracking-wider">{stage.process.process_type}</div>
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="space-y-1 text-xs">
+                                                <div className="flex justify-between">
+                                                    <span className="opacity-80">In Weight:</span>
+                                                    <span className="font-mono font-bold">{stage.process.input_qty}</span>
+                                                </div>
+                                                <div className="flex justify-between">
+                                                    <span className="opacity-80">Out Weight:</span>
+                                                    <span className="font-mono font-bold">{stage.process.output_qty}</span>
+                                                </div>
+                                                <div className="flex justify-between">
+                                                    <span className="opacity-80">Loss:</span>
+                                                    <span className={`font-mono font-bold ${stage.process.pnl >= 0 ? 'text-[#CEB888]' : 'text-white'}`}>{stage.process.milling_loss}</span>
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-3 pt-2 border-t border-white/20 flex justify-between items-center">
+                                                <span className="text-xs font-bold uppercase tracking-wider">PNL</span>
+                                                <span className="font-mono font-bold text-lg">${stage.process.pnl}</span>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* 3. Render Target Batch (End of Current Line) */}
+                                    {stage.isTarget && stage.targetBatchData && (
+                                        <div className="bg-white border-2 border-[#007680] p-5 rounded-2xl shadow-xl w-64 shrink-0 pointer-events-auto relative z-10 ml-2">
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <PackageCheck size={20} className="text-[#007680]" />
+                                                <div className="text-xs uppercase tracking-wider font-bold text-[#007680]">{historyIndex === 0 ? "Target Batch" : "Traced Batch"}</div>
+                                            </div>
+                                            <div className="font-mono font-bold text-lg truncate text-[#51534a]" title={stage.targetBatchData.batch_number}>
+                                                {stage.targetBatchData.batch_number}
+                                            </div>
+                                            <div className="text-sm mt-1 text-[#968C83]">{stage.targetBatchData.strategy}</div>
+                                            <div className="mt-3 bg-[#F5F5F3] p-2 rounded text-sm text-center font-bold text-[#51534a]">
+                                                {stage.targetBatchData.quantityKg || stage.targetBatchData.output_qty || stage.targetBatchData.input_qty} kg
+                                            </div>
+                                        </div>
+                                    )}
+
+                                </React.Fragment>
+                            ))}
+                        </div>
+                    </div>
+                </Card>
             )}
         </div>
     );
 }
+
 
 function ClientAnalysisView({ unit }: { unit: Unit }) {
     // Data State

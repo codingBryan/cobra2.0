@@ -1571,7 +1571,37 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
     
     // Query 1: Fetch Active Batches from post_stack_batches 
     // Augmented with lookups for date_in and analysis_id from daily_strategy_processing
-    const activeQuery = `
+    // const activeQuery = `
+    //     SELECT 
+    //         psb.id,
+    //         psb.batch_number,
+    //         ps.stack_type as strategy, 
+    //         psb.price_usd_50, 
+    //         psb.quantity, 
+    //         psb.hedge_level,
+    //         -- Lookup first valid date_in
+    //         (
+    //             SELECT date_in 
+    //             FROM daily_strategy_processing dsp 
+    //             WHERE dsp.batch_number = psb.batch_number 
+    //             AND dsp.date_in IS NOT NULL 
+    //             LIMIT 1
+    //         ) as date_in,
+    //         -- Lookup first valid analysis_id
+    //         (
+    //             SELECT analysis_id 
+    //             FROM daily_strategy_processing dsp 
+    //             WHERE dsp.batch_number = psb.batch_number 
+    //             AND dsp.analysis_id IS NOT NULL 
+    //             LIMIT 1
+    //         ) as analysis_id
+    //     FROM post_stack_batches psb
+    //     JOIN post_stack ps ON psb.stack_id = ps.id
+    // `;
+
+
+
+        const activeQuery = `
         SELECT 
             psb.id,
             psb.batch_number,

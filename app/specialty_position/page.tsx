@@ -70,6 +70,10 @@ interface SpecialtyLot {
   allocated_weight?: number;
   fully_allocated?: boolean;
   to_commercial?: boolean;
+  qc_strategy?: string;
+  _valo?: number;
+  _diff?: number;
+  _pnl?: number;
 }
 
 interface SaleContract {
@@ -221,6 +225,8 @@ export default function SpecialtyPage() {
   const [sales, setSales] = useState<SaleContract[]>([]);
   const [lots, setLots] = useState<SpecialtyLot[]>([]);
   const [allocationsData, setAllocationsData] = useState<AllocationDetail[]>([]);
+  const [strategyMappings, setStrategyMappings] = useState<Record<string, string>>({});
+  const [strategyValos, setStrategyValos] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
 
   // Filters
@@ -257,31 +263,50 @@ export default function SpecialtyPage() {
   const [allocationSearch, setAllocationSearch] = useState('');
   const [allocationClientFilter, setAllocationClientFilter] = useState<string[]>([]);
 
-  // Stocks Tab State (Now using multi-select arrays)
+  // Stocks Tab State
   const [stocksGradeFilter, setStocksGradeFilter] = useState<string[]>([]);
   const [stocksBrokerFilter, setStocksBrokerFilter] = useState<string[]>([]);
   const [stocksSeasonFilter, setStocksSeasonFilter] = useState<string[]>([]);
   const [stocksDateFrom, setStocksDateFrom] = useState('');
   const [stocksDateTo, setStocksDateTo] = useState('');
   const [stocksSearch, setStocksSearch] = useState('');
+  const [pnlPivotBy, setPnlPivotBy] = useState<'qc_strategy' | 'season' | 'grade'>('qc_strategy');
+  const [selectedPnlKeys, setSelectedPnlKeys] = useState<Set<string>>(new Set());
   
-  // Default values set to true
   const [hideFullyAllocated, setHideFullyAllocated] = useState(true);
   const [hideMovedToCommercial, setHideMovedToCommercial] = useState(true);
 
-  // --- Optimized Data Fetching ---
+  const COBRA_SERVICE = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL;
   const fetchData = useCallback(async (showLoadingIndicator = false, signal?: AbortSignal) => {
     try {
       if (showLoadingIndicator) setLoading(true);
       const fetchOptions: RequestInit = { cache: 'no-store' };
       if (signal) fetchOptions.signal = signal;
 
-      const [salesData, lotsData, allocsData] = await Promise.all([
+      const [salesData, lotsData, allocsData, mapData, valoData] = await Promise.all([
           fetch('/api/contracts', fetchOptions).then(res => res.ok ? res.json() : []).catch(() => []),
           fetch('/api/specialty_lots', fetchOptions).then(res => res.ok ? res.json() : []).catch(() => []),
-          fetch('/api/specialty_allocations', fetchOptions).then(res => res.ok ? res.json() : []).catch(() => [])
+          fetch('/api/specialty_allocations', fetchOptions).then(res => res.ok ? res.json() : []).catch(() => []),
+          fetch(COBRA_SERVICE+'/get_strategy_mappings', fetchOptions).then(res => res.ok ? res.json() : {}).catch(() => ({})),
+          fetch(COBRA_SERVICE+'/get_strategy_valos', fetchOptions).then(res => res.ok ? res.json() : {}).catch(() => ({}))
       ]);
       
+      // O(1) Lookup Inversion for Mapping
+      const invertedMap: Record<string, string> = {};
+      Object.entries(mapData || {}).forEach(([stdStrat, rawStrats]) => {
+          if (Array.isArray(rawStrats)) {
+              rawStrats.forEach(raw => invertedMap[typeof raw === 'string' ? raw.trim().toLowerCase() : String(raw)] = stdStrat);
+          }
+      });
+      setStrategyMappings(invertedMap);
+      
+      // O(1) Lookup Normalization for Valos to prevent case sensitivity misses
+      const normalizedValos: Record<string, number> = {};
+      Object.entries(valoData || {}).forEach(([k, v]) => {
+          normalizedValos[k.trim().toUpperCase()] = Number(v);
+      });
+      setStrategyValos(normalizedValos);
+
       setSales(Array.isArray(salesData) ? salesData : (salesData?.data || salesData?.rows || []));
       setLots(Array.isArray(lotsData) ? lotsData : (lotsData?.data || lotsData?.rows || []));
       setAllocationsData(Array.isArray(allocsData) ? allocsData : (allocsData?.data || allocsData?.rows || []));
@@ -320,6 +345,32 @@ export default function SpecialtyPage() {
       setAllocateVolumes(newVols);
       setUnit(newUnit);
   };
+
+  // --- Data Processing Hook (Valo & PNL Math) ---
+  const processedLots = useMemo(() => {
+      return lots.map(lot => {
+          let _valo = 0, _diff = 0, _pnl = 0;
+          
+          if (lot.qc_strategy) {
+              const rawStrat = lot.qc_strategy.trim();
+              const stdStrat = strategyMappings[rawStrat.toLowerCase()] || rawStrat;
+              _valo = strategyValos[stdStrat.toUpperCase()] || 0;
+              
+              const price = Number(lot.price_usd_50) || 0;
+              const fobbing = Number(lot.fobbing_cost) || 0;
+              const hedge = Number(lot.hedge_level) || 0;
+              
+              // Precalculated multiplier: 0.5 * 0.453592
+              _diff = (price + fobbing) * 0.226796 - hedge;
+              
+              const avail = Math.max(0, asNumber(lot.purchased_weight) - asNumber(lot.allocated_weight));
+              // Precalculated multiplier: 2.2046 / 100
+              _pnl = (_valo - _diff) * (avail * 0.022046);
+          }
+          return { ...lot, _valo, _diff, _pnl };
+      });
+  }, [lots, strategyMappings, strategyValos]);
+
 
   // --- Derived Calculations ---
   const specialtyContracts = useMemo(() => {
@@ -379,7 +430,7 @@ export default function SpecialtyPage() {
       const grades = new Set<string>();
       const brokers = new Set<string>();
       const seasons = new Set<string>();
-      lots.forEach(l => {
+      processedLots.forEach(l => {
           if (l.grade) grades.add(l.grade);
           if (l.broker) brokers.add(l.broker);
           if (l.season) seasons.add(l.season);
@@ -389,7 +440,7 @@ export default function SpecialtyPage() {
           brokers: Array.from(brokers).sort(),
           seasons: Array.from(seasons).sort()
       };
-  }, [lots]);
+  }, [processedLots]);
 
   const filteredStocks = useMemo(() => {
       const gradesSet = new Set(stocksGradeFilter);
@@ -397,7 +448,7 @@ export default function SpecialtyPage() {
       const seasonsSet = new Set(stocksSeasonFilter);
       const searchQuery = stocksSearch.toLowerCase();
 
-      return lots.filter(lot => {
+      return processedLots.filter(lot => {
           if (hideFullyAllocated && bool(lot.fully_allocated)) return false;
           if (hideMovedToCommercial && bool(lot.to_commercial)) return false;
           
@@ -420,7 +471,7 @@ export default function SpecialtyPage() {
           
           return true;
       });
-  }, [lots, hideFullyAllocated, hideMovedToCommercial, stocksGradeFilter, stocksBrokerFilter, stocksSeasonFilter, stocksDateFrom, stocksDateTo, stocksSearch]);
+  }, [processedLots, hideFullyAllocated, hideMovedToCommercial, stocksGradeFilter, stocksBrokerFilter, stocksSeasonFilter, stocksDateFrom, stocksDateTo, stocksSearch]);
 
   const allSelectedAreCommercial = useMemo(() => {
       if (selectedLotIds.size === 0) return false;
@@ -437,9 +488,11 @@ export default function SpecialtyPage() {
       let totalAllocated = 0;
       let totalValue = 0;
       let weightWithPrice = 0;
+      let totalPNL = 0;
       
       const gradeDist: Record<string, number> = {};
       const brokerDist: Record<string, number> = {};
+      const pivotAgg: Record<string, number> = {};
 
       filteredStocks.forEach(lot => {
           const pWeight = asNumber(lot.purchased_weight);
@@ -448,6 +501,7 @@ export default function SpecialtyPage() {
           
           totalPurchased += pWeight;
           totalAllocated += aWeight;
+          totalPNL += lot._pnl || 0;
 
           if (available > 0) {
               const grade = lot.grade || 'Unknown';
@@ -461,6 +515,9 @@ export default function SpecialtyPage() {
               totalValue += (Number(lot.price_usd_50) * pWeight);
               weightWithPrice += pWeight;
           }
+          
+          const pivotKey = String(lot[pnlPivotBy as keyof typeof lot] || 'Unknown');
+          pivotAgg[pivotKey] = (pivotAgg[pivotKey] || 0) + (lot._pnl || 0);
       });
 
       const weightedAvgPrice = weightWithPrice > 0 ? (totalValue / weightWithPrice) : 0;
@@ -470,10 +527,23 @@ export default function SpecialtyPage() {
           totalAllocated,
           totalAvailable: Math.max(0, totalPurchased - totalAllocated),
           weightedAvgPrice,
+          totalPNL,
           gradeChart: Object.entries(gradeDist).map(([name, value]) => ({ name, value: convertQty(value, unit) })).sort((a, b) => b.value - a.value),
-          brokerChart: Object.entries(brokerDist).map(([name, value]) => ({ name, value: convertQty(value, unit) })).sort((a, b) => b.value - a.value)
+          brokerChart: Object.entries(brokerDist).map(([name, value]) => ({ name, value: convertQty(value, unit) })).sort((a, b) => b.value - a.value),
+          pnlPivot: Object.entries(pivotAgg).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value)
       };
-  }, [filteredStocks, unit]);
+  }, [filteredStocks, unit, pnlPivotBy]);
+
+  const displayedTotalPnl = useMemo(() => {
+      if (selectedPnlKeys.size === 0) return stocksSummary.totalPNL;
+      let sum = 0;
+      for (let i = 0; i < stocksSummary.pnlPivot.length; i++) {
+          if (selectedPnlKeys.has(stocksSummary.pnlPivot[i].name)) {
+              sum += stocksSummary.pnlPivot[i].value;
+          }
+      }
+      return sum;
+  }, [stocksSummary, selectedPnlKeys]);
 
   // --- Allocations Tab Derived Data ---
   const groupedAllocations = useMemo(() => {
@@ -591,7 +661,6 @@ export default function SpecialtyPage() {
           const res = await fetch(url, { method: 'DELETE' });
           if (!res.ok) throw new Error("Failed to delete allocation");
           
-          // Re-fetch data without reloading the page
           await fetchData();
       } catch (error: any) {
           alert(`Error: ${error.message}`);
@@ -617,8 +686,6 @@ export default function SpecialtyPage() {
           if (!res.ok) throw new Error((await res.json()).error || 'Allocation failed');
           
           setIsAllocateModalOpen(false);
-          
-          // Re-fetch data without reloading the page
           await fetchData();
       } catch (error: any) {
           alert(`Error allocating lots: ${error.message}`);
@@ -666,8 +733,6 @@ export default function SpecialtyPage() {
           }
 
           setIsCommercialModalOpen(false);
-          
-          // Re-fetch data without reloading the page
           await fetchData();
       } catch (error: any) {
           alert(`Error: ${error.message}`);
@@ -694,8 +759,6 @@ export default function SpecialtyPage() {
 
           setIsSpecialtyModalOpen(false);
           setSelectedLotIds(new Set());
-          
-          // Re-fetch data without reloading the page
           await fetchData();
       } catch (error: any) {
           alert(`Error: ${error.message}`);
@@ -717,7 +780,6 @@ export default function SpecialtyPage() {
 
       setIsUpdatingTrade(true);
       try {
-          // Utilizing the bulk PATCH endpoint
           const res = await fetch('/api/specialty_lots', {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
@@ -731,8 +793,6 @@ export default function SpecialtyPage() {
           setTradeHedgeLevel('');
           setTradeFobbingCost('');
           setSelectedLotIds(new Set());
-          
-          // Re-fetch data without reloading the page
           await fetchData();
       } catch (error: any) {
           alert(`Error updating trade variables: ${error.message}`);
@@ -743,7 +803,7 @@ export default function SpecialtyPage() {
 
   const handleExportStocks = () => {
       if (filteredStocks.length === 0) return;
-      const headers = ["Lot Number", "Season", "Purchase Date", "Sale No", "Grower Marks", "Grade", "Outturn", "Purchased Weight", "Allocated Weight", "Fully Allocated", "Price ($/50)", "Fobbing Cost", "Hedge Level", "To Commercial"].join(',');
+      const headers = ["Lot Number", "Season", "Purchase Date", "Sale No", "QC Strategy", "Grade", "Outturn", "Purchased Weight", "Allocated Weight", "Fully Allocated", "Price ($/50)", "Fobbing Cost", "Hedge Level", "Differential", "Valo", "Est PNL", "To Commercial"].join(',');
       const rows = filteredStocks.map(lot => 
           [
               `"${lot.lot_number || ''}"`,
@@ -759,6 +819,9 @@ export default function SpecialtyPage() {
               lot.price_usd_50 ?? '',
               lot.fobbing_cost ?? '',
               `"${lot.hedge_level || ''}"`,
+              lot._diff != null ? lot._diff.toFixed(2) : '',
+              lot._valo != null ? lot._valo.toFixed(2) : '',
+              lot._pnl != null ? lot._pnl.toFixed(2) : '',
               bool(lot.to_commercial) ? 'Yes' : 'No'
           ].join(',')
       ).join('\n');
@@ -892,7 +955,7 @@ export default function SpecialtyPage() {
   // --- Filter Derivations ---
   const gradeDistributionData = useMemo(() => {
     const grades: Record<string, number> = {};
-    lots.forEach(lot => {
+    processedLots.forEach(lot => {
         if (!bool(lot.fully_allocated) && !bool(lot.to_commercial)) {
             const availableVolume = Math.max(0, asNumber(lot.purchased_weight) - asNumber(lot.allocated_weight));
             if (availableVolume > 0) {
@@ -902,7 +965,7 @@ export default function SpecialtyPage() {
         }
     });
     return Object.entries(grades).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  }, [lots, unit]);
+  }, [processedLots, unit]);
 
   const clientUnexecutedData = useMemo(() => {
     const clients: Record<string, number> = {};
@@ -933,11 +996,11 @@ export default function SpecialtyPage() {
   }, [specialtyContracts, showExecutedContracts, contractSearch]);
 
   const allocatableLots = useMemo(() => {
-    return lots.filter(lot => {
+    return processedLots.filter(lot => {
         const available = asNumber(lot.purchased_weight) - asNumber(lot.allocated_weight);
         return !bool(lot.fully_allocated) && !bool(lot.to_commercial) && available > 0;
     });
-  }, [lots]);
+  }, [processedLots]);
 
   const allocateFilterOptions = useMemo(() => {
       const grades = new Set<string>();
@@ -1651,7 +1714,7 @@ export default function SpecialtyPage() {
                           <th className="py-2.5 px-3">Season</th>
                           <th className="py-2.5 px-3">Purchase Date</th>
                           <th className="py-2.5 px-3">Sale No.</th>
-                          <th className="py-2.5 px-3">Grower Marks</th>
+                          <th className="py-2.5 px-3">QC Strategy</th>
                           <th className="py-2.5 px-3">Grade</th>
                           <th className="py-2.5 px-3">Outturn</th>
                           <th className="py-2.5 px-3 text-right">Purchased Wt.</th>
@@ -1660,16 +1723,28 @@ export default function SpecialtyPage() {
                           <th className="py-2.5 px-3 text-right">Price ($/50)</th>
                           <th className="py-2.5 px-3 text-right">Fobbing</th>
                           <th className="py-2.5 px-3">Hedge Lvl</th>
+                          <th className="py-2.5 px-3 text-right">Diff.</th>
+                          <th className="py-2.5 px-3 text-right">Valo</th>
+                          <th className="py-2.5 px-3 text-right">Est. PNL</th>
                           <th className="py-2.5 px-3 text-center">To Commercial</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#D6D2C4]/50">
                         {filteredStocks.map((lot) => {
                           const isAllocated = bool(lot.fully_allocated);
+                          const isCommercial = bool(lot.to_commercial);
                           const isSelected = selectedLotIds.has(lot.id);
                           
+                          const rowClass = isSelected 
+                              ? 'bg-[#007680]/5' 
+                              : isCommercial 
+                                  ? 'bg-red-100 hover:bg-red-200/60' 
+                                  : isAllocated 
+                                      ? 'bg-red-50 hover:bg-red-100/60' 
+                                      : 'bg-white hover:bg-[#F5F5F3]';
+
                           return (
-                            <tr key={lot.id} className={`transition-colors ${isSelected ? 'bg-[#007680]/5' : isAllocated ? 'bg-red-50 hover:bg-red-100/60' : 'bg-white hover:bg-[#F5F5F3]'}`}>
+                            <tr key={lot.id} className={`transition-colors ${rowClass}`}>
                               <td className="py-2 px-3 text-center border-r border-[#D6D2C4]/30">
                                   <input 
                                       type="checkbox" 
@@ -1682,26 +1757,31 @@ export default function SpecialtyPage() {
                               <td className="py-2 px-3">{lot.season || '-'}</td>
                               <td className="py-2 px-3 text-[#968C83]">{formatDateToStandard(lot.purchase_date)}</td>
                               <td className="py-2 px-3 font-medium">{lot.sale_number || '-'}</td>
-                              <td className="py-2 px-3 truncate max-w-[150px]">{lot.grower_marks || '-'}</td>
+                              <td className="py-2 px-3 truncate max-w-[150px]">{lot.qc_strategy || '-'}</td>
                               <td className="py-2 px-3 font-bold">{lot.grade || '-'}</td>
-                              <td className="py-2 px-3 text-center">{lot.outturn ? `${lot.outturn}%` : '-'}</td>
+                              <td className="py-2 px-3 text-center">{lot.outturn ? `${lot.outturn}` : '-'}</td>
                               <td className="py-2 px-3 text-right font-medium text-[#5B3427] bg-[#B9975B]/5">{formatNumber(convertQty(asNumber(lot.purchased_weight), unit), getDecimals(unit))}</td>
                               <td className="py-2 px-3 text-right text-[#968C83]">{formatNumber(convertQty(asNumber(lot.allocated_weight), unit), getDecimals(unit))}</td>
                               <td className="py-2 px-3 text-center">
                                   {isAllocated ? <span className="inline-flex items-center text-red-600 bg-red-100 px-1.5 py-0.5 rounded font-bold text-[9px]"><Check size={10} className="mr-0.5"/> Yes</span> : <span className="text-[#968C83]">-</span>}
                               </td>
-                              <td className="py-2 px-3 text-right font-bold text-[#007680]">{lot.price_usd_50 != null && lot.price_usd_50 !== '' ? `$${Number(lot.price_usd_50).toFixed(2)}` : '-'}</td>
-                              <td className="py-2 px-3 text-right font-bold text-[#5B3427]">{lot.fobbing_cost != null && lot.fobbing_cost !== '' ? `$${Number(lot.fobbing_cost).toFixed(2)}` : '-'}</td>
+                              <td className="py-2 px-3 text-right font-bold text-[#007680]">{lot.price_usd_50 != null && lot.price_usd_50 !== '' ? `${Number(lot.price_usd_50).toFixed(2)}` : '-'}</td>
+                              <td className="py-2 px-3 text-right font-bold text-[#5B3427]">{lot.fobbing_cost != null && lot.fobbing_cost !== '' ? `${Number(lot.fobbing_cost).toFixed(2)}` : '-'}</td>
                               <td className="py-2 px-3">{lot.hedge_level || '-'}</td>
+                              <td className="py-2 px-3 text-right font-bold text-[#5B3427]">{lot._diff != null ? lot._diff.toFixed(2) : '-'}</td>
+                              <td className="py-2 px-3 text-right font-bold text-[#51534a]">{lot._valo != null ? `${lot._valo.toFixed(2)}` : '-'}</td>
+                              <td className={`py-2 px-3 text-right font-bold ${(lot._pnl || 0) >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                                  {lot._pnl != null ? `$${lot._pnl.toFixed(2)}` : '-'}
+                              </td>
                               <td className="py-2 px-3 text-center">
-                                  {bool(lot.to_commercial) ? <CheckCircle size={14} className="mx-auto text-[#007680]" /> : '-'}
+                                  {isCommercial ? <CheckCircle size={14} className="mx-auto text-red-600" /> : '-'}
                               </td>
                             </tr>
                           );
                         })}
                         {filteredStocks.length === 0 ? (
                             <tr>
-                                <td colSpan={15} className="py-8 text-center text-sm text-[#968C83] italic">No specialty lots found matching criteria.</td>
+                                <td colSpan={18} className="py-8 text-center text-sm text-[#968C83] italic">No specialty lots found matching criteria.</td>
                             </tr>
                         ) : null}
                       </tbody>
@@ -1755,8 +1835,8 @@ export default function SpecialtyPage() {
                               </ResponsiveContainer>
                           </div>
                           <div className="w-full flex justify-between px-1 mt-2 text-[9px] font-bold">
-                              <div className="text-[#5B3427] flex flex-col items-center"><span>Alloc</span><span>{formatNumber(convertQty(stocksSummary.totalAllocated, unit), getDecimals(unit))}</span></div>
-                              <div className="text-[#007680] flex flex-col items-center"><span>Avail</span><span>{formatNumber(convertQty(stocksSummary.totalAvailable, unit), getDecimals(unit))}</span></div>
+                              <div className="text-[#5B3427] flex flex-col items-center"><span>Allocated</span><span>{formatNumber(convertQty(stocksSummary.totalAllocated, unit), getDecimals(unit))}</span></div>
+                              <div className="text-[#007680] flex flex-col items-center"><span>Available</span><span>{formatNumber(convertQty(stocksSummary.totalAvailable, unit), getDecimals(unit))}</span></div>
                           </div>
                       </Card>
                   </div>
@@ -1805,6 +1885,73 @@ export default function SpecialtyPage() {
                           </div>
                       </div>
                   </Card>
+
+                  {/* Row 3: PNL Dashboard */}
+                  <div className="grid grid-cols-1 gap-4 mt-4">
+                      <Card className="flex flex-col shadow-sm max-h-[350px] overflow-hidden flex-1 border border-[#D6D2C4]">
+                          <div className="flex justify-between items-center p-3 border-b border-[#D6D2C4] bg-[#F5F5F3]">
+                              <h3 className="text-[11px] font-bold text-[#51534a] uppercase tracking-wider flex items-center gap-2">
+                                  <TrendingUp size={14} className={displayedTotalPnl >= 0 ? "text-[#007680]" : "text-red-500"} /> 
+                                  PNL Breakdown
+                              </h3>
+                              <select 
+                                  value={pnlPivotBy} 
+                                  onChange={(e) => {
+                                      setPnlPivotBy(e.target.value as any);
+                                      setSelectedPnlKeys(new Set());
+                                  }}
+                                  className="text-[10px] border border-[#D6D2C4] rounded px-2 py-1 outline-none bg-white font-bold"
+                              >
+                                  <option value="qc_strategy">Strategy</option>
+                                  <option value="season">Season</option>
+                                  <option value="grade">Grade</option>
+                              </select>
+                          </div>
+                          
+                          <div className="overflow-y-auto custom-scrollbar flex-1 p-1">
+                              {stocksSummary.pnlPivot.map((item, idx) => {
+                                  const isSelected = selectedPnlKeys.has(item.name);
+                                  return (
+                                  <div 
+                                      key={idx} 
+                                      onClick={() => {
+                                          const next = new Set(selectedPnlKeys);
+                                          if (next.has(item.name)) next.delete(item.name);
+                                          else next.add(item.name);
+                                          setSelectedPnlKeys(next);
+                                      }}
+                                      className={`flex justify-between items-center py-2 px-3 border-b border-[#D6D2C4]/30 last:border-0 cursor-pointer transition-colors rounded hover:bg-[#F5F5F3] ${isSelected ? 'bg-[#EAF8FA]' : ''}`}
+                                  >
+                                      <div className="flex items-center gap-2 overflow-hidden">
+                                          <input 
+                                              type="checkbox" 
+                                              checked={isSelected}
+                                              readOnly
+                                              className="rounded text-[#007680] focus:ring-[#007680] accent-[#007680] w-3 h-3 flex-shrink-0"
+                                          />
+                                          <span className="text-[10px] font-bold text-[#51534a] truncate" title={item.name}>{item.name}</span>
+                                      </div>
+                                      <span className={`text-[10px] font-bold ${item.value >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                                          ${formatNumber(item.value, 2)}
+                                      </span>
+                                  </div>
+                              )})}
+                              {stocksSummary.pnlPivot.length === 0 && (
+                                  <div className="text-center py-4 text-[#968C83] text-[10px] italic">No data to display</div>
+                              )}
+                          </div>
+                          
+                          {/* Sticky Total Footer */}
+                          <div className="p-3 border-t border-[#D6D2C4] bg-[#F5F5F3] flex justify-between items-center">
+                              <span className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider">
+                                  {selectedPnlKeys.size > 0 ? 'Selected Total' : 'Grand Total'}
+                              </span>
+                              <span className={`text-lg font-bold ${displayedTotalPnl >= 0 ? 'text-[#007680]' : 'text-red-500'}`}>
+                                  ${formatNumber(displayedTotalPnl, 2)}
+                              </span>
+                          </div>
+                      </Card>
+                  </div>
               </div>
 
             </div>

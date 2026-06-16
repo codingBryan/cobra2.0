@@ -48,7 +48,7 @@ else{
 //   throw new Error("Missing one or more required MySQL environment variables (HOST, DATABASE,_USER, or PASSWORD).");
 // }
 
-console.log("Database connection pool created successfully.");
+
 
 // 3. Export the pool so other files can use it
 export default pool;
