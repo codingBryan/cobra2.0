@@ -1500,34 +1500,10 @@ export default function CertificationsPage() {
       setIsDeletingDecl(false);
     }
   };
-
-  const handleUploadSol = async () => {
-      if (!solFile) return;
-      const formData = new FormData();
-      formData.append('sol_file', solFile);
-
-      try {
-        const response = await fetch('http://localhost:8100/api/upload_sol_report', {
-            method: 'POST',
-            body: formData, 
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || "Failed to upload SOL report.");
-        }
-        
-        alert("SOL Report uploaded successfully!");
-        setSolFile(null);
-        await fetchData(true);
-        
-      } catch (error: any) {
-        console.error("Upload error:", error);
-        alert(`Error uploading file: ${error.message}`);
-      }
-  };
-
+  const COBRA_SERVICE = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL;
   const handleUploadPurchasesSubmit = async (e: React.FormEvent) => {
+
+
       e.preventDefault();
       if (!purchaseFile) return;
       
@@ -1536,7 +1512,7 @@ export default function CertificationsPage() {
       if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
 
       try {
-        const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
+        const response = await fetch(COBRA_SERVICE+'/api/xbs_purchase_upload', { method: 'POST', body: formData });
         if (!response.ok) throw new Error("Failed to upload purchases.");
         
         alert("Purchases uploaded successfully!");

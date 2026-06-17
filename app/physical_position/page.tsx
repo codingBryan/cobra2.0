@@ -685,6 +685,8 @@ export default function PhysicalPage() {
     return blendCompositionTotal > 100 ? `Over 100% (${blendCompositionTotal.toFixed(2)}%).` : `Under 100% (${blendCompositionTotal.toFixed(2)}%).`;
   }, [isAddBlendModalOpen, blendCompositionTotal, blendForm]);
 
+
+  const COBRA_SERVICE = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL;
   const handleUploadSol = async () => {
     if (!solFile) return;
     const formData = new FormData();
@@ -692,7 +694,7 @@ export default function PhysicalPage() {
     if (dnpFile) formData.append('daily_net_position_file', dnpFile);
 
     try {
-      const response = await fetch('http://localhost:8100/api/upload_sol_report', { method: 'POST', body: formData });
+      const response = await fetch(COBRA_SERVICE+'/api/upload_sol_report', { method: 'POST', body: formData });
       if (!response.ok) throw new Error("Failed to upload reports.");
       alert("Reports uploaded successfully!");
       setIsAddModalOpen(false);
@@ -709,7 +711,7 @@ export default function PhysicalPage() {
     formData.append('xbs_file', purchaseFile);
     if (!isDirectSale && purchaseSaleNumber.trim()) formData.append('sale_number', purchaseSaleNumber.trim());
     try {
-      const response = await fetch('http://localhost:8100/api/xbs_purchase_upload', { method: 'POST', body: formData });
+      const response = await fetch(COBRA_SERVICE+'/api/xbs_purchase_upload', { method: 'POST', body: formData });
       if (!response.ok) throw new Error("Failed to upload purchases.");
       alert("Purchases uploaded successfully!");
       setIsPurchaseModalOpen(false);

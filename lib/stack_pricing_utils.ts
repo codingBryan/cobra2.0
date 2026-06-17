@@ -575,15 +575,244 @@ export async function logMissingBatchData(processNumber: string, batchNumber: st
         await fs_node.promises.appendFile(filePath, csvLine);
     }
 }
+
+// --- OPTIMIZATION 1: API Caching ---
+// Caches the Python API responses in RAM to avoid expensive HTTP requests on every process loop
+let cachedValoData: { mappings: Record<string, string[]>, valos: Record<string, number> } | null = null;
+
 // --- PROCESSING FUNCTIONS ---
 const KG_TO_LBS = 2.20462;
 
-export async function calculate_and_update_trade_variables_for_other_processes(process: DailyProcessRow, enablePush: boolean): Promise<boolean> {
+
+// Helper to fetch from your Python endpoints
+async function fetchMappingsAndValos() {
+    // Replace with your actual Python API base URL if different
+    const BASE_URL = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL; 
+    const [mapRes, valoRes] = await Promise.all([
+        fetch(`${BASE_URL}/get_strategy_mappings`),
+        fetch(`${BASE_URL}/get_strategy_valos`)
+    ]);
+    return {
+        mappings: await mapRes.json(),
+        valos: await valoRes.json()
+    };
+}
+
+// Helper to reverse-lookup the main key from the mapping dict
+function getMappedStrategy(strategy: string, mappings: Record<string, string[]>): string | null {
+    for (const [mainKey, subStrategies] of Object.entries(mappings)) {
+        if (mainKey === strategy || subStrategies.includes(strategy)) return mainKey;
+    }
+    return null;
+}
+
+// export async function calculate_and_update_trade_variables_for_other_processes(process: DailyProcessRow, enablePush: boolean): Promise<boolean> {
+//     const processId = process.id;
+//     const processNumber = process.process_number;
+
+//     const strategyRecords = await query<DailyStrategyProcessingRow[]>({
+//         query: `SELECT * FROM daily_strategy_processing WHERE process_id = ?`, values: [processId],
+//     });
+
+//     if (!strategyRecords || strategyRecords.length === 0) return false;
+
+//     const inputBatches = strategyRecords.filter(rec => rec.input_qty > 0);
+//     const outputBatches = strategyRecords.filter(rec => rec.output_qty > 0);
+
+//     if (inputBatches.length === 0 || outputBatches.length === 0) return false;
+
+//     // --- STEP 1: Source Input Trade Variables (Lookup & Update DB first) ---
+//     // We must ensure the DB is updated so we have the correct hedge levels for calculation
+//     const inputUpdatePromises = inputBatches.map(async (inputRecord) => {
+//         if (inputRecord.input_cost_usd_50 !== null && inputRecord.input_hedge_level_usc_lb !== null) {
+//             return true;
+//         }
+//         const rawBatchNumber = inputRecord.batch_number;
+
+//         // 1a. Catalogue Summary
+//         const catalogueMatch = await query<CatalogueSummaryRow[]>({
+//             query: `SELECT cost_usd_50, hedge_usc_lb, diff_usc_lb FROM catalogue_summary WHERE batch_number = ?`,
+//             values: [rawBatchNumber],
+//         });
+
+//         if (catalogueMatch && catalogueMatch.length > 0 && catalogueMatch[0].cost_usd_50 !== null) {
+//             const cat = catalogueMatch[0];
+//             await query<ResultSetHeader>({
+//                 query: `UPDATE daily_strategy_processing SET input_cost_usd_50 = ?, input_hedge_level_usc_lb = ?, input_differential = ? WHERE id = ?`,
+//                 values: [cat.cost_usd_50, cat.hedge_usc_lb, cat.diff_usc_lb, inputRecord.id],
+//             });
+//             return true;
+//         }
+        
+//         // 1b. Standard Lookup (Pull)
+//         const outputMatch = await query<DailyStrategyProcessingRow[]>({
+//             query: `SELECT output_cost_usd_50, output_hedge_level_usc_lb, output_differential
+//                     FROM daily_strategy_processing
+//                     WHERE batch_number = ? AND output_qty > 0 AND output_cost_usd_50 IS NOT NULL
+//                     ORDER BY id DESC LIMIT 1`,
+//             values: [rawBatchNumber],
+//         });
+
+//         if (outputMatch && outputMatch.length > 0) {
+//             const out = outputMatch[0];
+//             if (Number.isFinite(Number(out.output_cost_usd_50))) {
+//                 await query<ResultSetHeader>({
+//                     query: `UPDATE daily_strategy_processing SET input_cost_usd_50 = ?, input_hedge_level_usc_lb = ?, input_differential = ? WHERE id = ?`,
+//                     values: [out.output_cost_usd_50, out.output_hedge_level_usc_lb, out.output_differential, inputRecord.id],
+//                 });
+//                 return true;
+//             }
+//         }
+//         return false;
+//     });
+
+//     await Promise.all(inputUpdatePromises);
+
+//     // --- STEP 2: Fetch Fresh Data & Validate ---
+//     const updatedInputs = await query<DailyStrategyProcessingRow[]>({
+//         query: `SELECT * FROM daily_strategy_processing WHERE process_id = ? AND input_qty > 0`,
+//         values: [processId],
+//     });
+
+//     if (!updatedInputs || updatedInputs.length === 0) return false;
+
+//     // Check for missing data
+//     const failingInputs = updatedInputs.filter(rec => rec.input_cost_usd_50 === null || rec.input_hedge_level_usc_lb === null);
+//     if (failingInputs.length > 0) {
+//         for (const fail of failingInputs) {
+//             // await logMissingBatchData(processNumber, fail.batch_number, "Missing input cost or hedge level");
+//         }
+//         return false;
+//     }
+
+//     // --- STEP 3: Aggregate Inputs & Calculate INPUT VALUE (Cents) ---
+//     // Logic: Sum((InputHedge + InputValo) * InputQty * 2.205)
+    
+//     let totalInputQty = 0;
+//     let wSumCost = 0;
+//     let wSumHedge = 0;
+//     let totalInputValueCents = 0;
+
+//     for (const rec of updatedInputs) {
+//         const qty = Number(rec.input_qty);
+//         const cost = Number(rec.input_cost_usd_50 || 0);
+//         const hedge = Number(rec.input_hedge_level_usc_lb || 0);
+//         const strategy = rec.strategy || 'UNDEFINED';
+
+//         // Weighted Averages accumulators (still needed for allocating cost to outputs)
+//         totalInputQty += qty;
+//         wSumCost += (qty * cost);
+//         wSumHedge += (qty * hedge);
+
+//         // Input VALO Lookup
+//         let inputValo = 0;
+//         const mainStrategy = mapStrategyToMainKey(strategy);
+//         if (mainStrategy && STRATEGY_VALOS[mainStrategy] !== undefined) {
+//             inputValo = STRATEGY_VALOS[mainStrategy];
+//         }
+
+//         // Value Calculation: (Hedge + Valo) * Qty * 2.205
+//         const theoreticalInputPrice = hedge + inputValo;
+//         totalInputValueCents += (theoreticalInputPrice * qty * KG_TO_LBS);
+//     }
+
+//     if (totalInputQty === 0) return false;
+
+//     const weightedInputCost = wSumCost / totalInputQty;
+//     const weightedInputHedge = wSumHedge / totalInputQty; // This becomes the Base Output Hedge
+
+//     if (!Number.isFinite(weightedInputHedge)) return false;
+
+//     // --- STEP 4: Calculate OUTPUT VALUE (Cents) ---
+//     // Logic: Sum((OutputHedge + OutputValo) * OutputQty * 2.205)
+    
+//     let totalOutputValueCents = 0;
+//     let totalTheoreticalAllocScore = 0; // For Cost Allocation only
+//     const outputData = [];
+
+//     for (const output of outputBatches) {
+//         if (!output.strategy || output.strategy === 'UNDEFINED') {
+//             // await logMissingBatchData(processNumber, output.batch_number, "Output strategy is UNDEFINED");
+//             return false;
+//         }
+//         const mainStrategy = mapStrategyToMainKey(output.strategy);
+//         const valo = mainStrategy ? STRATEGY_VALOS[mainStrategy] : null;
+//         if (valo === null) {
+//             // await logMissingBatchData(processNumber, output.batch_number, `Strategy ${output.strategy} not found in VALOS`);
+//             return false;
+//         }
+
+//         const qty = Number(output.output_qty);
+
+//         // 1. Output Value Calculation
+//         // The output inherits the Weighted Input Hedge as its base hedge level
+//         const outputHedge = weightedInputHedge; 
+//         const theoreticalOutputPrice = valo;
+        
+//         const batchValueCents = valo * qty * KG_TO_LBS;
+//         totalOutputValueCents += batchValueCents;
+
+//         // 2. Score for Accounting Cost Allocation (Previous logic, kept to populate cost_usd_50 correctly)
+//         const unitTheoreticalVal = outputHedge + valo;
+//         const theoreticalAllocScore = (unitTheoreticalVal < 0 ? 0 : unitTheoreticalVal) * qty;
+//         totalTheoreticalAllocScore += theoreticalAllocScore;
+
+//         outputData.push({ ...output, valo, theoreticalAllocScore });
+//     }
+
+//     // --- STEP 5: PnL Calculation (Dollars) ---
+//     // PnL = (Output Value Cents - Input Value Cents) / 100
+//     const pnl = (totalOutputValueCents - totalInputValueCents) / 100;
+//     const inputValueDollars = totalInputValueCents / 100;
+//     const outputValueDollars = totalOutputValueCents / 100;
+
+//     // --- STEP 6: Update Output Batches (Allocation & Push) ---
+//     const inputValueInAccountingDollars = (totalInputQty / 50) * weightedInputCost; // Real money spent
+
+//     for (const output of outputData) {
+//         // We still allocate the *Accounting Cost* proportionally based on value created
+//         const proportionalVal = (totalTheoreticalAllocScore !== 0) ? (output.theoreticalAllocScore / totalTheoreticalAllocScore) : 0;
+//         const allocatedVal = proportionalVal * inputValueInAccountingDollars;
+//         const outputQtyIn50s = Number(output.output_qty) / 50;
+        
+//         let finalOutputCost: number | null = (outputQtyIn50s !== 0) ? (allocatedVal / outputQtyIn50s) : null;
+//         let finalOutputDiff: number | null = (finalOutputCost !== null) ? ((finalOutputCost / 1.1023) - weightedInputHedge) : null;
+//         let finalOutputHedge: number | null = weightedInputHedge;
+
+//         if (!Number.isFinite(finalOutputCost)) { finalOutputCost = null; finalOutputDiff = null; }
+//         if (finalOutputCost === null) return false;
+
+//         // Update DB
+//         await query<ResultSetHeader>({
+//             query: `UPDATE daily_strategy_processing SET output_cost_usd_50 = ?, output_hedge_level_usc_lb = ?, output_differential = ? WHERE id = ?`,
+//             values: [finalOutputCost, finalOutputHedge, finalOutputDiff, output.id],
+//         });
+
+//         if (enablePush) {
+//             await propagateToDownstreamInputs(output.batch_number, finalOutputCost, finalOutputHedge!, finalOutputDiff!);
+//         }
+//     }
+
+//     await query<ResultSetHeader>({
+//         query: `UPDATE daily_processes SET trade_variables_updated = TRUE, input_value = ?, output_value = ?, pnl = ? WHERE id = ?`,
+//         values: [inputValueDollars, outputValueDollars, pnl, processId],
+//     });
+
+//     console.log(`[${processNumber}] Success. PnL: $${pnl.toFixed(2)}`);
+//     return true;
+// }
+
+
+export async function calculate_and_update_trade_variables_for_other_processes(
+    process: DailyProcessRow, 
+    enablePush: boolean
+): Promise<boolean> {
     const processId = process.id;
     const processNumber = process.process_number;
 
     const strategyRecords = await query<DailyStrategyProcessingRow[]>({
-        query: `SELECT * FROM daily_strategy_processing WHERE process_id = ?`, values: [processId],
+        query: `SELECT * FROM daily_strategy_processing WHERE process_id = ?`, 
+        values: [processId],
     });
 
     if (!strategyRecords || strategyRecords.length === 0) return false;
@@ -594,7 +823,6 @@ export async function calculate_and_update_trade_variables_for_other_processes(p
     if (inputBatches.length === 0 || outputBatches.length === 0) return false;
 
     // --- STEP 1: Source Input Trade Variables (Lookup & Update DB first) ---
-    // We must ensure the DB is updated so we have the correct hedge levels for calculation
     const inputUpdatePromises = inputBatches.map(async (inputRecord) => {
         if (inputRecord.input_cost_usd_50 !== null && inputRecord.input_hedge_level_usc_lb !== null) {
             return true;
@@ -648,101 +876,88 @@ export async function calculate_and_update_trade_variables_for_other_processes(p
 
     if (!updatedInputs || updatedInputs.length === 0) return false;
 
-    // Check for missing data
+    // Check for missing accounting data
     const failingInputs = updatedInputs.filter(rec => rec.input_cost_usd_50 === null || rec.input_hedge_level_usc_lb === null);
     if (failingInputs.length > 0) {
-        for (const fail of failingInputs) {
-            // await logMissingBatchData(processNumber, fail.batch_number, "Missing input cost or hedge level");
-        }
         return false;
     }
 
-    // --- STEP 3: Aggregate Inputs & Calculate INPUT VALUE (Cents) ---
-    // Logic: Sum((InputHedge + InputValo) * InputQty * 2.205)
-    
+    // --- NEW: Fetch Mappings & Valos (O(1) using cache) ---
+    const { mappings, valos } = await fetchMappingsAndValos();
+
+    // --- STEP 3: Aggregate Inputs (O(N)) ---
     let totalInputQty = 0;
-    let wSumCost = 0;
-    let wSumHedge = 0;
-    let totalInputValueCents = 0;
+    let inputValoProductSum = 0; // Sum of (qty * valo)
+    let wSumCost = 0;            // Sum of (qty * cost) for accounting allocation
+    let wSumHedge = 0;           // Sum of (qty * hedge) for accounting allocation
 
     for (const rec of updatedInputs) {
+        if (!rec.strategy || rec.strategy === 'UNDEFINED') return false;
+        
+        const mainStrategy = getMappedStrategy(rec.strategy, mappings);
+        const valo = mainStrategy ? valos[mainStrategy] : null;
+        if (valo === null || valo === undefined) return false;
+
         const qty = Number(rec.input_qty);
         const cost = Number(rec.input_cost_usd_50 || 0);
         const hedge = Number(rec.input_hedge_level_usc_lb || 0);
-        const strategy = rec.strategy || 'UNDEFINED';
 
-        // Weighted Averages accumulators (still needed for allocating cost to outputs)
         totalInputQty += qty;
+        inputValoProductSum += (qty * valo);
+        
+        // Needed for output physical cost allocation in Step 7
         wSumCost += (qty * cost);
         wSumHedge += (qty * hedge);
-
-        // Input VALO Lookup
-        let inputValo = 0;
-        const mainStrategy = mapStrategyToMainKey(strategy);
-        if (mainStrategy && STRATEGY_VALOS[mainStrategy] !== undefined) {
-            inputValo = STRATEGY_VALOS[mainStrategy];
-        }
-
-        // Value Calculation: (Hedge + Valo) * Qty * 2.205
-        const theoreticalInputPrice = hedge + inputValo;
-        totalInputValueCents += (theoreticalInputPrice * qty * KG_TO_LBS);
     }
 
     if (totalInputQty === 0) return false;
 
-    const weightedInputCost = wSumCost / totalInputQty;
-    const weightedInputHedge = wSumHedge / totalInputQty; // This becomes the Base Output Hedge
-
+    // --- STEP 4: Aggregate Outputs (O(N)) ---
+    let totalOutputQty = 0;
+    let outputValoProductSum = 0; 
+    let totalTheoreticalAllocScore = 0; // Needed for Step 7 allocation
+    
+    // We calculate base input hedge once
+    const weightedInputHedge = wSumHedge / totalInputQty;
     if (!Number.isFinite(weightedInputHedge)) return false;
 
-    // --- STEP 4: Calculate OUTPUT VALUE (Cents) ---
-    // Logic: Sum((OutputHedge + OutputValo) * OutputQty * 2.205)
-    
-    let totalOutputValueCents = 0;
-    let totalTheoreticalAllocScore = 0; // For Cost Allocation only
-    const outputData = [];
+    const outputDataForAllocation = [];
 
-    for (const output of outputBatches) {
-        if (!output.strategy || output.strategy === 'UNDEFINED') {
-            // await logMissingBatchData(processNumber, output.batch_number, "Output strategy is UNDEFINED");
-            return false;
-        }
-        const mainStrategy = mapStrategyToMainKey(output.strategy);
-        const valo = mainStrategy ? STRATEGY_VALOS[mainStrategy] : null;
-        if (valo === null) {
-            // await logMissingBatchData(processNumber, output.batch_number, `Strategy ${output.strategy} not found in VALOS`);
-            return false;
-        }
-
-        const qty = Number(output.output_qty);
-
-        // 1. Output Value Calculation
-        // The output inherits the Weighted Input Hedge as its base hedge level
-        const outputHedge = weightedInputHedge; 
-        const theoreticalOutputPrice = valo;
+    for (const rec of outputBatches) {
+        if (!rec.strategy || rec.strategy === 'UNDEFINED') return false;
         
-        const batchValueCents = valo * qty * KG_TO_LBS;
-        totalOutputValueCents += batchValueCents;
+        const mainStrategy = getMappedStrategy(rec.strategy, mappings);
+        const valo = mainStrategy ? valos[mainStrategy] : null;
+        if (valo === null || valo === undefined) return false;
 
-        // 2. Score for Accounting Cost Allocation (Previous logic, kept to populate cost_usd_50 correctly)
-        const unitTheoreticalVal = outputHedge + valo;
+        const qty = Number(rec.output_qty);
+        totalOutputQty += qty;
+        outputValoProductSum += (qty * valo);
+
+        // Required for distributing physical costs
+        const unitTheoreticalVal = weightedInputHedge + valo;
         const theoreticalAllocScore = (unitTheoreticalVal < 0 ? 0 : unitTheoreticalVal) * qty;
         totalTheoreticalAllocScore += theoreticalAllocScore;
-
-        outputData.push({ ...output, valo, theoreticalAllocScore });
+        
+        outputDataForAllocation.push({ ...rec, valo, theoreticalAllocScore });
     }
 
-    // --- STEP 5: PnL Calculation (Dollars) ---
-    // PnL = (Output Value Cents - Input Value Cents) / 100
-    const pnl = (totalOutputValueCents - totalInputValueCents) / 100;
-    const inputValueDollars = totalInputValueCents / 100;
-    const outputValueDollars = totalOutputValueCents / 100;
+    // --- STEP 5: PNL & Value Calculations (O(1) Algebraic Math) ---
+    const inputValueDollars = (inputValoProductSum * KG_TO_LBS) / 100;
+    const outputValueDollars = (outputValoProductSum * KG_TO_LBS) / 100;
 
-    // --- STEP 6: Update Output Batches (Allocation & Push) ---
+    const weightedAvgInputValoCents = inputValoProductSum / totalInputQty; 
+    const weightDiffKg = totalOutputQty - totalInputQty;
+    const physicalLossGainPnlDollars = (weightDiffKg * KG_TO_LBS * weightedAvgInputValoCents) / 100;
+
+    const finalPnl = outputValueDollars - inputValueDollars + physicalLossGainPnlDollars;
+
+    // --- STEP 6: Update Output Batches (Cost Allocation) ---
+    const weightedInputCost = wSumCost / totalInputQty;
     const inputValueInAccountingDollars = (totalInputQty / 50) * weightedInputCost; // Real money spent
 
-    for (const output of outputData) {
-        // We still allocate the *Accounting Cost* proportionally based on value created
+    // Concurrent DB updates for outputs
+    const outputUpdatePromises = outputDataForAllocation.map(async (output) => {
         const proportionalVal = (totalTheoreticalAllocScore !== 0) ? (output.theoreticalAllocScore / totalTheoreticalAllocScore) : 0;
         const allocatedVal = proportionalVal * inputValueInAccountingDollars;
         const outputQtyIn50s = Number(output.output_qty) / 50;
@@ -752,7 +967,7 @@ export async function calculate_and_update_trade_variables_for_other_processes(p
         let finalOutputHedge: number | null = weightedInputHedge;
 
         if (!Number.isFinite(finalOutputCost)) { finalOutputCost = null; finalOutputDiff = null; }
-        if (finalOutputCost === null) return false;
+        if (finalOutputCost === null) return;
 
         // Update DB
         await query<ResultSetHeader>({
@@ -761,18 +976,35 @@ export async function calculate_and_update_trade_variables_for_other_processes(p
         });
 
         if (enablePush) {
+            // @ts-ignore - Ensure you have this function defined elsewhere
             await propagateToDownstreamInputs(output.batch_number, finalOutputCost, finalOutputHedge!, finalOutputDiff!);
         }
-    }
-
-    await query<ResultSetHeader>({
-        query: `UPDATE daily_processes SET trade_variables_updated = TRUE, input_value = ?, output_value = ?, pnl = ? WHERE id = ?`,
-        values: [inputValueDollars, outputValueDollars, pnl, processId],
     });
 
-    console.log(`[${processNumber}] Success. PnL: $${pnl.toFixed(2)}`);
+    await Promise.all(outputUpdatePromises);
+
+    // --- STEP 7: Update Process Final PNL ---
+    await query<ResultSetHeader>({
+        query: `UPDATE daily_processes 
+                SET trade_variables_updated = TRUE, 
+                    input_value = ?, 
+                    output_value = ?, 
+                    physical_loss_gain_pnl = ?,
+                    pnl = ? 
+                WHERE id = ?`,
+        values: [
+            inputValueDollars, 
+            outputValueDollars, 
+            physicalLossGainPnlDollars, 
+            finalPnl, 
+            processId
+        ],
+    });
+
+    console.log(`[${processNumber}] Success. PnL: $${finalPnl.toFixed(2)} | Physical Impact: $${physicalLossGainPnlDollars.toFixed(2)}`);
     return true;
 }
+
 
 export async function process_bulking(process: DailyProcessRow, enablePush: boolean): Promise<boolean> {
     const processId = process.id;

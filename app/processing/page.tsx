@@ -1,7 +1,12 @@
 "use client"
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+
+// Mocking useRouter to work in this environment without Next.js dependencies
+const useRouter = () => ({
+  push: (path: string) => console.log(`Navigating to ${path}`)
+});
+
 import { 
   Search, 
   ArrowUpDown, 
@@ -33,6 +38,7 @@ interface DailyProcess {
   output_qty: number;
   milling_loss: number;
   processing_loss_gain_qty: number;
+  physical_loss_gain_pnl: number; // ADDED
   input_value: number;
   output_value: number;
   pnl: number;
@@ -54,8 +60,6 @@ interface StrategyProcessing {
   output_differential?: number | string;
   input_cost_usd_50?: number | string;
   output_cost_usd_50?: number | string;
-  // analysis__id?: number | null;
-  // date_in?: Date | null;
 }
 
 interface GradeProcessing {
@@ -102,7 +106,7 @@ interface BatchItem {
 
 interface AnalysisSectionData {
   batches: BatchItem[]; 
-  aggregated_analysis?: AggregatedAnalysis; // Optional because fallback outputs might lack it
+  aggregated_analysis?: AggregatedAnalysis; 
   aggregated_screensize_breakdown?: ScreenSizeData[];
   aggregated_class_by_screensize?: ClassScreenData[];
   message?: string;
@@ -162,7 +166,6 @@ const MiniDonutChart = ({ data, size = 100 }: { data: { label: string; value: nu
 
     return (
         <div className="flex items-center gap-4">
-            {/* Donut Graphic */}
             <div className="relative shrink-0" style={{ width: size, height: size }}>
                 <svg viewBox="-1 -1 2 2" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
                     {data.map((slice, i) => {
@@ -176,7 +179,6 @@ const MiniDonutChart = ({ data, size = 100 }: { data: { label: string; value: nu
                         const [endX, endY] = getCoordinatesForPercent(endPercent);
                         const largeArcFlag = slicePercent > 0.5 ? 1 : 0;
 
-                        // Tooltip Text
                         const tooltipText = `${slice.label}: ${Math.round(slicePercent * 100)}% (${formatNumber(slice.value, 0)})`;
 
                         if (slicePercent >= 0.999) {
@@ -210,7 +212,6 @@ const MiniDonutChart = ({ data, size = 100 }: { data: { label: string; value: nu
                 </svg>
             </div>
 
-            {/* Legend */}
             <div className="flex-1 space-y-1.5 min-w-0">
                 {data.slice(0, 5).map((d, i) => (
                     <div key={i} className="flex items-center justify-between text-[10px] gap-2">
@@ -237,7 +238,8 @@ export default function ProcessingPage() {
   const [selectedProcessId, setSelectedProcessId] = useState<number | null>(null);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState<number | null>(null);
   
-  const [selectedProcessType, setSelectedProcessType] = useState<string>('All');
+  // CHANGED: Using array for multi-select
+  const [selectedProcessTypes, setSelectedProcessTypes] = useState<string[]>([]);
   
   const [sortConfig, setSortConfig] = useState<{ key: keyof DailyProcess; direction: 'asc' | 'desc' }>({
     key: 'processing_date',
@@ -285,8 +287,10 @@ export default function ProcessingPage() {
       );
     }
 
-    if (selectedProcessType !== 'All') {
-        data = data.filter(p => p.process_type === selectedProcessType);
+    // CHANGED: Time efficient O(1) Set lookup for multi-select filtering
+    if (selectedProcessTypes.length > 0) {
+        const typesSet = new Set(selectedProcessTypes);
+        data = data.filter(p => typesSet.has(p.process_type));
     }
 
     data.sort((a, b) => {
@@ -299,7 +303,7 @@ export default function ProcessingPage() {
     });
 
     return data;
-  }, [processes, search, sortConfig, selectedProcessType]);
+  }, [processes, search, sortConfig, selectedProcessTypes]);
 
   const stats = useMemo(() => {
     return processedData.reduce((acc, p) => ({
@@ -406,34 +410,68 @@ export default function ProcessingPage() {
         </div>
 
         {/* Filters */}
-        <Card className="p-4 flex flex-col sm:flex-row gap-4 items-center shrink-0">
-          <div className="relative flex-1 w-full">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" size={18} />
-            <input 
-              type="text"
-              placeholder="Search Process #..."
-              className="w-full pl-10 pr-4 py-2 border border-[#D6D2C4] rounded-lg focus:ring-2 focus:ring-[#007680] outline-none text-sm"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          
-          <div className="relative w-full sm:w-48">
-              <select 
-                  className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm text-[#51534a] focus:ring-2 focus:ring-[#007680] outline-none appearance-none bg-white"
-                  value={selectedProcessType}
-                  onChange={(e) => setSelectedProcessType(e.target.value)}
-              >
-                  {processTypes.map(type => (
-                      <option key={type} value={type}>{type}</option>
-                  ))}
-              </select>
-              <Filter className="absolute right-3 top-1/2 -translate-y-1/2 text-[#968C83] pointer-events-none" size={14} />
+        <Card className="p-4 flex flex-col gap-3 shrink-0">
+          <div className="flex flex-col sm:flex-row gap-4 items-center w-full">
+            <div className="relative flex-1 w-full">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" size={18} />
+                <input 
+                type="text"
+                placeholder="Search Process #..."
+                className="w-full pl-10 pr-4 py-2 border border-[#D6D2C4] rounded-lg focus:ring-2 focus:ring-[#007680] outline-none text-sm"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                />
+            </div>
+            
+            <div className="relative w-full sm:w-48">
+                <select 
+                    className="w-full border border-[#D6D2C4] rounded-lg px-3 py-2 text-sm text-[#51534a] focus:ring-2 focus:ring-[#007680] outline-none appearance-none bg-white"
+                    value={selectedProcessTypes.length === 0 ? "All" : "Custom"}
+                    onChange={(e) => {
+                        const val = e.target.value;
+                        if (val === 'All') {
+                            setSelectedProcessTypes([]);
+                        } else if (val !== 'Custom' && !selectedProcessTypes.includes(val)) {
+                            setSelectedProcessTypes(prev => [...prev, val]);
+                        }
+                    }}
+                >
+                    <option value="All">All Processes</option>
+                    {selectedProcessTypes.length > 0 && <option value="Custom" disabled>Selected ({selectedProcessTypes.length})</option>}
+                    {processTypes.filter(t => t !== 'All').map(type => (
+                        <option key={type} value={type}>{type}</option>
+                    ))}
+                </select>
+                <Filter className="absolute right-3 top-1/2 -translate-y-1/2 text-[#968C83] pointer-events-none" size={14} />
+            </div>
+
+            <div className="text-xs text-[#968C83] font-mono whitespace-nowrap hidden sm:block">
+                {processedData.length} Processes
+            </div>
           </div>
 
-          <div className="text-xs text-[#968C83] font-mono whitespace-nowrap hidden sm:block">
-            {processedData.length} Processes
-          </div>
+          {/* Badges for multi-select */}
+          {selectedProcessTypes.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-2 border-t border-[#F5F5F3]">
+                {selectedProcessTypes.map(type => (
+                    <span key={type} className="px-2 py-1 bg-[#007680]/10 text-[#007680] text-xs font-medium rounded-md flex items-center gap-1.5 border border-[#007680]/20">
+                        {type}
+                        <button 
+                            onClick={() => setSelectedProcessTypes(prev => prev.filter(t => t !== type))} 
+                            className="hover:bg-[#007680]/20 rounded-full p-0.5 transition-colors"
+                        >
+                            <X size={12} />
+                        </button>
+                    </span>
+                ))}
+                <button 
+                    onClick={() => setSelectedProcessTypes([])} 
+                    className="px-2 py-1 text-xs text-[#968C83] hover:text-[#51534a] underline"
+                >
+                    Clear All
+                </button>
+            </div>
+          )}
         </Card>
 
         {/* Table */}
@@ -457,17 +495,21 @@ export default function ProcessingPage() {
                   <th className="py-3 px-4 text-center cursor-pointer hover:bg-white/10" onClick={() => handleSort('trade_variables_updated')}>
                     <div className="flex items-center justify-center">Trade Vars <SortIcon column="trade_variables_updated" /></div>
                   </th>
+                  {/* ADDED COLUMN FOR PHYSICAL PNL */}
+                  <th className="py-3 px-4 text-right cursor-pointer hover:bg-white/10" onClick={() => handleSort('physical_loss_gain_pnl')}>
+                    <div className="flex items-center justify-end">Physical P&L <SortIcon column="physical_loss_gain_pnl" /></div>
+                  </th>
                   <th className="py-3 px-4 text-right cursor-pointer hover:bg-white/10" onClick={() => handleSort('pnl')}>
-                    <div className="flex items-center justify-end">P&L ($) <SortIcon column="pnl" /></div>
+                    <div className="flex items-center justify-end">Theo P&L ($) <SortIcon column="pnl" /></div>
                   </th>
                   <th className="py-3 px-4 w-10"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#D6D2C4]">
                 {loading ? (
-                   <tr><td colSpan={7} className="p-8 text-center text-[#968C83]">Loading data...</td></tr>
+                   <tr><td colSpan={8} className="p-8 text-center text-[#968C83]">Loading data...</td></tr>
                 ) : processedData.length === 0 ? (
-                   <tr><td colSpan={7} className="p-8 text-center text-[#968C83]">No processes found.</td></tr>
+                   <tr><td colSpan={8} className="p-8 text-center text-[#968C83]">No processes found.</td></tr>
                 ) : (
                   processedData.map((row) => {
                     const isSelected = selectedProcessId === row.id;
@@ -513,6 +555,13 @@ export default function ProcessingPage() {
                                     <Minus size={12} />
                                 </div>
                             )}
+                        </td>
+
+                        {/* ADDED ROW CELL FOR PHYSICAL PNL */}
+                        <td className={`py-3 px-4 text-right font-medium font-mono ${
+                          row.physical_loss_gain_pnl > 0 ? 'text-[#97D700]' : row.physical_loss_gain_pnl < 0 ? 'text-[#B9975B]' : 'text-[#968C83]'
+                        }`}>
+                          {row.physical_loss_gain_pnl > 0 ? '+' : ''}{formatNumber(row.physical_loss_gain_pnl)}
                         </td>
 
                         <td className={`py-3 px-4 text-right font-bold font-mono ${
@@ -670,6 +719,12 @@ function ProcessDetailsView({ process, onClose }: { process: DailyProcess; onClo
            <div className="text-right">
               <div className="text-xs text-[#968C83] mb-1">Processing Loss</div>
               <div className="font-mono font-bold text-[#51534a]">{formatNumber(process.processing_loss_gain_qty)} kg</div>
+              
+              {/* ADDED PHYSICAL PNL */}
+              <div className="text-xs text-[#968C83] mt-2 mb-1">Physical P&L</div>
+              <div className={`font-mono font-bold ${process.physical_loss_gain_pnl >= 0 ? 'text-[#97D700]' : 'text-[#B9975B]'}`}>
+                  {process.physical_loss_gain_pnl > 0 ? '+' : ''}{formatNumber(process.physical_loss_gain_pnl)} <span className="text-xs font-normal opacity-70">USD</span>
+              </div>
            </div>
         </div>
 
@@ -773,14 +828,10 @@ function ProcessDetailsView({ process, onClose }: { process: DailyProcess; onClo
                                 <tr>
                                     <th className="py-1 px-2">Batch #</th>
                                     <th className="py-1 px-2">Strategy</th>
-                                    {/* Added Columns */}
                                     <th className="py-1 px-2 text-right">Hedge</th>
-                                    
                                     <th className="py-1 px-2 text-right">Diff</th>
                                     <th className="py-1 px-2 text-right">OutR($/50)</th>
                                     <th className="py-1 px-2 text-right">Qty</th>
-                                    
-                                    {/* <th className="py-1 px-2 text-right">Loss/Gain</th> */}
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-[#F5F5F3]">
@@ -788,17 +839,13 @@ function ProcessDetailsView({ process, onClose }: { process: DailyProcess; onClo
                                     <tr key={b.id}>
                                         <td className="py-1.5 px-2 font-mono text-[#B9975B] max-w-[100px] truncate" title={b.batch_number}>{b.batch_number}</td>
                                         <td className="py-1.5 px-2 text-[#51534a]">{b.strategy}</td>
-                                        {/* Added Data Cells */}
                                         <td className="py-1.5 px-2 text-right font-mono text-[#968C83]">{formatNumber(Number(b.output_hedge_level_usc_lb))}</td>
                                         <td className="py-1.5 px-2 text-right font-mono text-[#968C83]">{formatNumber(Number(b.output_differential))}</td>
                                         <td className="py-1.5 px-2 text-right font-mono text-[#968C83]">{formatNumber(Number(b.output_cost_usd_50))}</td>
                                         <td className="py-1.5 px-2 text-right font-medium">{formatNumber(b.output_qty as number, 0)}</td>
-                                        {/* <td className={`py-1.5 px-2 text-right font-medium ${Number(b.processing_loss_gain_qty) >= 0 ? 'text-[#97D700]' : 'text-[#B9975B]'}`}>
-                                            {Number(b.processing_loss_gain_qty) > 0 ? '+' : ''}{formatNumber(Number(b.processing_loss_gain_qty), 2)}
-                                        </td> */}
                                     </tr>
                                 ))}
-                                {outputBatches.length === 0 && <tr><td colSpan={7} className="py-4 text-center text-[#968C83] italic">No output batch details</td></tr>}
+                                {outputBatches.length === 0 && <tr><td colSpan={6} className="py-4 text-center text-[#968C83] italic">No output batch details</td></tr>}
                             </tbody>
                         </table>
                       </div>
@@ -1001,12 +1048,12 @@ function AnalysisSection({ title, data, color }: { title: string; data: Analysis
                <div className="text-[10px] text-[#968C83] font-bold uppercase mb-2">Grade Distribution</div>
                <div className="h-24 flex items-end justify-between gap-2 px-2">
                   {barData.map((d, i) => (
-                     <div key={i} className="flex flex-col items-center gap-1 flex-1 group relative h-full"> {/* ADDED h-full HERE */}
+                     <div key={i} className="flex flex-col items-center gap-1 flex-1 group relative h-full">
                         {/* Bar with Tooltip */}
-                        <div className="flex-1 w-full flex items-end justify-center relative"> {/* ADDED FLEX CONTAINER */}
+                        <div className="flex-1 w-full flex items-end justify-center relative">
                             <div 
                             className="w-full bg-[#D6D2C4] rounded-t-sm relative transition-all duration-500 hover:bg-[#007680] cursor-pointer" 
-                            style={{ height: `${Math.max(d.value, 1)}%` }} // Ensure at least 1% height for visibility
+                            style={{ height: `${Math.max(d.value, 1)}%` }} 
                             title={`${d.label}: ${formatNumber(d.value, 1)}%`} 
                             >
                             <div className="absolute -top-4 left-1/2 -translate-x-1/2 text-[9px] font-bold text-[#51534a] opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
