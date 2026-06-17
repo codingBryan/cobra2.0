@@ -1766,74 +1766,10 @@ export async function process_post_stack_updates(currentStockFile: File): Promis
 }
 
 
-// export async function fetchBatchData(): Promise<{ activeBatches: Batch[], historyBatches: Batch[] }> {
-    
-//     // Query 1: Fetch Active Batches from post_stack_batches (Joined with post_stack for strategy)
-//     const activeQuery = `
-//         SELECT 
-//             psb.id,
-//             psb.batch_number,
-//             ps.stack_type as strategy, 
-//             psb.price_usd_50, 
-//             psb.quantity, 
-//             psb.hedge_level
-//         FROM post_stack_batches psb
-//         JOIN post_stack ps ON psb.stack_id = ps.id
-//     `;
-
-//     // Only execute the active batches query
-//     const activeRows = await query<any[]>({ query: activeQuery });
-
-//     // Map Active Batches
-//     const activeBatches: Batch[] = (activeRows || []).map(row => ({
-//         id: row.id.toString(),
-//         batch_number: row.batch_number,
-//         strategy: row.strategy || 'UNDEFINED',
-//         outrightPrice50kg: Number(row.price_usd_50) || 0,
-//         quantityKg: Number(row.quantity),
-//         hedgeLevelUSClb: Number(row.hedge_level) || 0,
-//         status: 'active'
-//     }));
-
-//     // Return empty array for historyBatches as requested
-//     return { activeBatches, historyBatches: [] };
-// }
-
 export async function fetchBatchData(): Promise<{ activeBatches: Batch[], historyBatches: Batch[] }> {
     
-    // Query 1: Fetch Active Batches from post_stack_batches 
-    // Augmented with lookups for date_in and analysis_id from daily_strategy_processing
-    // const activeQuery = `
-    //     SELECT 
-    //         psb.id,
-    //         psb.batch_number,
-    //         ps.stack_type as strategy, 
-    //         psb.price_usd_50, 
-    //         psb.quantity, 
-    //         psb.hedge_level,
-    //         -- Lookup first valid date_in
-    //         (
-    //             SELECT date_in 
-    //             FROM daily_strategy_processing dsp 
-    //             WHERE dsp.batch_number = psb.batch_number 
-    //             AND dsp.date_in IS NOT NULL 
-    //             LIMIT 1
-    //         ) as date_in,
-    //         -- Lookup first valid analysis_id
-    //         (
-    //             SELECT analysis_id 
-    //             FROM daily_strategy_processing dsp 
-    //             WHERE dsp.batch_number = psb.batch_number 
-    //             AND dsp.analysis_id IS NOT NULL 
-    //             LIMIT 1
-    //         ) as analysis_id
-    //     FROM post_stack_batches psb
-    //     JOIN post_stack ps ON psb.stack_id = ps.id
-    // `;
-
-
-
-        const activeQuery = `
+    // OPTIMIZED: Replaced O(N*M) correlated subqueries with an O(N+M) pre-aggregated LEFT JOIN.
+    const activeQuery = `
         SELECT 
             psb.id,
             psb.batch_number,
@@ -1841,27 +1777,21 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
             psb.price_usd_50, 
             psb.quantity, 
             psb.hedge_level,
-            -- Lookup first valid date_in
-            (
-                SELECT date_in 
-                FROM daily_strategy_processing dsp 
-                WHERE dsp.batch_number = psb.batch_number 
-                AND dsp.date_in IS NOT NULL 
-                LIMIT 1
-            ) as date_in,
-            -- Lookup first valid analysis_id
-            (
-                SELECT analysis_id 
-                FROM daily_strategy_processing dsp 
-                WHERE dsp.batch_number = psb.batch_number 
-                AND dsp.analysis_id IS NOT NULL 
-                LIMIT 1
-            ) as analysis_id
+            dsp.first_date as date_in,
+            dsp.first_analysis as analysis_id
         FROM post_stack_batches psb
         JOIN post_stack ps ON psb.stack_id = ps.id
+        LEFT JOIN (
+            SELECT 
+                batch_number,
+                MIN(date_in) as first_date,
+                MAX(analysis_id) as first_analysis
+            FROM daily_strategy_processing
+            GROUP BY batch_number
+        ) dsp ON dsp.batch_number = psb.batch_number
     `;
 
-    // Only execute the active batches query
+    // Execute the optimized query
     const activeRows = await query<any[]>({ query: activeQuery });
 
     // Map Active Batches
@@ -1873,7 +1803,6 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
         quantityKg: Number(row.quantity),
         hedgeLevelUSClb: Number(row.hedge_level) || 0,
         status: 'active',
-        // New Attributes
         date_in: row.date_in ? new Date(row.date_in).toISOString() : null,
         analysis_id: row.analysis_id || null
     }));
@@ -1881,6 +1810,8 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
     // Return empty array for historyBatches as requested
     return { activeBatches, historyBatches: [] };
 }
+
+
 /**
  * Retrieves a history batch and its composition ingredients based on the batch number.
  * * @param batch_number - The unique identifier string for the batch (e.g. "BLEND-2023-...")

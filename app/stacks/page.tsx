@@ -2786,13 +2786,19 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
             <Card className="p-6 relative z-10">
                 <div className="flex flex-col gap-2">
                     <div className="flex justify-between items-center mb-2">
-                        <h3 className="text-lg font-bold text-[#51534a]">Batch Traceability Graph</h3>
+
+
+                        <div className='flex-col'>
+                            <h3 className="text-lg font-bold text-[#51534a]">Batch history tracker</h3>
+                            <h5 className="text-sm  text-[#51534a]">Type in batch numbers and trace them back to the roots</h5>
+                        </div>
+                        
                         {lineage && (
                             <button 
                                 onClick={handleExtract}
                                 className="text-xs text-[#007680] hover:text-[#007680]/80 font-medium flex items-center gap-1 bg-[#A4DBE8]/20 px-3 py-1.5 rounded border border-[#007680]/20 transition-all"
                             >
-                                <Download size={14} /> Extract Lineage
+                                <Download size={14} /> Extract
                             </button>
                         )}
                     </div>
