@@ -1,6 +1,7 @@
 import { fetchBatchData } from '@/lib/stack_pricing_utils';
 import { NextResponse } from 'next/server';
 
+export const dynamic = 'force-dynamic';
 export async function GET() {
     try {
         const data = await fetchBatchData();

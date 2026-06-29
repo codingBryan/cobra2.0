@@ -20,7 +20,7 @@ if (process.env.ENVIRONMENT == "development") {
     user: USER,
     password: PASSWORD,
     waitForConnections: true,
-    connectionLimit: 20,
+    connectionLimit: 50,
     queueLimit: 0,
   });
 }
@@ -36,7 +36,7 @@ else{
     user: USER,
     password: PASSWORD,
     waitForConnections: true,
-    connectionLimit: 20,
+    connectionLimit: 50,
     ssl: { rejectUnauthorized: true },
     queueLimit: 0,
   });

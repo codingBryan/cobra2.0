@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "cross-env NODE_OPTIONS='--max-old-space-size=8192' ts-node server.js",
+    "dev": "node --max-old-space-size=8192 server.js",
     "build": "cross-env NODE_OPTIONS='--max-old-space-size=8192' next build",
-    "start": "cross-env NODE_OPTIONS='--max-old-space-size=8192' ts-node server.js",
+    "start": "node --max-old-space-size=8192 server.js",
     "lint": "next lint"
   },
   "dependencies": {

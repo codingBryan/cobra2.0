@@ -1274,167 +1274,6 @@ function convertExcelDate(excelDate: any): Date | null {
 
 
 
-// export async function getProcessDetails(
-//   processingFile: File | null,
-//   currentStockFile: File | null
-// ): Promise<ProcessSummary> {
-
-//   // --- STEP 0: Fetch the latest processing_date from DB ---
-//   let dbSinceTime: number;
-//   try {
-//     const dbResult = await query({
-//       query: `
-//         SELECT processing_date 
-//         FROM daily_processes 
-//         ORDER BY processing_date DESC 
-//         LIMIT 1
-//       `
-//     });
-
-//     const rows = dbResult as any[];
-//     const latestDateStr = rows && rows.length > 0 ? rows[0].processing_date : null;
-
-//     // SENTINEL FALLBACK: If no row is found, -1 ensures all valid Excel dates pass the filter.
-//     dbSinceTime = latestDateStr ? new Date(latestDateStr).getTime() : -1;
-//     console.log(`[getProcessDetails] Latest DB Date: ${latestDateStr || 'NONE (Processing all rows)'}`);
-//   } catch (error: any) {
-//     console.error(`[getProcessDetails] DB Error: ${error.message}`);
-//     throw new Error("Failed to retrieve the latest processing date from database.");
-//   }
-
-//   // --- STEP 1: Read the Current Stock CSV ---
-//   const stockStrategyMap = new Map<string, string>();
-//   try {
-//     if (currentStockFile) {
-//       const stockBuffer = await currentStockFile.arrayBuffer();
-//       const stockWorkbook = XLSX.read(stockBuffer, { type: 'buffer' });
-//       const stockWorksheet = stockWorkbook.Sheets[stockWorkbook.SheetNames[0]];
-//       if (stockWorksheet) {
-//         const stockRows = XLSX.utils.sheet_to_json<any>(stockWorksheet);
-//         stockRows.forEach(row => {
-//           if (row['Batch No.'] && row['Position Strategy Allocation']) {
-//             stockStrategyMap.set(row['Batch No.'].toUpperCase(), row['Position Strategy Allocation']);
-//           }
-//         });
-//       }
-//     }
-//   } catch (error: any) {
-//     console.error(`[getProcessDetails] Error reading current_stock_file: ${error.message}`);
-//   }
-
-//   // --- STEP 2 & 3: Read and Convert Processing Analysis file ---
-//   let allRows: any[];
-//   try {
-//     if (!processingFile) throw new Error('Processing File is null.');
-//     const buffer = await processingFile.arrayBuffer();
-//     const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
-//     const sheetName = 'Processing Analysis';
-//     const worksheet = workbook.Sheets[sheetName];
-//     if (!worksheet) throw new Error(`Worksheet "${sheetName}" not found.`);
-
-//     allRows = XLSX.utils.sheet_to_json<any>(worksheet, { range: 1 });
-//     if (allRows.length === 0) {
-//       return { processes: [], total_input_quantity: 0, total_output_quantity: 0, total_milling_loss: 0, total_processing_loss: 0 };
-//     }
-//   } catch (error: any) {
-//     console.error(`[getProcessDetails] File parsing error: ${error.message}`);
-//     throw error;
-//   }
-  
-//   // --- STEP 4: Augment rows with Strategy data ---
-//   allRows.forEach((row: any) => {
-//     const inputBatch = row['Batch No.']?.toUpperCase();
-//     const outputBatch = row['Batch No._1']?.toUpperCase();
-//     if (inputBatch) row.InputStrategy = stockStrategyMap.get(inputBatch) || 'UNDEFINED';
-//     if (outputBatch) row.OutputStrategy = stockStrategyMap.get(outputBatch) || 'UNDEFINED';
-//   });
-
-//   // --- STEP 5: Filter data by 'Receipt Date' ---
-//   const dateFilteredRows = allRows.filter((row: any) => {
-//     const receiptDate = row['Receipt Date'] as unknown as Date;
-//     // O(1) integer comparison
-//     return (
-//       receiptDate instanceof Date && 
-//       !isNaN(receiptDate.getTime()) && 
-//       receiptDate.getTime() >= dbSinceTime
-//     );
-//   });
-
-//   // --- STEP 6: Get unique 'Process No.' values ---
-//   const uniqueProcessNumbers = [...new Set(dateFilteredRows.map(row => row['Process No.']))].filter(Boolean);
-
-//   const processObjectsList: any[] = [];
-//   let total_input_quantity = 0, total_output_quantity = 0, total_milling_loss = 0, total_processing_loss = 0;
-
-//   // --- STEP 7: Aggregate per Process ---
-//   for (const processNo of uniqueProcessNumbers) {
-//     const matchingRows = allRows.filter(row => row['Process No.'] === processNo);
-//     if (matchingRows.length === 0) continue;
-
-//     const firstRow = matchingRows[0];
-//     const pLoss = (typeof firstRow['Loss/Gain'] === 'number') ? firstRow['Loss/Gain'] : parseFloat(firstRow['Loss/Gain'] || '0');
-//     const mLoss = (typeof firstRow['Milling Loss'] === 'number') ? firstRow['Milling Loss'] : parseFloat(firstRow['Milling Loss'] || '0');
-
-//     const process_object: any = {
-//       process_number: firstRow['Process No.']!,
-//       process_type: firstRow['Process Name'] || 'N/A',
-//       issue_date: firstRow['Issue Date'] as unknown as Date,
-//       processing_date: firstRow['Receipt Date'] as unknown as Date,
-//       input_item_names: {},
-//       input_batches: {},
-//       output_item_names: {},
-//       output_batches: {}, 
-//       processing_loss: pLoss, 
-//       milling_loss: mLoss,       
-//     };
-    
-//     let current_process_input = 0, current_process_output = 0;
-
-//     for (const row of matchingRows) {
-//       const inputQty = (typeof row['Qty.'] === 'number') ? row['Qty.'] : parseFloat(row['Qty.'] || '0');
-//       if (inputQty > 0) {
-//         current_process_input += inputQty;
-//         const name = row['Item Name'];
-//         if (name) process_object.input_item_names[name] = (process_object.input_item_names[name] || 0) + inputQty;
-//         const bNo = row['Batch No.'];
-//         if (bNo) {
-//           if (!process_object.input_batches[bNo]) {
-//             process_object.input_batches[bNo] = { strategy: row.InputStrategy || 'UNDEFINED', quantity: 0 };
-//           }
-//           process_object.input_batches[bNo].quantity += inputQty;
-//         }
-//       }
-
-//       const outputQty = (typeof row['Qty._1'] === 'number') ? row['Qty._1'] : parseFloat(row['Qty._1'] || '0');
-//       if (outputQty > 0) {
-//         current_process_output += outputQty;
-//         const name = row['Item Name_1'];
-//         if (name) process_object.output_item_names[name] = (process_object.output_item_names[name] || 0) + outputQty;
-//         const bNo = row['Batch No._1'];
-//         if (bNo) {
-//           if (!process_object.output_batches[bNo]) {
-//             process_object.output_batches[bNo] = { strategy: row.OutputStrategy || 'UNDEFINED', quantity: 0 };
-//           }
-//           process_object.output_batches[bNo].quantity += outputQty;
-//         }
-//       }
-//     }
-
-//     processObjectsList.push(process_object);
-//     total_input_quantity += current_process_input;
-//     total_output_quantity += current_process_output;
-//     total_milling_loss += mLoss;
-//     total_processing_loss += pLoss;
-//   }
-
-//   return {
-//     processes: processObjectsList,
-//     total_input_quantity,
-//     total_output_quantity,
-//     total_milling_loss,
-//     total_processing_loss
-//   };
-// }
 
 
 export async function getProcessDetails(
@@ -1812,242 +1651,6 @@ export async function initialize_grade_strategy_activity_records(
 }
 
 
-// export async function debit_credit_processing(
-//   new_activity_list: InitializedActivityRecords,
-//   summary_id: number,
-//   processing_summary_object: ProcessSummary,
-//   targetDate: Date 
-// ): Promise<InitializedActivityRecords> { 
-
-//   // --- FIX: Extract the 'processes' array from the input object ---
-//   const processing_summaries = processing_summary_object.processes;
-//   // ---
-
-//   if (!processing_summaries || typeof processing_summaries.length !== 'number') {
-//       console.error("[DEBIT/CREDIT] Error: 'processing_summaries' is not an iterable array.", processing_summary_object);
-//       return new_activity_list; 
-//   }
-  
-//   console.log(`[DEBIT/CREDIT] Starting processing for ${processing_summaries.length} processes...`);
-
-//   // --- Main loop for each process ---
-//   for (const process_object of processing_summaries) { 
-      
-//       // --- 1. Calculate parent process totals ---
-//       const total_process_input_qty = Object.values(process_object.input_batches).reduce((acc: any, batch: any) => acc + batch.quantity, 0);
-//       const total_process_output_qty = Object.values(process_object.output_batches).reduce((acc: any, batch: any) => acc + batch.quantity, 0);
-      
-//       const milling_loss = parseSafeFloat(process_object.milling_loss);
-//       const processing_loss = parseSafeFloat(process_object.processing_loss);
-//       const total_process_loss = milling_loss + processing_loss; 
-
-//       console.log(`[DEBIT/CREDIT] Processing Process No: ${process_object.process_number}`);
-//       console.log(`  -> Total Input: ${total_process_input_qty}, Total Output: ${total_process_output_qty}, Total Loss: ${total_process_loss}`);
-
-//       // --- 2. Create the parent 'daily_processes' row (INSERT IGNORE) ---
-//       // OPTIMIZATION: INSERT IGNORE skips the row entirely if it already exists, avoiding duplicate processing.
-//       const processInsertQuery = `
-//         INSERT IGNORE INTO daily_processes (
-//           summary_id, processing_date, process_type, process_number,
-//           input_qty, output_qty, milling_loss, processing_loss_gain_qty,
-//           input_value, output_value, pnl, trade_variables_updated
-//         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, FALSE)
-//       `;
-      
-//       let new_process_id: number = 0;
-      
-//       // --- TIMEZONE FIX START ---
-//       let safeProcessDate = null;
-//       if (process_object.processing_date) {
-//         const d = new Date(process_object.processing_date);
-//         d.setTime(d.getTime() + (12 * 60 * 60 * 1000));
-//         safeProcessDate = formatDateAsLocal_YYYYMMDD(d);
-//       }
-//       // --- TIMEZONE FIX END ---
-
-//       const insertValues = [
-//         summary_id,
-//         safeProcessDate, 
-//         process_object.process_type,
-//         process_object.process_number,
-//         total_process_input_qty,
-//         total_process_output_qty,
-//         milling_loss,
-//         processing_loss
-//       ];
-
-//       try {
-//         const result = await query<ResultSetHeader>({
-//           query: processInsertQuery,
-//           values: insertValues,
-//         });
-        
-//         // OPTIMIZATION: If affectedRows is 0, the process already exists. Skip entirely.
-//         if (result && result.affectedRows === 0) {
-//             console.log(`  -> Process ${process_object.process_number} already exists. Skipping.`);
-//             continue; // Instantly skips the Grade and Strategy logic below
-//         }
-        
-//         if (result && result.insertId) {
-//             new_process_id = result.insertId;
-//             console.log(`  -> Process row (ID: ${new_process_id}) CREATED.`);
-//         }
-
-//       } catch (error) {
-//         console.error(`[DEBIT/CREDIT] Failed to INSERT 'daily_processes' row for ${process_object.process_number}. Skipping this process.`, error);
-//         continue; 
-//       }
-      
-//       if (new_process_id === 0) {
-//           console.error(`[DEBIT/CREDIT] Could not determine ID for process ${process_object.process_number}. Skipping.`);
-//           continue;
-//       }
-
-//       // --- 3. Grade Logic ---
-//       const grade_processing_rows_to_insert = [];
-
-//       const all_grades_in_process = new Set([
-//           ...Object.keys(process_object.input_item_names),
-//           ...Object.keys(process_object.output_item_names)
-//       ]);
-
-//       console.log(`  -> Found ${all_grades_in_process.size} unique grades for this process.`);
-
-//       for (const grade of all_grades_in_process) {
-          
-//           const activity_grade = new_activity_list.new_grade_activity.find(g => g.grade === grade);
-
-//           if (!activity_grade) {
-//               console.warn(`  -> Grade '${grade}' found in process but not in closing stock summary. Skipping.`);
-//               continue;
-//           }
-
-//           const grade_input_qty = process_object.input_item_names[grade] || 0;
-//           const grade_output_qty = process_object.output_item_names[grade] || 0;
-          
-//           let grade_allocated_loss = 0;
-//           if (total_process_input_qty > 0 && grade_input_qty > 0) { 
-//               grade_allocated_loss = (grade_input_qty / total_process_input_qty) * total_process_loss;
-//           }
-          
-//           activity_grade.to_processing_qty += grade_input_qty;
-//           activity_grade.from_processing_qty += grade_output_qty;
-//           activity_grade.loss_gain_qty += grade_allocated_loss;
-
-//           const newGradeProcessRow = [
-//               new_process_id,
-//               grade,
-//               grade_input_qty,
-//               grade_output_qty,
-//               grade_allocated_loss
-//           ];
-//           grade_processing_rows_to_insert.push(newGradeProcessRow);
-//       }
-      
-//       // 7. Batch insert grade rows
-//       if (grade_processing_rows_to_insert.length > 0) {
-//           try {
-//               const gradeInsertQuery = `
-//                   INSERT INTO daily_grade_processing (
-//                       process_id, grade, input_qty, output_qty, processing_loss_gain_qty
-//                   ) VALUES ?
-//               `;
-//               await query<ResultSetHeader>({
-//                   query: gradeInsertQuery,
-//                   values: [grade_processing_rows_to_insert] 
-//               });
-//               console.log(`  -> Inserted ${grade_processing_rows_to_insert.length} 'daily_grade_processing' rows.`);
-//           } catch (error) {
-//               console.error(`[DEBIT/CREDIT] Failed to batch insert 'daily_grade_processing' rows for process ID ${new_process_id}.`, error);
-//           }
-//       }
-
-//       // --- 8. Strategy Logic ---
-//       const strategy_processing_rows_to_insert = [];
-      
-//       const all_batch_numbers = new Set([
-//           ...Object.keys(process_object.input_batches),
-//           ...Object.keys(process_object.output_batches)
-//       ]);
-
-//       for (const batch_number of all_batch_numbers) {
-//           const input_details = process_object.input_batches[batch_number];
-//           const output_details = process_object.output_batches[batch_number];
-
-//           const batch_input_qty = input_details?.quantity || 0;
-//           const batch_output_qty = output_details?.quantity || 0;
-          
-//           const strategy = input_details?.strategy || output_details?.strategy || 'UNDEFINED';
-
-//           let activity_strategy = new_activity_list.new_strategy_activity.find(s => s.strategy === strategy);
-
-//           if (!activity_strategy) {
-//               console.warn(`  -> Strategy '${strategy}' for batch '${batch_number}' not found. Creating a new activity record for it...`);
-              
-//               const safeSummaryDate = new Date(targetDate);
-//               safeSummaryDate.setTime(safeSummaryDate.getTime() + (12 * 60 * 60 * 1000));
-//               const summaryDateString = formatDateAsLocal_YYYYMMDD(safeSummaryDate);
-
-//               activity_strategy = {
-//                   summary_id: summary_id,
-//                   date: summaryDateString,
-//                   strategy: strategy,
-//                   opening_qty: 0, 
-//                   xbs_closing_stock: 0, 
-//                   to_processing_qty: 0,
-//                   from_processing_qty: 0,
-//                   loss_gain_qty: 0,
-//                   inbound_qty: 0,
-//                   outbound_qty: 0,
-//                   stock_adjustment_qty: 0,
-//                   regrade_discrepancy: 0
-//               };
-//               new_activity_list.new_strategy_activity.push(activity_strategy);
-//           }
-
-//           let batch_allocated_loss = 0;
-//           if (total_process_input_qty > 0 && batch_input_qty > 0) { 
-//               batch_allocated_loss = (batch_input_qty / total_process_input_qty) * total_process_loss;
-//           }
-
-//           activity_strategy.to_processing_qty += batch_input_qty;
-//           activity_strategy.from_processing_qty += batch_output_qty;
-//           activity_strategy.loss_gain_qty += batch_allocated_loss;
-
-//           const newStrategyProcessRow = [
-//               new_process_id,
-//               strategy.toUpperCase(),
-//               batch_number,
-//               batch_input_qty,
-//               batch_output_qty,
-//               batch_allocated_loss
-//           ];
-//           strategy_processing_rows_to_insert.push(newStrategyProcessRow);
-//       }
-
-//       // 9. Batch insert all strategy rows
-//       if (strategy_processing_rows_to_insert.length > 0) {
-//           try {
-//               const strategyInsertQuery = `
-//                   INSERT INTO daily_strategy_processing (
-//                       process_id, strategy, batch_number, input_qty, output_qty, processing_loss_gain_qty
-//                   ) VALUES ?
-//               `;
-//               await query<ResultSetHeader>({
-//                   query: strategyInsertQuery,
-//                   values: [strategy_processing_rows_to_insert] 
-//               });
-//               console.log(`  -> Inserted ${strategy_processing_rows_to_insert.length} 'daily_strategy_processing' rows.`);
-//           } catch (error) {
-//               console.error(`[DEBIT/CREDIT] Failed to batch insert 'daily_strategy_processing' rows for process ID ${new_process_id}.`, error);
-//           }
-//       }
-//   }
-
-//   console.log("[DEBIT/CREDIT] Finished processing all processes.");
-  
-//   return new_activity_list;
-// }
 
 export async function debit_credit_processing(
   new_activity_list: InitializedActivityRecords,
@@ -2061,11 +1664,9 @@ export async function debit_credit_processing(
   // ---
 
   if (!processing_summaries || typeof processing_summaries.length !== 'number') {
-      console.error("[DEBIT/CREDIT] Error: 'processing_summaries' is not an iterable array.", processing_summary_object);
       return new_activity_list; 
   }
   
-  console.log(`[DEBIT/CREDIT] Starting processing for ${processing_summaries.length} processes...`);
 
   // --- Main loop for each process ---
   for (const process_object of processing_summaries) { 
@@ -2078,7 +1679,6 @@ export async function debit_credit_processing(
           !process_object.output_batches || 
           Object.keys(process_object.output_batches).length === 0
       ) {
-          console.log(`[DEBIT/CREDIT] Skipping Process No: ${process_object.process_number} due to missing processing_date or empty output_batches.`);
           continue;
       }
       
@@ -2089,9 +1689,6 @@ export async function debit_credit_processing(
       const milling_loss = parseSafeFloat(process_object.milling_loss);
       const processing_loss = parseSafeFloat(process_object.processing_loss);
       const total_process_loss = milling_loss + processing_loss; 
-
-      console.log(`[DEBIT/CREDIT] Processing Process No: ${process_object.process_number}`);
-      console.log(`  -> Total Input: ${total_process_input_qty}, Total Output: ${total_process_output_qty}, Total Loss: ${total_process_loss}`);
 
       // --- 2. Create the parent 'daily_processes' row (INSERT IGNORE) ---
       const processInsertQuery = `
@@ -2131,7 +1728,6 @@ export async function debit_credit_processing(
         
         // OPTIMIZATION: If affectedRows is 0, the process already exists. Skip entirely.
         if (result && result.affectedRows === 0) {
-            console.log(`  -> Process ${process_object.process_number} already exists. Skipping.`);
             continue; // Instantly skips the Grade and Strategy logic below
         }
         
@@ -2141,12 +1737,10 @@ export async function debit_credit_processing(
         }
 
       } catch (error) {
-        console.error(`[DEBIT/CREDIT] Failed to INSERT 'daily_processes' row for ${process_object.process_number}. Skipping this process.`, error);
         continue; 
       }
       
       if (new_process_id === 0) {
-          console.error(`[DEBIT/CREDIT] Could not determine ID for process ${process_object.process_number}. Skipping.`);
           continue;
       }
 
@@ -2158,7 +1752,6 @@ export async function debit_credit_processing(
           ...Object.keys(process_object.output_item_names || {})
       ]);
 
-      console.log(`  -> Found ${all_grades_in_process.size} unique grades for this process.`);
 
       for (const grade of all_grades_in_process) {
           
@@ -2291,7 +1884,7 @@ export async function debit_credit_processing(
       }
   }
 
-  console.log("[DEBIT/CREDIT] Finished processing all processes.");
+  
   
   return new_activity_list;
 }

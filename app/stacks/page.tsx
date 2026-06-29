@@ -31,10 +31,14 @@ import {
   CalendarClock,
   ChevronLeft,
   ArrowDown,
-  ArrowUp
+  ArrowUp,
+  Activity,
+  CheckCircle2,
+  XCircle
 } from 'lucide-react';
 import { Batch, LastUpdateDates, SaleRecord, StrategyAggregate } from '@/custom_utilities/custom_types';
 import { useRouter } from 'next/navigation';
+import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, PieChart as RechartsPieChart, Pie, Cell } from 'recharts';
 
 
 
@@ -81,7 +85,7 @@ interface NavButtonProps {
 
 interface ExtendedBatch extends Batch {
     date_in?: string | null;
-    analysis_id?: string | null;
+    analysis_id:string|null;
 }
 
 
@@ -1868,10 +1872,49 @@ function StrategicBlender({ data, unit }: { data: StrategyAggregate[], unit: Uni
 
 
 
+
+
 function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit }) {
+    const CHART_COLORS = ['#605F55', '#D97706', '#00A651', '#4A4941', '#8B8A81', '#3B82F6', '#8B5CF6', '#EC4899', '#10B981'];
+    
     const [search, setSearch] = useState('');
     const [filter, setFilter] = useState('POST');
     const [hideUnpriced, setHideUnpriced] = useState(false);
+
+    const [analysisModalOpen, setAnalysisModalOpen] = useState(false);
+    const [selectedAnalysisDetails, setSelectedAnalysisDetails] = useState<any>(null);
+    const [analysisLoading, setAnalysisLoading] = useState(false);
+    const [toastMessage, setToastMessage] = useState<string | null>(null);
+    
+    // OPTIMIZATION: O(1) Cache to store previously fetched analyses to prevent redundant API calls
+    const analysisCache = useRef<Record<string, any>>({});
+
+    // Derive unique classes for the line chart dynamically
+    const uniqueClasses = useMemo(() => {
+      return selectedAnalysisDetails?.classes 
+        ? Array.from(new Set(selectedAnalysisDetails.classes.flatMap((o: any) => Object.keys(o).filter((k: string) => k !== 'screen_size'))))
+        : [];
+    }, [selectedAnalysisDetails]);
+    
+    // Derive Pie Chart Data dynamically for the Analysis Modal
+    const pieData = useMemo(() => {
+      if (!selectedAnalysisDetails?.classes) return [];
+      
+      const totals: Record<string, number> = {};
+      
+      selectedAnalysisDetails.classes.forEach((row: any) => {
+        Object.keys(row).forEach(key => {
+          if (key !== 'screen_size') {
+            totals[key] = (totals[key] || 0) + row[key];
+          }
+        });
+      });
+
+      return Object.entries(totals)
+        .map(([name, value]) => ({ name, value }))
+        .filter(item => item.value > 0)
+        .sort((a, b) => b.value - a.value); 
+    }, [selectedAnalysisDetails]);
     
     // Hover state for Donut Chart
     const [hoveredSegment, setHoveredSegment] = useState<any | null>(null);
@@ -1915,7 +1958,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
       let totalKg = 0;
       let totalValUSClb = 0;
       let totalHedgeVal = 0;
-      let weightedDaysSum = 0; // New accumulator
+      let weightedDaysSum = 0; 
 
       selectedBatches.forEach(item => {
         const valUSClb = toUSClb(item.batch.outrightPrice50kg);
@@ -1923,7 +1966,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
         totalHedgeVal += item.batch.hedgeLevelUSClb * item.useKg;
         totalKg += item.useKg;
 
-        // Calculate weighted days in stock
         const days = getDaysInStock(item.batch.date_in);
         weightedDaysSum += days * item.useKg;
       });
@@ -1933,7 +1975,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
       const avgDiff = avgOutrightUSClb - avgHedge;
       const finalCostDiff = avgDiff + fobbingCost;
       const pnlPerLb = salePriceDiff - finalCostDiff;
-      const avgDaysInStock = totalKg ? weightedDaysSum / totalKg : 0; // New Metric
+      const avgDaysInStock = totalKg ? weightedDaysSum / totalKg : 0; 
       
       const totalLbs = totalKg * KG_TO_LB;
       const totalPnLUSD = (pnlPerLb / 100) * totalLbs;
@@ -1989,12 +2031,10 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
       csvRows.push(`Fobbing Cost (c/lb), ${fobbingCost}`);
       csvRows.push(`Sale Price Diff (c/lb), ${salePriceDiff}`);
       csvRows.push(`P&L (c/lb), ${formatNumber(blendStats.pnl)}`);
-      // P&L USD Export: Kept as per existing page.tsx (Split into two cells via comma)
       csvRows.push(`P&L (USD), ${formatNumber(blendStats.totalPnLUSD)}`);
       csvRows.push(`Avg Days In Stock, ${formatNumber(blendStats.avgDaysInStock, 0)}`);
       csvRows.push('');
       
-      // Add Distribution Section to CSV
       csvRows.push('POSITION STRATEGY DISTRIBUTION');
       csvRows.push(`Strategy,Weight (${unit}),% Share`);
       strategyDistribution.forEach(d => {
@@ -2026,6 +2066,66 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
           link.click();
           document.body.removeChild(link);
       }
+    };
+
+    const handleViewAnalysis = async (batch: Batch) => {
+        if (!batch.analysis_id) {
+            setToastMessage("No analysis found for this batch.");
+            setTimeout(() => setToastMessage(null), 3000);
+            return;
+        }
+
+        const id = batch.analysis_id.toString();
+        setAnalysisModalOpen(true);
+
+        if (analysisCache.current[id]) {
+            setSelectedAnalysisDetails(analysisCache.current[id]);
+            return;
+        }
+
+        setAnalysisLoading(true);
+        setSelectedAnalysisDetails(null);
+
+        try {
+            // OPTIMIZATION: Fetch both the main record and the details concurrently
+            const [recordRes, detailsRes] = await Promise.all([
+                fetch(`/api/batches/analyses`), 
+                fetch(`/api/batches/analyses/analysis_details/${id}`)
+            ]);
+
+            if (!recordRes.ok || !detailsRes.ok) throw new Error("Failed to fetch");
+            
+            const records = await recordRes.json();
+            const mainRecord = Array.isArray(records) ? records.find((r: any) => r.id?.toString() === id) : {};
+            
+            const detailsJson = await detailsRes.json();
+            
+            const transformedClasses = detailsJson.classes.reduce((acc: any[], curr: any) => {
+                let entry = acc.find((i: any) => i.screen_size === curr.screen_size);
+                if (!entry) {
+                    entry = { screen_size: curr.screen_size };
+                    acc.push(entry);
+                }
+                entry[curr.class] = parseFloat(curr.percentage);
+                return acc;
+            }, []);
+
+            const payload = { 
+                ...mainRecord,
+                screensize: detailsJson.screensize.map((s: any) => ({ ...s, percentage: parseFloat(s.percentage) })), 
+                classes: transformedClasses 
+            };
+
+            analysisCache.current[id] = payload;
+            setSelectedAnalysisDetails(payload);
+        } catch (err) {
+            console.error(err);
+            setToastMessage("Failed to load analysis details.");
+            setTimeout(() => setToastMessage(null), 3000);
+            setAnalysisModalOpen(false);
+        } finally {
+            setAnalysisLoading(false);
+        }
     };
   
     // --- IMPACT ANALYSIS ---
@@ -2150,7 +2250,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
             <div className="flex-1 overflow-y-auto p-2 space-y-2 bg-[#D6D2C4]/20">
               {filteredBatches.length > 0 ? filteredBatches.map(batch => {
                 const hasPrice = batch.outrightPrice50kg && batch.outrightPrice50kg > 0;
-                // NEW: Calculate days in stock
                 const daysInStock = getDaysInStock(batch.date_in);
                 
                 return (
@@ -2178,13 +2277,28 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                         <div className="text-[10px] text-[#968C83]">
                             Diff: {hasPrice ? formatNumber(toUSClb(batch.outrightPrice50kg) - batch.hedgeLevelUSClb) : '---'}
                         </div>
-                        {/* NEW: Days in Stock Display */}
                         {daysInStock > 0 && (
                             <div className="text-[10px] text-[#007680] flex justify-end items-center gap-1 font-medium mt-0.5">
                                 <CalendarClock size={10} /> {daysInStock} days
                             </div>
                         )}
                       </div>
+
+                        <button 
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                handleViewAnalysis(batch);
+                            }}
+                            className={`p-1.5 mr-2 rounded-full transition-colors group ${
+                                batch.analysis_id 
+                                ? 'text-[#00A651] hover:bg-[#00A651]/10' 
+                                : 'text-[#8B8A81] hover:bg-[#EBE7DC]'
+                            }`}
+                            title="View Analysis"
+                            >
+                            <FlaskConical className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                        </button>
+
                       <button 
                         onClick={() => addToBlend(batch)}
                         className="opacity-0 group-hover:opacity-100 bg-[#A4DBE8]/20 text-[#007680] p-2 rounded-full hover:bg-[#A4DBE8]/40 transition-all"
@@ -2226,7 +2340,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
   
               <div className="flex">
                   <div className="flex flex-col flex-1 pr-4">
-                    {/* ... Input Fields (Client, Ref, Cost, Diff) ... */}
                     <div className="grid grid-cols-2 gap-2 mb-2">
                         <div>
                             <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Client *</label>
@@ -2252,10 +2365,8 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                     </div>
                   </div>
                   
-                  {/* Donut Chart Area */}
                   <div className="col-span-2 flex gap-4 h-full items-center">
                       <div className="w-48 shrink-0 flex flex-col items-center justify-center relative">
-                        {/* Donut SVG */}
                         <div className="flex items-center justify-center relative">
                             {strategyDistribution.length > 0 ? (
                                 <>
@@ -2281,7 +2392,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                             )}
                         </div>
                         
-                        {/* NEW: Weighted Average Days Display */}
                         <div className="mt-2 text-center bg-[#F5F5F3] px-3 py-1 rounded-full border border-[#D6D2C4]">
                             <div className="text-[9px] text-[#968C83] uppercase font-bold tracking-wide">Avg Age</div>
                             <div className="text-xs font-bold text-[#51534a] flex items-center justify-center gap-1">
@@ -2291,7 +2401,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                         </div>
                       </div>
 
-                      {/* TARGET VOL */}
                       <div className="w-36 shrink-0 flex flex-col justify-end pb-1">
                           <div className="flex justify-between mb-1">
                                <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block">Target ({unit})</label>
@@ -2328,7 +2437,9 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                           </div>
                           
                           <div className="flex items-center gap-3">
-                              <div className="text-[10px] font-bold text-[#007680] bg-[#A4DBE8]/20 px-1.5 py-0.5 rounded flex items-center gap-1"><PieChart size={10} />{formatNumber(percentOfBlend, 1)}%</div>
+                              <div className="text-[10px] font-bold text-[#007680] bg-[#A4DBE8]/20 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                <PieChart className="w-3 h-3" />{formatNumber(percentOfBlend, 1)}%
+                              </div>
                               <div className="flex items-center border border-[#D6D2C4] rounded px-2 py-1 bg-[#D6D2C4]/10">
                                   <input type="number" className="w-16 text-xs bg-transparent text-right outline-none font-medium text-[#51534a]" value={convertQty(item.useKg, unit)} onChange={(e) => {
                                           let val = parseFloat(e.target.value);
@@ -2351,7 +2462,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                   })}
               </div>
 
-              {/* Inventory Impact (Price Change) Section - RESTORED */}
+              {/* Inventory Impact (Price Change) Section */}
               {selectedBatches.length > 0 && (
               <div className="border-t border-[#D6D2C4] pt-4">
                   <h4 className="text-[10px] font-bold text-[#007680] uppercase tracking-wider mb-3 flex items-center gap-2">
@@ -2422,6 +2533,219 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
   
         </div>
         </div>
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed bottom-4 right-4 bg-[#4A4941] text-white px-4 py-3 rounded-lg shadow-lg z-50 flex items-center gap-2 animate-in slide-in-from-bottom-5">
+          <AlertCircle className="w-4 h-4 text-[#D97706]" />
+          <span className="text-sm font-medium">{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Analysis Details Modal (FULLY INTEGRATED) */}
+      {analysisModalOpen && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-[#F5F2EA] rounded-2xl w-full max-w-6xl max-h-[95vh] shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200 font-Poppins">
+            
+            {/* Header Controls */}
+            <div className="flex justify-between items-center p-4 bg-white border-b border-[#D1CEC3]">
+              <h3 className="text-xl font-bold flex items-center gap-2 text-[#4A4941]">
+                <FlaskConical className="w-5 h-5 text-[#00A651]" /> 
+                Analysis Breakdown
+              </h3>
+              <button onClick={() => setAnalysisModalOpen(false)} className="text-[#8B8A81] hover:text-[#4A4941] transition-colors p-1 bg-[#F5F2EA] rounded-full">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Content Body */}
+            <div className="flex-1 overflow-y-auto p-4 md:p-6 flex flex-col gap-4 bg-[#F5F2EA]">
+              {analysisLoading ? (
+                <div className="flex-1 flex flex-col items-center justify-center py-12 text-[#8B8A81]">
+                  <div className="w-8 h-8 border-4 border-[#00A651] border-t-transparent rounded-full animate-spin mb-4" />
+                  <p className="font-bold uppercase tracking-widest text-sm">Loading Data...</p>
+                </div>
+              ) : selectedAnalysisDetails ? (
+                <>
+                  {/* Top Header Card */}
+                  <div className="bg-white rounded-2xl p-5 border border-[#D1CEC3] shrink-0 shadow-sm">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h2 className="text-2xl font-bold mb-1 leading-tight text-[#4A4941]">{selectedAnalysisDetails.analysis_number || `ID: ${selectedAnalysisDetails.id}`}</h2>
+                        <p className="text-[#8B8A81] flex items-center gap-2 font-medium uppercase text-[10px] tracking-wider">
+                          {selectedAnalysisDetails.analysis_type || 'STANDARD'} • {selectedAnalysisDetails.qc_quality || 'UNKNOWN'}
+                        </p>
+                      </div>
+                      <div className={`px-3 py-1.5 rounded-full font-bold text-[10px] flex items-center gap-1.5 ${selectedAnalysisDetails.mapped ? 'bg-[#00A651]/10 text-[#00A651]' : 'bg-[#8B8A81]/10 text-[#8B8A81]'}`}>
+                        {selectedAnalysisDetails.mapped ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                        {selectedAnalysisDetails.mapped ? 'MAPPED' : 'UNMAPPED'}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col md:flex-row justify-between mt-4">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 flex-1">
+                        {[
+                          { label: 'SCA Defect', val: selectedAnalysisDetails.sca_defect_count },
+                          { label: 'Moisture', val: `${selectedAnalysisDetails.moisture || '0.00'}%` },
+                          { label: 'Prim. Defects', val: `${selectedAnalysisDetails.primary_defects_percentage || '0'}%`, color: '#D97706' },
+                          { label: 'Foreign Mat.', val: `${selectedAnalysisDetails.forein_matter_percentage || '0'}%` }
+                        ].map((stat, i) => (
+                          <div key={i}>
+                            <p className="text-[9px] font-bold uppercase text-[#8B8A81] mb-0.5">{stat.label}</p>
+                            <p className="text-base font-bold leading-none" style={{ color: stat.color || '#4A4941' }}>{stat.val || '0.00'}</p>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="w-[1px] bg-[#D1CEC3] mx-6 hidden md:block"></div>
+
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 flex-1 mt-4 md:mt-0 pt-4 md:pt-0 border-t md:border-t-0 border-[#D1CEC3]">
+                        {[
+                          { label: 'Grade AA', val: selectedAnalysisDetails.grade_aa_percentage },
+                          { label: 'Grade AB', val: selectedAnalysisDetails.grade_ab_percentage },
+                          { label: 'Grade ABC', val: selectedAnalysisDetails.grade_abc_percentage },
+                          { label: 'Grinder', val: selectedAnalysisDetails.grade_grinder_percentage }
+                        ].map((stat, i) => (
+                          <div key={i}>
+                            <p className="text-[9px] font-bold uppercase text-[#8B8A81] mb-0.5">{stat.label}</p>
+                            <p className="text-sm font-semibold leading-none text-[#4A4941]">{stat.val || '0.00'}%</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Lower Section: Charts and Composition Side-by-Side */}
+                  <div className="flex flex-col lg:flex-row gap-4 h-[500px]">
+                    
+                    {/* Mid-Left Column: Stacks Screen Size & Class Lines */}
+                    <div className="flex-1 flex flex-col gap-4 min-w-0">
+                      {/* Screen Size Bar Chart */}
+                      <div className="flex-1 bg-white border border-[#D1CEC3] rounded-2xl p-4 shadow-sm flex flex-col min-h-0">
+                        <div className="flex items-center gap-2 mb-2 shrink-0">
+                          <BarChart3 className="w-4 h-4 text-[#605F55]" />
+                          <h3 className="font-bold text-sm text-[#4A4941]">Screen Size</h3>
+                        </div>
+                        <div className="flex-1 w-full min-h-0">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={selectedAnalysisDetails.screensize || []} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EBE7DC" />
+                              <XAxis dataKey="screen_size" axisLine={false} tickLine={false} tick={{fontSize: 10, fontWeight: 600, fill: '#4A4941'}} />
+                              <YAxis axisLine={false} tickLine={false} tick={{fontSize: 9, fill: '#8B8A81'}} />
+                              <Tooltip 
+                                contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', fontSize: '11px'}} 
+                                cursor={{fill: '#F5F2EA'}}
+                              />
+                              <Bar dataKey="percentage" fill="#605F55" radius={[4, 4, 0, 0]} maxBarSize={30} />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+
+                      {/* Class Stacked Line Chart */}
+                      <div className="flex-1 bg-white border border-[#D1CEC3] rounded-2xl p-4 shadow-sm flex flex-col min-h-0">
+                        <div className="flex items-center gap-2 mb-0 shrink-0">
+                          <Activity className="w-4 h-4 text-[#D97706]" />
+                          <h3 className="font-bold text-sm text-[#4A4941]">Class Tracking</h3>
+                        </div>
+                        <div className="flex-1 w-full min-h-0">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={selectedAnalysisDetails.classes || []} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#EBE7DC" />
+                              <XAxis dataKey="screen_size" axisLine={false} tickLine={false} tick={{fontSize: 10, fontWeight: 600, fill: '#4A4941'}} />
+                              <YAxis axisLine={false} tickLine={false} tick={{fontSize: 9, fill: '#8B8A81'}} />
+                              <Tooltip contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', fontSize: '11px'}} />
+                              <Legend iconType="circle" wrapperStyle={{paddingTop: '5px', fontSize: '10px', fontWeight: 'bold'}} />
+                              {uniqueClasses.map((cls, idx) => (
+                                <Line 
+                                  key={cls as string} 
+                                  type="monotone" 
+                                  dataKey={cls as string} 
+                                  stroke={CHART_COLORS[idx % CHART_COLORS.length]} 
+                                  strokeWidth={2.5}
+                                  dot={{ r: 3, strokeWidth: 1.5, fill: 'white' }}
+                                  activeDot={{ r: 5 }}
+                                />
+                              ))}
+                            </LineChart>
+                          </ResponsiveContainer>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right Column: Composition Summary */}
+                    <div className="w-full lg:w-[35%] bg-white border border-[#D1CEC3] rounded-2xl p-5 shadow-sm flex flex-col min-h-0 shrink-0">
+                      <div className="flex items-center gap-2 mb-4 shrink-0">
+                        <PieChart className="w-4 h-4 text-[#00A651]" />
+                        <h3 className="font-bold text-sm text-[#4A4941]">Composition Summary</h3>
+                      </div>
+                      
+                      {/* The Pie Chart Area (Using RechartsPieChart explicitly) */}
+                      <div className="h-48 w-full shrink-0 relative">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <RechartsPieChart>
+                            <Pie
+                              data={pieData}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={50}
+                              outerRadius={80}
+                              paddingAngle={2}
+                              dataKey="value"
+                              stroke="none"
+                            >
+                              {pieData.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                              ))}
+                            </Pie>
+                            <Tooltip 
+                              contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', fontSize: '11px', fontWeight: 'bold'}}
+                              formatter={(value: number) => `${value.toFixed(2)}%`}
+                            />
+                          </RechartsPieChart>
+                        </ResponsiveContainer>
+                        
+                        {/* Centered Total Overlay */}
+                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                           <span className="text-[10px] font-bold text-[#8B8A81] tracking-widest uppercase">Total</span>
+                        </div>
+                      </div>
+
+                      {/* Scrollable Custom Legend */}
+                      <div className="flex-1 overflow-y-auto mt-4 pr-1 min-h-0 border-t border-[#EBE7DC] pt-3">
+                        <div className="space-y-1.5">
+                          {pieData.map((item, idx) => (
+                            <div key={item.name} className="flex justify-between items-center text-xs p-2 rounded-lg hover:bg-[#F5F2EA] transition-colors group">
+                              <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
+                                <div 
+                                  className="w-2.5 h-2.5 rounded-full shrink-0" 
+                                  style={{ backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} 
+                                />
+                                <span className="truncate font-medium text-[#4A4941] group-hover:text-black transition-colors">{item.name}</span>
+                              </div>
+                              <span className="font-bold text-[#605F55] shrink-0">{item.value.toFixed(2)}%</span>
+                            </div>
+                          ))}
+                          {pieData.length === 0 && (
+                            <p className="text-center text-[#8B8A81] text-xs py-4">No composition data</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center text-[#8B8A81]">
+                  <p>No details found.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+
       </div>
     );
 }
@@ -2446,6 +2770,7 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
 
     // Modal State
     const [selectedProcess, setSelectedProcess] = useState<any | null>(null);
+    const [hoveredPieSegment, setHoveredPieSegment] = useState<any | null>(null);
 
     const handleSearch = async () => {
         if (!search.trim()) return;
@@ -2532,6 +2857,7 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
             alert("Failed to extract data. Please try again.");
         }
     };
+
     // --- Pan & Zoom Handlers ---
     const handleMouseDown = (e: React.MouseEvent) => {
         setIsDragging(true);
@@ -2596,7 +2922,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
         let currentBatchId = activeTargetBatch;
         const stages: any[] = [];
         
-        // Ensure the target node renders with its creation metrics (output_qty > 0)
         const targetBatchData = lineage.batches.find((b: any) => b.batch_number === currentBatchId && b.output_qty > 0)
                              || lineage.batches.find((b: any) => b.batch_number === currentBatchId)
                              || { batch_number: currentBatchId };
@@ -2639,15 +2964,11 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
     };
 
     // Calculate Modal Dynamics on Demand
-    // Calculate Modal Dynamics on Demand
     const modalStats = useMemo(() => {
         if (!selectedProcess) return null;
         const totalIn = selectedProcess.inputs.reduce((sum: number, b: any) => sum + Number(b.input_qty || b.quantityKg || 0), 0);
-        
-        // OPTIMIZED: O(1) direct access instead of O(M) array reduction
         const totalOut = Number(selectedProcess.process.output_qty || 0);
-        
-        const calcLoss = totalIn - totalOut;
+        const calcLoss = totalOut - totalIn;
 
         const mainOut = selectedProcess.allOutputs[0] || {};
         const outCost = mainOut.output_cost_usd_50 || mainOut.outrightPrice50kg;
@@ -2656,6 +2977,62 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
 
         return { totalIn, totalOut, calcLoss, outDiff };
     }, [selectedProcess]);
+
+    // O(N) Hash Aggregation for Input Strategy Composition
+    const inputStrategyDistribution = useMemo(() => {
+        if (!selectedProcess || !selectedProcess.inputs) return [];
+        const counts: Record<string, number> = {};
+        let totalInputQty = 0;
+
+        for (let i = 0; i < selectedProcess.inputs.length; i++) {
+            const b = selectedProcess.inputs[i];
+            const qty = Number(b.input_qty || b.quantityKg || 0);
+            const strat = b.strategy || 'UNDEFINED';
+            counts[strat] = (counts[strat] || 0) + qty;
+            totalInputQty += qty;
+        }
+
+        return Object.entries(counts)
+            .map(([name, value]) => ({
+                name,
+                value,
+                percentage: totalInputQty ? (value / totalInputQty) * 100 : 0
+            }))
+            .sort((a, b) => b.value - a.value);
+    }, [selectedProcess]);
+
+    // Dynamic Donut Path Generation
+    const inputDonutSegments = useMemo(() => {
+        let cumulativePercent = 0;
+        const colors = ['#007680', '#B9975B', '#51534a', '#CEB888', '#97D700', '#A7BDB1', '#45B7D1', '#E9C46A'];
+        
+        return inputStrategyDistribution.map((d, i) => {
+            const startPercent = cumulativePercent;
+            cumulativePercent += d.percentage;
+            
+            // Handle edge case where a single strategy takes up 100%
+            if (d.percentage === 100) {
+                return { isFullCircle: true, pathData: "", color: colors[i % colors.length], ...d };
+            }
+
+            const getCoordinatesForPercent = (percent: number) => {
+                const x = Math.cos(2 * Math.PI * percent);
+                const y = Math.sin(2 * Math.PI * percent);
+                return [x, y];
+            };
+
+            const [startX, startY] = getCoordinatesForPercent(startPercent / 100);
+            const [endX, endY] = getCoordinatesForPercent(cumulativePercent / 100);
+            const largeArcFlag = d.percentage > 50 ? 1 : 0;
+            
+            const pathData = [
+                `M ${startX} ${startY}`, `A 1 1 0 ${largeArcFlag} 1 ${endX} ${endY}`, `L 0 0`,
+            ].join(' ');
+            
+            return { isFullCircle: false, pathData, color: colors[i % colors.length], ...d };
+        });
+    }, [inputStrategyDistribution]);
+
     return (
         <div className="max-w-6xl mx-auto space-y-6 relative">
             
@@ -2691,7 +3068,7 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                     <div className="text-lg font-bold text-[#51534a]">{formatNumber(modalStats.totalOut)} <span className="text-xs font-normal">kg</span></div>
                                 </div>
                                 <div className="bg-white p-3 rounded shadow-sm border border-[#D6D2C4] text-center">
-                                    <div className="text-[10px] uppercase text-[#968C83] font-bold">Milling Loss</div>
+                                    <div className="text-[10px] uppercase text-[#968C83] font-bold">Milling Loss/Gain</div>
                                     <div className="text-lg font-bold text-[#B9975B]">{formatNumber(modalStats.calcLoss)} <span className="text-xs font-normal">kg</span></div>
                                 </div>
                                 <div className="p-3 rounded shadow-sm border text-center bg-[#A4DBE8]/20 border-[#007680]/30">
@@ -2702,41 +3079,98 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                 </div>
                             </div>
 
-                            {/* Inputs Table */}
+                            {/* Inputs Section (Chart + Table) */}
                             <div>
-                                <h3 className="font-bold text-[#51534a] mb-2 flex items-center gap-2"><ArrowRight size={16} className="text-[#968C83]" /> Input Batches</h3>
-                                <div className="bg-white rounded border border-[#D6D2C4] overflow-hidden shadow-sm">
-                                    <table className="w-full text-sm text-left">
-                                        <thead className="bg-[#D6D2C4]/30 text-[#968C83] text-xs uppercase">
-                                            <tr>
-                                                <th className="py-2 px-4">Batch ID</th>
-                                                <th className="py-2 px-4">Strategy</th>
-                                                <th className="py-2 px-4 text-right">Qty Used (kg)</th>
-                                                <th className="py-2 px-4 text-right">Cost ($/50kg)</th>
-                                                <th className="py-2 px-4 text-right">Hedge (c/lb)</th>
-                                                <th className="py-2 px-4 text-right">Diff (c/lb)</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-[#D6D2C4]/50">
-                                            {selectedProcess.inputs.map((b: any, i: number) => {
-                                                const inQty = b.input_qty || b.quantityKg || 0;
-                                                const inCost = b.input_cost_usd_50 || b.outrightPrice50kg;
-                                                const inHedge = b.input_hedge_level_usc_lb || b.hedgeLevelUSClb;
-                                                const inDiff = (inCost && inHedge) ? (toUSClb(inCost) - inHedge) : b.input_differential;
-                                                return (
-                                                    <tr key={i} className="hover:bg-[#F5F5F3]">
-                                                        <td className="py-2 px-4 font-mono text-[#007680] font-medium">{b.batch_number}</td>
-                                                        <td className="py-2 px-4 text-[#51534a]">{b.strategy || '-'}</td>
-                                                        <td className="py-2 px-4 text-right font-medium">{formatNumber(inQty)}</td>
-                                                        <td className="py-2 px-4 text-right">{inCost ? formatNumber(inCost) : '-'}</td>
-                                                        <td className="py-2 px-4 text-right text-[#968C83]">{inHedge ? formatNumber(inHedge) : '-'}</td>
-                                                        <td className="py-2 px-4 text-right font-medium text-[#51534a]">{inDiff ? formatNumber(inDiff) : '-'}</td>
-                                                    </tr>
-                                                );
-                                            })}
-                                            {selectedProcess.inputs.length === 0 && <tr><td colSpan={6} className="py-4 text-center text-[#968C83] italic">No input batches recorded</td></tr>}
-                                        </tbody>
-                                    </table>
+                                <h3 className="font-bold text-[#51534a] mb-2 flex items-center gap-2">
+                                    <ArrowRight size={16} className="text-[#968C83]" /> Input Batches
+                                </h3>
+                                
+                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                                    {/* Strategy Composition Donut Chart */}
+                                    <div className="lg:col-span-1 bg-white rounded border border-[#D6D2C4] shadow-sm p-4 flex flex-col justify-center items-center">
+                                        <h4 className="text-[10px] uppercase text-[#968C83] font-bold tracking-wider mb-4">Strategy Composition</h4>
+                                        <div className="relative flex justify-center items-center w-full">
+                                            {inputDonutSegments.length > 0 ? (
+                                                <>
+                                                    <svg viewBox="-1.2 -1.2 2.4 2.4" className="w-32 h-32 -rotate-90">
+                                                        {inputDonutSegments.map((segment, i) => (
+                                                            segment.isFullCircle ? (
+                                                                <circle key={i} cx="0" cy="0" r="1" fill={segment.color} 
+                                                                    onMouseEnter={() => setHoveredPieSegment(segment)} 
+                                                                    onMouseLeave={() => setHoveredPieSegment(null)} 
+                                                                    className="transition-all duration-200 hover:opacity-80 cursor-pointer" 
+                                                                />
+                                                            ) : (
+                                                                <path key={i} d={segment.pathData} fill={segment.color} stroke="white" strokeWidth="0.05" 
+                                                                    onMouseEnter={() => setHoveredPieSegment(segment)} 
+                                                                    onMouseLeave={() => setHoveredPieSegment(null)} 
+                                                                    className="transition-all duration-200 hover:opacity-80 cursor-pointer" 
+                                                                />
+                                                            )
+                                                        ))}
+                                                        <circle cx="0" cy="0" r="0.6" fill="white" />
+                                                    </svg>
+                                                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                                        {hoveredPieSegment ? (
+                                                            <div className="flex flex-col items-center bg-white/90 p-1 rounded">
+                                                                <span className="text-[10px] font-bold text-[#51534a] truncate max-w-[80px] text-center leading-tight">{hoveredPieSegment.name}</span>
+                                                                <span className="text-xs font-bold text-[#007680]">{formatNumber(hoveredPieSegment.percentage, 1)}%</span>
+                                                            </div>
+                                                        ) : (
+                                                            <div className="flex flex-col items-center opacity-50"><span className="text-[9px] text-[#968C83] italic">Distrib.</span></div>
+                                                        )}
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <div className="w-32 h-32 rounded-full border-4 border-[#D6D2C4]/30 flex items-center justify-center text-[10px] text-[#968C83] italic">No Data</div>
+                                            )}
+                                        </div>
+
+                                        {/* Chart Legend */}
+                                        <div className="mt-4 w-full flex flex-col gap-1.5 max-h-32 overflow-y-auto custom-scrollbar pr-1">
+                                            {inputDonutSegments.map((segment, i) => (
+                                                <div key={i} className="flex justify-between items-center text-[10px]">
+                                                    <div className="flex items-center gap-1.5 truncate pr-2">
+                                                        <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: segment.color }}></span>
+                                                        <span className="truncate text-[#51534a]" title={segment.name}>{segment.name}</span>
+                                                    </div>
+                                                    <span className="font-bold text-[#968C83] shrink-0">{formatNumber(segment.percentage, 1)}%</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Input Batches Table (Qty Removed) */}
+                                    <div className="lg:col-span-2 bg-white rounded border border-[#D6D2C4] overflow-hidden shadow-sm h-full max-h-64 overflow-y-auto">
+                                        <table className="w-full text-sm text-left">
+                                            <thead className="bg-[#D6D2C4]/30 text-[#968C83] text-[10px] uppercase sticky top-0 z-10 backdrop-blur-sm">
+                                                <tr>
+                                                    <th className="py-2 px-4">Batch ID</th>
+                                                    <th className="py-2 px-4">Strategy</th>
+                                                    <th className="py-2 px-4 text-right">Cost ($/50kg)</th>
+                                                    <th className="py-2 px-4 text-right">Hedge (c/lb)</th>
+                                                    <th className="py-2 px-4 text-right">Diff (c/lb)</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-[#D6D2C4]/50 text-xs">
+                                                {selectedProcess.inputs.map((b: any, i: number) => {
+                                                    const inCost = b.input_cost_usd_50 || b.outrightPrice50kg;
+                                                    const inHedge = b.input_hedge_level_usc_lb || b.hedgeLevelUSClb;
+                                                    const inDiff = (inCost && inHedge) ? (toUSClb(inCost) - inHedge) : b.input_differential;
+                                                    return (
+                                                        <tr key={i} className="hover:bg-[#F5F5F3]">
+                                                            <td className="py-2 px-4 font-mono text-[#007680] font-medium">{b.batch_number}</td>
+                                                            <td className="py-2 px-4 text-[#51534a]">{b.strategy || '-'}</td>
+                                                            <td className="py-2 px-4 text-right">{inCost ? formatNumber(inCost) : '-'}</td>
+                                                            <td className="py-2 px-4 text-right text-[#968C83]">{inHedge ? formatNumber(inHedge) : '-'}</td>
+                                                            <td className="py-2 px-4 text-right font-medium text-[#51534a]">{inDiff ? formatNumber(inDiff) : '-'}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                                {selectedProcess.inputs.length === 0 && <tr><td colSpan={5} className="py-4 text-center text-[#968C83] italic">No input batches recorded</td></tr>}
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
                             </div>
 
@@ -2900,7 +3334,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                     const outHedge = mainOutput.output_hedge_level_usc_lb || mainOutput.hedgeLevelUSClb;
                                     const outDiff = (outCost && outHedge) ? (toUSClb(outCost) - outHedge) : mainOutput.output_differential;
 
-                                    // OPTIMIZED O(K) inline calculation for Weighted Average Input Differential
                                     let totalInWeight = 0;
                                     let totalInDiffVal = 0;
                                     for (let i = 0; i < stage.inputs.length; i++) {
@@ -2921,7 +3354,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                         <React.Fragment key={index}>
                                             
                                             {/* 1. Render Leftmost Inputs */}
-                                            {/* ... KEEP YOUR EXISTING INPUT RENDERING CODE HERE EXACTLY AS IS ... */}
                                             {index === 0 && stage.process && stage.inputs.length > 0 && (
                                                 <>
                                                     <div className="flex flex-col justify-center relative">
@@ -2994,13 +3426,12 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                                 </div>
                                             )}
 
-                                            {/* 2. Render Process Node (MODIFIED HERE) */}
+                                            {/* 2. Render Process Node */}
                                             {stage.process && (
                                                 <div 
                                                     onClick={(e) => { e.stopPropagation(); setSelectedProcess(stage); }}
                                                     className="bg-[#007680] border-2 border-[#007680]/50 text-white p-4 rounded-2xl shadow-xl w-56 flex flex-col shrink-0 transition-transform hover:-translate-y-1 cursor-pointer pointer-events-auto relative"
                                                 >
-                                                    {/* NEW: Visual Indicator for Diff Change */}
                                                     {avgInDiff !== null && outDiff !== null && Math.abs(outDiff - avgInDiff) > 0.01 && (
                                                         <div className="absolute -top-3 -right-3 bg-white rounded-full p-1.5 shadow-lg border-2 border-[#D6D2C4] z-10 flex items-center justify-center">
                                                             {outDiff > avgInDiff ? (
@@ -3018,7 +3449,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                                         </div>
                                                     </div>
                                                     
-                                                    {/* Horizontal In/Out weights */}
                                                     <div className="flex justify-between gap-2 text-xs bg-white/10 p-1.5 rounded mb-2">
                                                         <div className="flex flex-col">
                                                             <span className="text-[9px] opacity-70 uppercase tracking-wider">In</span>
@@ -3031,7 +3461,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                                         </div>
                                                     </div>
 
-                                                    {/* Horizontal Output Metrics */}
                                                     <div className="mt-2 pt-2 border-t border-white/20 text-xs">
                                                         <div className="text-[8px] uppercase font-bold tracking-wider opacity-80 mb-1 text-center">Main Output Est.</div>
                                                         <div className="flex justify-between gap-1 text-[10px]">
@@ -3051,9 +3480,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                                     </div>
                                                 </div>
                                             )}
-
-                                            {/* 3. Render Target Batch */}
-                                            {/* ... KEEP YOUR EXISTING TARGET BATCH RENDERING CODE HERE EXACTLY AS IS ... */}
 
                                             {/* 3. Render Target Batch */}
                                             {stage.isTarget && stage.targetBatchData && (() => {
@@ -3078,7 +3504,6 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
                                                             {stage.targetBatchData.output_qty || stage.targetBatchData.quantityKg || stage.targetBatchData.input_qty} kg
                                                         </div>
 
-                                                        {/* Horizontal Pricing info on Target Node */}
                                                         <div className="mt-3 text-[10px] text-[#51534a] bg-[#D6D2C4]/10 p-2 rounded border border-[#D6D2C4]/50 flex justify-between">
                                                             <div className="flex flex-col items-center">
                                                                 <span className="uppercase text-[8px] opacity-70 font-bold">Cost</span> 
@@ -3107,6 +3532,8 @@ function BatchHistoryView({ unit }: { unit: Unit }) {
         </div>
     );
 }
+
+
 function ClientAnalysisView({ unit }: { unit: Unit }) {
     // Data State
     const [salesData, setSalesData] = useState<SaleRecord[]>([]);

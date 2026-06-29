@@ -285,6 +285,7 @@ export interface Ingredient {
 
 export interface Batch {
   id: string;
+  analysis_id:string|null;
   batch_number:string;
   strategy: string;
   outrightPrice50kg: number; // $/50kg

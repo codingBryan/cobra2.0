@@ -1197,8 +1197,6 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     const processes = await query<DailyProcessRow[]>({
         query: `SELECT * FROM daily_processes WHERE trade_variables_updated = FALSE ORDER BY processing_date ASC`,
     });
-    console.log("Succesfully fetched unpriced processes")
-    console.log("Succesfully fetched unpriced processes")
 
     if (processes && processes.length > 0) {
         for (const process of processes) {
@@ -1228,7 +1226,6 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
         }
     }
 
-    console.log("\nTrade variable update process finished.");
     if (skippedProcessNumbers.length > 0) {
         console.log(`Skipped: ${skippedProcessNumbers.join(', ')}`);
     }
@@ -1769,6 +1766,8 @@ export async function process_post_stack_updates(currentStockFile: File): Promis
 export async function fetchBatchData(): Promise<{ activeBatches: Batch[], historyBatches: Batch[] }> {
     
     // OPTIMIZED: Replaced O(N*M) correlated subqueries with an O(N+M) pre-aggregated LEFT JOIN.
+    // OPTIMIZED: Replaced O(N*M) correlated subqueries with an O(N+M) pre-aggregated LEFT JOIN.
+    // ADDED: INNER JOIN to latest_psb to fetch only the MAX(id) per batch in O(N) time.
     const activeQuery = `
         SELECT 
             psb.id,
@@ -1780,6 +1779,11 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
             dsp.first_date as date_in,
             dsp.first_analysis as analysis_id
         FROM post_stack_batches psb
+        INNER JOIN (
+            SELECT batch_number, MAX(id) as max_id
+            FROM post_stack_batches
+            GROUP BY batch_number
+        ) latest_psb ON psb.id = latest_psb.max_id
         JOIN post_stack ps ON psb.stack_id = ps.id
         LEFT JOIN (
             SELECT 
@@ -1790,13 +1794,12 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
             GROUP BY batch_number
         ) dsp ON dsp.batch_number = psb.batch_number
     `;
-
     // Execute the optimized query
     const activeRows = await query<any[]>({ query: activeQuery });
 
     // Map Active Batches
     const activeBatches: Batch[] = (activeRows || []).map(row => ({
-        id: row.id.toString(),
+        id: row.id?.toString() || Math.random().toString(36).substring(7), // Safe fallback if id is null
         batch_number: row.batch_number,
         strategy: row.strategy || 'UNDEFINED',
         outrightPrice50kg: Number(row.price_usd_50) || 0,
@@ -1806,6 +1809,9 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
         date_in: row.date_in ? new Date(row.date_in).toISOString() : null,
         analysis_id: row.analysis_id || null
     }));
+
+    console.log("Active batches")
+    console.log(activeBatches)
 
     // Return empty array for historyBatches as requested
     return { activeBatches, historyBatches: [] };
@@ -1840,6 +1846,7 @@ export async function get_history_batch(batch_number: string): Promise<Batch | n
     const historyBatch: Batch = {
         id: row.id.toString(),
         batch_number: row.batch_number,
+        analysis_id: row.analysis_id || null,
         strategy: row.strategy || 'UNDEFINED',
         outrightPrice50kg: Number(row.output_cost_usd_50) || 0, // Defaulting based on standard schema
         quantityKg: Number(row.output_qty),
