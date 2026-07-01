@@ -9,7 +9,9 @@ export async function GET() {
         const sqlQuery = `
             SELECT 
                 sc.id, 
-                sc.contract_number, 
+                sc.contract_number,
+                sc.client,
+                sc.sale_differential,
                 sc.weight_kilos, 
                 sc.shipping_date,
                 sc.quality,

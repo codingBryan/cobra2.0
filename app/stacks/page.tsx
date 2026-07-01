@@ -40,7 +40,8 @@ import { Batch, LastUpdateDates, SaleRecord, StrategyAggregate } from '@/custom_
 import { useRouter } from 'next/navigation';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, PieChart as RechartsPieChart, Pie, Cell } from 'recharts';
 
-
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // --- Constants & Types ---
 const KG_TO_LB = 2.2046;
@@ -1872,10 +1873,8 @@ function StrategicBlender({ data, unit }: { data: StrategyAggregate[], unit: Uni
 
 
 
-
-
 function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit }) {
-    const CHART_COLORS = ['#605F55', '#D97706', '#00A651', '#4A4941', '#8B8A81', '#3B82F6', '#8B5CF6', '#EC4899', '#10B981'];
+    const CHART_COLORS = ['#007680', '#97D700', '#B9975B', '#51534a', '#CEB888', '#A7BDB1', '#6FA287', '#D97706', '#3B82F6', '#8B5CF6', '#EC4899', '#10B981'];
     
     const [search, setSearch] = useState('');
     const [filter, setFilter] = useState('POST');
@@ -1886,22 +1885,54 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
     const [analysisLoading, setAnalysisLoading] = useState(false);
     const [toastMessage, setToastMessage] = useState<string | null>(null);
     
-    // OPTIMIZATION: O(1) Cache to store previously fetched analyses to prevent redundant API calls
     const analysisCache = useRef<Record<string, any>>({});
 
-    // Derive unique classes for the line chart dynamically
+    // Target Blend & Contracts States
+    const [blends, setBlends] = useState<any[]>([]);
+    const [contracts, setContracts] = useState<any[]>([]);
+    const [selectedBlendId, setSelectedBlendId] = useState<string>('');
+    const [isRefFocused, setIsRefFocused] = useState(false);
+
+    // --- Database Blend Management States ---
+    const [editingBlendId, setEditingBlendId] = useState<number | null>(null);
+    const [loadModalOpen, setLoadModalOpen] = useState(false);
+    const [savedBlendsDb, setSavedBlendsDb] = useState<any[]>([]);
+    const [isSaving, setIsSaving] = useState(false);
+
+    useEffect(() => {
+        const fetchDropdownData = async () => {
+            try {
+                const [blendsRes, contractsRes] = await Promise.all([
+                    fetch('/api/blends'),
+                    fetch('/api/sale_contracts')
+                ]);
+
+                if (blendsRes.ok) {
+                    const blendsData = await blendsRes.json();
+                    if (Array.isArray(blendsData)) setBlends(blendsData);
+                }
+
+                if (contractsRes.ok) {
+                    const contractsData = await contractsRes.json();
+                    if (Array.isArray(contractsData)) setContracts(contractsData);
+                }
+            } catch (error) {
+                console.error("Failed to fetch dropdown data:", error);
+            }
+        };
+        fetchDropdownData();
+    }, []);
+
+    // Derived variables for charts
     const uniqueClasses = useMemo(() => {
       return selectedAnalysisDetails?.classes 
         ? Array.from(new Set(selectedAnalysisDetails.classes.flatMap((o: any) => Object.keys(o).filter((k: string) => k !== 'screen_size'))))
         : [];
     }, [selectedAnalysisDetails]);
     
-    // Derive Pie Chart Data dynamically for the Analysis Modal
     const pieData = useMemo(() => {
       if (!selectedAnalysisDetails?.classes) return [];
-      
       const totals: Record<string, number> = {};
-      
       selectedAnalysisDetails.classes.forEach((row: any) => {
         Object.keys(row).forEach(key => {
           if (key !== 'screen_size') {
@@ -1909,15 +1940,11 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
           }
         });
       });
-
       return Object.entries(totals)
         .map(([name, value]) => ({ name, value }))
         .filter(item => item.value > 0)
         .sort((a, b) => b.value - a.value); 
     }, [selectedAnalysisDetails]);
-    
-    // Hover state for Donut Chart
-    const [hoveredSegment, setHoveredSegment] = useState<any | null>(null);
     
     const [selectedBatches, setSelectedBatches] = useState<{ batch: ExtendedBatch, useKg: number }[]>([]);
     const [fobbingCost, setFobbingCost] = useState<number>(0); 
@@ -1926,8 +1953,41 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
     const [targetClient, setTargetClient] = useState('');
     const [saleRef, setSaleRef] = useState('');
     const [validationMsg, setValidationMsg] = useState<string | null>(null);
-  
-    // Cast batches to ExtendedBatch
+
+    // --- AUTO-CALCULATE FOBBING COST ---
+    useEffect(() => {
+        if (selectedBatches.length === 0) {
+            setFobbingCost(0);
+            return;
+        }
+        
+        let totalKg = 0;
+        let totalCost50 = 0;
+        let weightedDaysSum = 0;
+
+        selectedBatches.forEach(item => {
+            totalKg += item.useKg;
+            totalCost50 += (item.batch.outrightPrice50kg || 0) * item.useKg;
+            
+            const days = getDaysInStock(item.batch.date_in);
+            const effectiveDays = (!days || days <= 0) ? 90 : days;
+            weightedDaysSum += effectiveDays * item.useKg;
+        });
+
+        if (totalKg > 0) {
+            const wAvgCost50 = totalCost50 / totalKg;
+            const wAvgAge = weightedDaysSum / totalKg;
+            const dynamicFobbing = (0.8 * (wAvgCost50 / 50) * ((wAvgAge * 0.08) / 365) * 100) / 2.2046;
+            
+            setFobbingCost(Number((10 + dynamicFobbing).toFixed(2)));
+        }
+    }, [selectedBatches]);
+
+    const filteredContracts = useMemo(() => {
+        if (!saleRef) return contracts;
+        return contracts.filter(c => c.contract_number.toLowerCase().includes(saleRef.toLowerCase()));
+    }, [contracts, saleRef]);
+
     const allBatches = useMemo(() => data.flatMap(s => s.batches) as ExtendedBatch[], [data]);
     
     const filteredBatches = allBatches.filter(b => {
@@ -1953,21 +2013,17 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
     };
   
     // --- CALCULATIONS ---
-  
     const blendStats = useMemo(() => {
-      let totalKg = 0;
-      let totalValUSClb = 0;
-      let totalHedgeVal = 0;
-      let weightedDaysSum = 0; 
-
+      let totalKg = 0; let totalValUSClb = 0; let totalHedgeVal = 0; let weightedDaysSum = 0; 
       selectedBatches.forEach(item => {
-        const valUSClb = toUSClb(item.batch.outrightPrice50kg);
+        const valUSClb = toUSClb(item.batch.outrightPrice50kg || 0);
         totalValUSClb += valUSClb * item.useKg;
-        totalHedgeVal += item.batch.hedgeLevelUSClb * item.useKg;
+        totalHedgeVal += (item.batch.hedgeLevelUSClb || 0) * item.useKg;
         totalKg += item.useKg;
-
+        
         const days = getDaysInStock(item.batch.date_in);
-        weightedDaysSum += days * item.useKg;
+        const effectiveDays = (!days || days <= 0) ? 90 : days;
+        weightedDaysSum += effectiveDays * item.useKg;
       });
   
       const avgOutrightUSClb = totalKg ? totalValUSClb / totalKg : 0;
@@ -1976,20 +2032,10 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
       const finalCostDiff = avgDiff + fobbingCost;
       const pnlPerLb = salePriceDiff - finalCostDiff;
       const avgDaysInStock = totalKg ? weightedDaysSum / totalKg : 0; 
-      
       const totalLbs = totalKg * KG_TO_LB;
       const totalPnLUSD = (pnlPerLb / 100) * totalLbs;
       
-      return {
-        totalKg,
-        avgOutright50kg: to50kg(avgOutrightUSClb),
-        avgHedge,
-        avgDiff,
-        finalCostDiff,
-        pnl: pnlPerLb,
-        totalPnLUSD,
-        avgDaysInStock
-      };
+      return { totalKg, avgOutright50kg: to50kg(avgOutrightUSClb), avgHedge, avgDiff, finalCostDiff, pnl: pnlPerLb, totalPnLUSD, avgDaysInStock };
     }, [selectedBatches, fobbingCost, salePriceDiff]);
 
     const strategyDistribution = useMemo(() => {
@@ -2006,68 +2052,300 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
             .sort((a, b) => b.value - a.value);
     }, [selectedBatches, blendStats.totalKg]);
   
+    const targetBlendData = useMemo(() => {
+        const target = blends.find(b => b.id.toString() === selectedBlendId);
+        if (!target) return null;
+
+        const dist: { name: string, percentage: number }[] = [];
+        let totalPct = 0;
+
+        for (const key in target) {
+            if (key.startsWith('post_') && target[key] > 0) {
+                let formattedName = key.toUpperCase().replace('POST_', 'POST ').replace(/_/g, ' ').replace('PB ', 'PB - ');
+                const val = parseFloat(target[key]);
+                dist.push({ name: formattedName, percentage: val });
+                totalPct += val;
+            }
+        }
+        if (totalPct > 0 && totalPct !== 100) {
+             dist.forEach(d => d.percentage = (d.percentage / totalPct) * 100);
+        }
+        return { name: target.name, distribution: dist.sort((a, b) => b.percentage - a.percentage) };
+    }, [blends, selectedBlendId]);
+
+    const uniqueStrategyNames = useMemo(() => {
+        const set = new Set<string>();
+        if (targetBlendData) targetBlendData.distribution.forEach(d => set.add(d.name));
+        strategyDistribution.forEach(d => set.add(d.name));
+        return Array.from(set);
+    }, [targetBlendData, strategyDistribution]);
+
+    const getStrategyColor = (name: string) => {
+        const index = uniqueStrategyNames.indexOf(name);
+        return CHART_COLORS[index % CHART_COLORS.length];
+    };
+
     const currentVolUnit = convertQty(blendStats.totalKg, unit);
     const targetProgress = targetVolume > 0 ? (currentVolUnit / targetVolume) * 100 : 0;
     const isTargetMet = targetVolume > 0 && currentVolUnit >= targetVolume;
+
+    const handleContractSelection = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const val = e.target.value;
+        setSaleRef(val);
+        const matchedContract = contracts.find(c => c.contract_number.toLowerCase() === val.toLowerCase());
+        if (matchedContract) {
+            setTargetClient(matchedContract.client || '');
+            setSalePriceDiff(parseFloat(matchedContract.sale_differential) || 0);
+        } else {
+            setTargetClient('');
+            setSalePriceDiff(0);
+        }
+    };
   
-    // --- EXPORT LOGIC ---
-    const handleExport = () => {
+    // --- Database API Integration Logic ---
+    
+    const fetchSavedBlends = async () => {
+        try {
+            const res = await fetch('/api/client_blends');
+            if(res.ok) {
+                const fetchedBlends = await res.json();
+                setSavedBlendsDb(fetchedBlends);
+                setLoadModalOpen(true);
+            } else {
+                setValidationMsg("Failed to fetch existing blends.");
+                setTimeout(() => setValidationMsg(null), 3000);
+            }
+        } catch(e) {
+            console.error(e);
+        }
+    };
+
+    const handleLoadBlend = (savedBlend: any) => {
+        setTargetClient(savedBlend.client || '');
+        setSaleRef(savedBlend.blend_no || '');
+        setSelectedBlendId(savedBlend.target_blend?.toString() || '');
+        setEditingBlendId(savedBlend.id);
+        setTargetVolume(savedBlend.target_weight ? convertQty(parseFloat(savedBlend.target_weight), unit) : 0);
+
+        const matchedContract = contracts.find(c => c.contract_number.toLowerCase() === (savedBlend.blend_no || '').toLowerCase());
+        setSalePriceDiff(matchedContract ? (parseFloat(matchedContract.sale_differential) || 0) : 0);
+
+        const batchMap = new Map(allBatches.map(b => [b.id.toString(), b]));
+        
+        const loadedBatches: { batch: ExtendedBatch, useKg: number }[] = [];
+        for (const sb of savedBlend.blended_batches) {
+            const liveBatch = batchMap.get(sb.batch_id?.toString());
+            if (liveBatch) {
+                const historicallyAccurateBatch = {
+                    ...liveBatch,
+                    outrightPrice50kg: sb.cost_usd_50 !== null ? parseFloat(sb.cost_usd_50) : liveBatch.outrightPrice50kg,
+                    hedgeLevelUSClb: sb.hedge_usc_lb !== null ? parseFloat(sb.hedge_usc_lb) : liveBatch.hedgeLevelUSClb,
+                    strategy: sb.strategy || liveBatch.strategy
+                };
+                loadedBatches.push({ batch: historicallyAccurateBatch, useKg: parseFloat(sb.use_kg) });
+            }
+        }
+
+        setSelectedBatches(loadedBatches);
+        setLoadModalOpen(false);
+    };
+
+    const handleSaveAndExport = async () => {
       if (selectedBatches.length === 0) return;
   
+      if (!selectedBlendId || !targetBlendData) {
+          setValidationMsg("Please select a valid Target Blend.");
+          setTimeout(() => setValidationMsg(null), 4000);
+          return;
+      }
+
       if (!targetClient.trim() || !saleRef.trim()) {
-          setValidationMsg("Please enter Target Client and Sale Ref to export.");
+          setValidationMsg("Please enter Target Client and Sale Ref to save/export.");
           setTimeout(() => setValidationMsg(null), 3000);
           return;
       }
-  
-      const csvRows = [];
       
-      csvRows.push('BLEND SUMMARY REPORT');
-      csvRows.push(`Target Client, ${targetClient}`);
-      csvRows.push(`Sale Ref, ${saleRef}`);
-      csvRows.push(`Target Volume, ${targetVolume} ${unit}`);
-      csvRows.push(`Actual Volume, ${formatNumber(currentVolUnit)} ${unit}`);
-      csvRows.push(`W.Avg Diff (c/lb), ${formatNumber(blendStats.avgDiff)}`);
-      csvRows.push(`Fobbing Cost (c/lb), ${fobbingCost}`);
-      csvRows.push(`Sale Price Diff (c/lb), ${salePriceDiff}`);
-      csvRows.push(`P&L (c/lb), ${formatNumber(blendStats.pnl)}`);
-      csvRows.push(`P&L (USD), ${formatNumber(blendStats.totalPnLUSD)}`);
-      csvRows.push(`Avg Days In Stock, ${formatNumber(blendStats.avgDaysInStock, 0)}`);
-      csvRows.push('');
-      
-      csvRows.push('POSITION STRATEGY DISTRIBUTION');
-      csvRows.push(`Strategy,Weight (${unit}),% Share`);
-      strategyDistribution.forEach(d => {
-        csvRows.push(`${d.name},${formatNumber(convertQty(d.value, unit))},${formatNumber(d.percentage)}%`);
-      });
-      csvRows.push(''); 
+      setIsSaving(true);
+      try {
+          const generatedBlendName = `${targetClient}-${saleRef}-${new Date().toISOString().split('T')[0]}`;
+          const targetWeightInKg = unit === 'bag' ? targetVolume * 60 : unit === 'mt' ? targetVolume * 1000 : targetVolume;
+          
+          // 1. Prepare Comparison Data
+          const comparisonData = uniqueStrategyNames.map(name => {
+              const target = targetBlendData.distribution.find(d => d.name === name)?.percentage || 0;
+              const actual = strategyDistribution.find(d => d.name === name)?.percentage || 0;
+              return {
+                  strategy: name,
+                  target: `${formatNumber(target, 1)}%`,
+                  actual: `${formatNumber(actual, 1)}%`,
+                  variance: `${(actual - target >= 0 ? '+' : '')}${formatNumber(actual - target, 1)}%`
+              };
+          });
 
-      csvRows.push('DETAILED BATCH LIST');
-      csvRows.push('Batch ID,Strategy,Weight (kg),% of Blend,Price ($/50kg),Hedge (c/lb),Diff (c/lb),Age (Days)');
+          // 2. Save to Database
+          const payload = {
+              id: editingBlendId,
+              name: generatedBlendName,
+              client: targetClient,
+              blend_no: saleRef,
+              target_blend: parseInt(selectedBlendId),
+              target_weight: targetWeightInKg,
+              batches: selectedBatches.map(s => ({
+                  batch_id: s.batch.id,
+                  use_kg: s.useKg,
+                  cost_usd_50: s.batch.outrightPrice50kg,
+                  hedge_usc_lb: s.batch.hedgeLevelUSClb,
+                  diff_usc_lb: toUSClb(s.batch.outrightPrice50kg || 0) - (s.batch.hedgeLevelUSClb || 0),
+                  strategy: s.batch.strategy
+              }))
+          };
+
+          const method = editingBlendId ? 'PUT' : 'POST';
+          const dbRes = await fetch('/api/client_blends', {
+              method,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+          });
+
+          if (!dbRes.ok) throw new Error("Failed to save to database");
+          const dbResult = await dbRes.json();
+          if (!editingBlendId) setEditingBlendId(dbResult.id);
+
+          // 3. O(N) COMPROMISED SALES LOOKUP (Wrapped in Try/Catch for safety)
+          let compromisedSales: any[] = [];
+          try {
+              const allBlendsRes = await fetch('/api/client_blends');
+              if (allBlendsRes.ok) {
+                  const allClientBlends = await allBlendsRes.json();
+                  const fulfilledContracts = new Set(allClientBlends.map((b: any) => b.blend_no));
+                  
+                  compromisedSales = contracts.filter(c =>
+                      c.blend_id?.toString() === selectedBlendId &&
+                      !fulfilledContracts.has(c.contract_number)
+                  );
+              }
+          } catch (lookupError) {
+              console.error("Failed to lookup compromised sales:", lookupError);
+          }
+
+          // 4. GENERATE PDF
+          const doc = new jsPDF();
+          doc.setFontSize(16);
+          doc.text(`Blend Summary: ${generatedBlendName}`, 14, 20);
+
+          doc.setFontSize(11);
+          doc.text(`Target Blend: ${targetBlendData?.name || 'Unknown'}`, 14, 30);
+          doc.text(`Client: ${targetClient}`, 14, 36);
+          doc.text(`Target Volume: ${targetVolume} ${unit}`, 14, 42);
+
+          autoTable(doc, {
+              startY: 50,
+              head: [['Strategy', 'Weight', '% Share']],
+              body: strategyDistribution.map(d => [d.name, formatNumber(convertQty(d.value, unit)), `${formatNumber(d.percentage)}%`]),
+          });
+
+          let finalY = (doc as any).lastAutoTable.finalY + 15;
+          doc.text("Composition Comparison (Target vs Actual):", 14, finalY);
+          autoTable(doc, {
+              startY: finalY + 5,
+              head: [['Strategy', 'Target', 'Actual', 'Variance']],
+              body: comparisonData.map(c => [c.strategy, c.target, c.actual, c.variance]),
+          });
+
+          finalY = (doc as any).lastAutoTable.finalY + 15;
+          doc.text("Compromised Sales (Unfulfilled Contracts):", 14, finalY);
+
+          if (compromisedSales.length > 0) {
+              autoTable(doc, {
+                  startY: finalY + 5,
+                  head: [['Client', 'Contract Number', 'Tonnage']],
+                  body: compromisedSales.map(c => [c.client || '-', c.contract_number || '-', formatNumber(c.quantity || 0)]),
+              });
+              finalY = (doc as any).lastAutoTable.finalY + 10;
+          } else {
+              doc.text("None", 14, finalY + 8);
+              finalY += 15;
+          }
+
+          doc.setTextColor(200, 0, 0);
+          doc.text("Note: You might want to revisit the target blends for the contracts.", 14, finalY);
+          doc.save(`Blend_Summary_${generatedBlendName}.pdf`);
+
+          // 5. SEND EMAIL NOTIFICATION
+          await fetch('/api/send_mail', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                  blendName: generatedBlendName,
+                  targetBlend: targetBlendData.name,
+                  targetClient,
+                  saleRef,
+                  compromisedSales,
+                  comparisonData 
+              })
+          });
+
+          // 6. Generate CSV Export
+          const csvRows = [];
+          csvRows.push('BLEND SUMMARY REPORT');
+          csvRows.push(`Blend Name, ${generatedBlendName}`);
+          csvRows.push(`Target Blend, ${targetBlendData?.name || 'Unknown'}`);
+          csvRows.push(`Target Client, ${targetClient}`);
+          csvRows.push(`Sale Ref, ${saleRef}`);
+          csvRows.push(`Target Volume, ${targetVolume} ${unit}`);
+          csvRows.push(`Actual Volume, ${formatNumber(currentVolUnit)} ${unit}`);
+          csvRows.push(`W.Avg Diff (c/lb), ${formatNumber(blendStats.avgDiff)}`);
+          csvRows.push(`Fobbing Cost (c/lb), ${fobbingCost}`);
+          csvRows.push(`Sale Price Diff (c/lb), ${salePriceDiff}`);
+          csvRows.push(`P&L (c/lb), ${formatNumber(blendStats.pnl)}`);
+          csvRows.push(`P&L (USD), ${formatNumber(blendStats.totalPnLUSD)}`);
+          csvRows.push(`Avg Days In Stock, ${formatNumber(blendStats.avgDaysInStock, 0)}`);
+          csvRows.push('');
+          
+          csvRows.push('POSITION STRATEGY DISTRIBUTION');
+          csvRows.push(`Strategy,Weight (${unit}),% Share`);
+          strategyDistribution.forEach(d => {
+            csvRows.push(`${d.name},${formatNumber(convertQty(d.value, unit))},${formatNumber(d.percentage)}%`);
+          });
+          csvRows.push(''); 
+
+          csvRows.push('DETAILED BATCH LIST');
+          csvRows.push('Batch ID,Strategy,Weight (kg),% of Blend,Price ($/50kg),Hedge (c/lb),Diff (c/lb),Age (Days)');
+          
+          selectedBatches.forEach(({ batch, useKg }) => {
+              const diff = toUSClb(batch.outrightPrice50kg || 0) - (batch.hedgeLevelUSClb || 0);
+              const pct = blendStats.totalKg > 0 ? (useKg / blendStats.totalKg) * 100 : 0;
+              const days = getDaysInStock(batch.date_in);
+              const age = (!days || days <= 0) ? 90 : days;
+              csvRows.push(
+                  `${batch.batch_number || batch.id},${batch.strategy},${useKg},${formatNumber(pct)}%,${batch.outrightPrice50kg},${batch.hedgeLevelUSClb},${formatNumber(diff)},${age}`
+              );
+          });
       
-      selectedBatches.forEach(({ batch, useKg }) => {
-          const diff = toUSClb(batch.outrightPrice50kg) - batch.hedgeLevelUSClb;
-          const pct = blendStats.totalKg > 0 ? (useKg / blendStats.totalKg) * 100 : 0;
-          const age = getDaysInStock(batch.date_in);
-          csvRows.push(
-              `${batch.batch_number || batch.id},${batch.strategy},${useKg},${formatNumber(pct)}%,${batch.outrightPrice50kg},${batch.hedgeLevelUSClb},${formatNumber(diff)},${age}`
-          );
-      });
-  
-      const csvString = csvRows.join('\n');
-      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-      const link = document.createElement('a');
-      if (link.download !== undefined) {
-          const url = URL.createObjectURL(blob);
-          link.setAttribute('href', url);
-          link.setAttribute('download', `blend_export_${saleRef}.csv`);
-          link.style.visibility = 'hidden';
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
+          const csvString = csvRows.join('\n');
+          const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+          const link = document.createElement('a');
+          if (link.download !== undefined) {
+              const url = URL.createObjectURL(blob);
+              link.setAttribute('href', url);
+              link.setAttribute('download', `blend_${generatedBlendName.replace(/\s+/g, '_')}_${saleRef}.csv`);
+              link.style.visibility = 'hidden';
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+          }
+          
+          setToastMessage("Blend Saved, Notified with Comparison, and Exported!");
+          setTimeout(() => setToastMessage(null), 3000);
+
+      } catch (err: any) {
+          console.error(err);
+          setValidationMsg(err.message || "An error occurred while saving.");
+          setTimeout(() => setValidationMsg(null), 4000);
+      } finally {
+          setIsSaving(false);
       }
     };
-
     const handleViewAnalysis = async (batch: Batch) => {
         if (!batch.analysis_id) {
             setToastMessage("No analysis found for this batch.");
@@ -2087,7 +2365,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
         setSelectedAnalysisDetails(null);
 
         try {
-            // OPTIMIZATION: Fetch both the main record and the details concurrently
             const [recordRes, detailsRes] = await Promise.all([
                 fetch(`/api/batches/analyses`), 
                 fetch(`/api/batches/analyses/analysis_details/${id}`)
@@ -2097,7 +2374,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
             
             const records = await recordRes.json();
             const mainRecord = Array.isArray(records) ? records.find((r: any) => r.id?.toString() === id) : {};
-            
             const detailsJson = await detailsRes.json();
             
             const transformedClasses = detailsJson.classes.reduce((acc: any[], curr: any) => {
@@ -2130,61 +2406,40 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
   
     // --- IMPACT ANALYSIS ---
     const impactAnalysis = useMemo(() => {
-        const impactMap: Record<string, {
-            diff: { original: number, new: number, change: number },
-            hedge: { original: number, new: number, change: number },
-            outright: { original: number, new: number, change: number }
-        }> = {};
+        const impactMap: Record<string, { diff: { original: number, new: number, change: number }, hedge: { original: number, new: number, change: number }, outright: { original: number, new: number, change: number } }> = {};
     
         const selectedByStrategy: Record<string, { kg: number, valOutright: number, valHedge: number }> = {};
         selectedBatches.forEach(s => {
             if (!selectedByStrategy[s.batch.strategy]) {
                 selectedByStrategy[s.batch.strategy] = { kg: 0, valOutright: 0, valHedge: 0 };
             }
-            const priceUSClb = toUSClb(s.batch.outrightPrice50kg);
+            const priceUSClb = toUSClb(s.batch.outrightPrice50kg || 0);
             selectedByStrategy[s.batch.strategy].kg += s.useKg;
             selectedByStrategy[s.batch.strategy].valOutright += priceUSClb * s.useKg;
-            selectedByStrategy[s.batch.strategy].valHedge += s.batch.hedgeLevelUSClb * s.useKg;
+            selectedByStrategy[s.batch.strategy].valHedge += (s.batch.hedgeLevelUSClb || 0) * s.useKg;
         });
     
         data.forEach(strat => {
           if (selectedByStrategy[strat.name]) {
             const removal = selectedByStrategy[strat.name];
-            
             const origKg = strat.totalKg;
             const origAvgOutrightUSClb = toUSClb(strat.wAvgOutright50kg);
             const origAvgHedgeUSClb = strat.wAvgHedgeUSClb;
             const origAvgDiffUSClb = strat.wAvgDiffUSClb;
-    
             const origTotalValOutright = origAvgOutrightUSClb * origKg;
             const origTotalValHedge = origAvgHedgeUSClb * origKg;
-    
             const newKg = origKg - removal.kg;
             
             if (newKg > 0) {
                 const newTotalValOutright = origTotalValOutright - removal.valOutright;
                 const newTotalValHedge = origTotalValHedge - removal.valHedge;
-                
                 const newAvgOutrightUSClb = newTotalValOutright / newKg;
                 const newAvgHedgeUSClb = newTotalValHedge / newKg;
                 const newAvgDiffUSClb = newAvgOutrightUSClb - newAvgHedgeUSClb;
-    
                 impactMap[strat.name] = {
-                    diff: {
-                        original: origAvgDiffUSClb,
-                        new: newAvgDiffUSClb,
-                        change: newAvgDiffUSClb - origAvgDiffUSClb
-                    },
-                    hedge: {
-                        original: origAvgHedgeUSClb,
-                        new: newAvgHedgeUSClb,
-                        change: newAvgHedgeUSClb - origAvgHedgeUSClb
-                    },
-                    outright: {
-                        original: strat.wAvgOutright50kg,
-                        new: to50kg(newAvgOutrightUSClb),
-                        change: to50kg(newAvgOutrightUSClb) - strat.wAvgOutright50kg
-                    }
+                    diff: { original: origAvgDiffUSClb, new: newAvgDiffUSClb, change: newAvgDiffUSClb - origAvgDiffUSClb },
+                    hedge: { original: origAvgHedgeUSClb, new: newAvgHedgeUSClb, change: newAvgHedgeUSClb - origAvgHedgeUSClb },
+                    outright: { original: strat.wAvgOutright50kg, new: to50kg(newAvgOutrightUSClb), change: to50kg(newAvgOutrightUSClb) - strat.wAvgOutright50kg }
                 };
             } else {
                  impactMap[strat.name] = {
@@ -2196,32 +2451,44 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
           }
         });
         return impactMap;
-      }, [selectedBatches, data]);
-  
-    // --- Helper for Donut Chart ---
-    const donutSegments = useMemo(() => {
-        let cumulativePercent = 0;
-        const colors = ['#007680', '#97D700', '#B9975B', '#51534a', '#CEB888', '#A7BDB1'];
-        return strategyDistribution.map((d, i) => {
-            const startPercent = cumulativePercent;
-            cumulativePercent += d.percentage;
-            const getCoordinatesForPercent = (percent: number) => {
-                const x = Math.cos(2 * Math.PI * percent);
-                const y = Math.sin(2 * Math.PI * percent);
-                return [x, y];
-            };
-            const [startX, startY] = getCoordinatesForPercent(startPercent / 100);
-            const [endX, endY] = getCoordinatesForPercent(cumulativePercent / 100);
-            const largeArcFlag = d.percentage > 50 ? 1 : 0;
-            const pathData = [
-                `M ${startX} ${startY}`, `A 1 1 0 ${largeArcFlag} 1 ${endX} ${endY}`, `L 0 0`,
-            ].join(' ');
-            return { pathData, color: colors[i % colors.length], ...d };
-        });
-    }, [strategyDistribution]);
+    }, [selectedBatches, data]);
 
     return (
       <div className="flex gap-6 h-[90vh]">
+
+        {/* Saved Blends Modal */}
+        {loadModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                <div className="bg-[#EFEFE9] w-full max-w-4xl rounded-xl shadow-2xl flex flex-col overflow-hidden max-h-[80vh]">
+                    <div className="flex justify-between items-center p-4 bg-white border-b border-[#D1CEC3]">
+                        <h3 className="text-xl font-bold flex items-center gap-2 text-[#4A4941]">
+                            <History className="w-5 h-5 text-[#007680]" /> Existing Saved Blends
+                        </h3>
+                        <button onClick={() => setLoadModalOpen(false)} className="text-[#8B8A81] hover:text-[#4A4941] transition-colors p-1 bg-[#F5F2EA] rounded-full">
+                            <X className="w-5 h-5" />
+                        </button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 bg-[#F5F2EA]">
+                        <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
+                            {savedBlendsDb.length > 0 ? savedBlendsDb.map(b => (
+                                <div key={b.id} className="bg-white p-4 rounded-lg shadow-sm border border-[#D1CEC3] flex flex-col gap-2 hover:border-[#007680]/50 transition-colors cursor-pointer group" onClick={() => handleLoadBlend(b)}>
+                                    <div className="font-bold text-[#4A4941] text-base group-hover:text-[#007680] transition-colors">{b.name || `Blend #${b.id}`}</div>
+                                    <div className="text-xs text-[#8B8A81] flex justify-between"><span>Client:</span> <span className="font-medium text-[#4A4941]">{b.client || '-'}</span></div>
+                                    <div className="text-xs text-[#8B8A81] flex justify-between"><span>Sale Ref:</span> <span className="font-medium text-[#4A4941]">{b.blend_no || '-'}</span></div>
+                                    <div className="text-[10px] text-[#8B8A81] mt-2 pt-2 border-t border-[#EBE7DC] flex justify-between items-center">
+                                        <span>Batches: <strong className="text-[#007680]">{b.blended_batches?.length || 0}</strong></span>
+                                        <span>Created: {new Date(b.creation_on).toLocaleDateString()}</span>
+                                    </div>
+                                </div>
+                            )) : (
+                                <div className="col-span-full text-center py-12 text-[#8B8A81] italic">No saved blends found in the database.</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
         {/* Left Pane: Picker */}
         <div className="flex h-full overflow-hidden w-1/3">
           <Card className="flex-1 flex flex-col overflow-hidden">
@@ -2231,11 +2498,11 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                 <div className="relative flex-1">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-[#968C83]" size={18} />
                     <input 
-                    type="text"
-                    placeholder="Search batches..."
-                    className="w-full pl-10 pr-4 py-2 border border-[#D6D2C4] rounded-lg focus:ring-2 focus:ring-[#007680] outline-none"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
+                        type="text"
+                        placeholder="Search batches..."
+                        className="w-full pl-10 pr-4 py-2 border border-[#D6D2C4] rounded-lg focus:ring-2 focus:ring-[#007680] outline-none"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
                     />
                 </div>
                 <button 
@@ -2250,7 +2517,10 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
             <div className="flex-1 overflow-y-auto p-2 space-y-2 bg-[#D6D2C4]/20">
               {filteredBatches.length > 0 ? filteredBatches.map(batch => {
                 const hasPrice = batch.outrightPrice50kg && batch.outrightPrice50kg > 0;
-                const daysInStock = getDaysInStock(batch.date_in);
+                
+                // Visualization formatting logic
+                const days = getDaysInStock(batch.date_in);
+                const daysInStock = (!days || days <= 0) ? 90 : days;
                 
                 return (
                 <div 
@@ -2275,7 +2545,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                         </div>
                         <div className="text-[10px] text-[#968C83]">Hedge: {formatNumber(batch.hedgeLevelUSClb)}</div>
                         <div className="text-[10px] text-[#968C83]">
-                            Diff: {hasPrice ? formatNumber(toUSClb(batch.outrightPrice50kg) - batch.hedgeLevelUSClb) : '---'}
+                            Diff: {hasPrice ? formatNumber(toUSClb(batch.outrightPrice50kg || 0) - (batch.hedgeLevelUSClb || 0)) : '---'}
                         </div>
                         {daysInStock > 0 && (
                             <div className="text-[10px] text-[#007680] flex justify-end items-center gap-1 font-medium mt-0.5">
@@ -2318,102 +2588,185 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
   
         {/* Right Pane: The Blend */}
         <div className="flex h-full overflow-hidden flex-1">
-              <div className="flex flex-col h-full w-full relative rounded-xl overflow-hidden shadow-sm border border-[#968C83]/20 bg-white">
+          <div className="flex flex-col h-full w-full relative rounded-xl overflow-hidden shadow-sm border border-[#968C83]/20 bg-white">
           
           {/* HEADER */}
           <div className="bg-white border-b border-[#D6D2C4] p-4 space-y-4">
               <div className="flex justify-between items-center">
                   <h3 className="font-semibold text-[#51534a] flex items-center gap-2">
                       <FlaskConical size={18} />
-                      Current Blend ({selectedBatches.length})
+                      Current Blend {editingBlendId ? `(#${editingBlendId})` : ''} ({selectedBatches.length})
                   </h3>
                   <div className="flex items-center gap-2">
                       {validationMsg && <span className="text-xs text-red-500 font-medium animate-pulse">{validationMsg}</span>}
+                      
                       <button 
-                          onClick={handleExport}
-                          className="text-xs text-[#007680] hover:text-[#007680]/80 font-medium flex items-center gap-1 bg-[#A4DBE8]/20 px-3 py-1.5 rounded border border-[#007680]/20 transition-all"
+                          onClick={fetchSavedBlends}
+                          className="text-xs text-[#51534a] hover:bg-[#D6D2C4]/50 font-medium flex items-center gap-1 bg-[#F5F5F3] px-3 py-1.5 rounded border border-[#D6D2C4] transition-all shadow-sm"
                       >
-                      <Download size={14} /> Export CSV
+                          <History size={14} /> Edit Existing
+                      </button>
+                      
+                      <button 
+                          onClick={handleSaveAndExport}
+                          disabled={isSaving}
+                          className="text-xs text-white hover:bg-[#007680]/80 font-medium flex items-center gap-1 bg-[#007680] px-3 py-1.5 rounded border border-[#007680]/20 transition-all shadow-sm disabled:opacity-50"
+                      >
+                          {isSaving ? <Activity className="w-3.5 h-3.5 animate-spin" /> : <Download size={14} />} 
+                          {isSaving ? 'Saving...' : 'Save & Export CSV'}
                       </button>
                   </div>
               </div>
   
-              <div className="flex">
-                  <div className="flex flex-col flex-1 pr-4">
-                    <div className="grid grid-cols-2 gap-2 mb-2">
-                        <div>
-                            <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Client *</label>
-                            <input type="text" className="w-full border border-[#D6D2C4] rounded px-2 py-1 text-xs h-8" value={targetClient} onChange={(e) => setTargetClient(e.target.value)} placeholder="Starbucks" />
-                        </div>
-                        <div>
-                            <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Ref *</label>
-                            <input type="text" className="w-full border border-[#D6D2C4] rounded px-2 py-1 text-xs h-8" value={saleRef} onChange={(e) => setSaleRef(e.target.value)} placeholder="SSKE-" />
-                        </div>
-                    </div>
-                    <div>
-                      <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Costs & Pricing (c/lb)</label>
-                      <div className="flex gap-2">
-                          <div className="flex items-center border border-[#D6D2C4] rounded px-2 h-8 flex-1">
-                              <span className="text-[10px] text-[#968C83] mr-2">FOB Cost:</span>
-                              <input type="number" className="w-full bg-transparent border-none text-[#51534a] text-xs text-right" value={fobbingCost || ''} onChange={e => setFobbingCost(parseFloat(e.target.value) || 0)} placeholder="0.00" />
+              <div className="flex flex-col gap-4">
+                  {/* Top Form Controls Row */}
+                  <div className="flex flex-col lg:flex-row gap-6">
+                      <div className="flex-1 flex flex-col gap-3">
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                              <div>
+                                  <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Target Blend *</label>
+                                  <select 
+                                      className="w-full border border-[#D6D2C4] rounded px-2 py-1 text-xs h-8 outline-none focus:border-[#007680] text-[#51534a] bg-white cursor-pointer hover:border-[#007680]/50"
+                                      value={selectedBlendId}
+                                      onChange={(e) => setSelectedBlendId(e.target.value)}
+                                  >
+                                      <option value="">-- Select Target --</option>
+                                      {blends.map(b => (
+                                          <option key={b.id} value={b.id}>{b.name}</option>
+                                      ))}
+                                  </select>
+                              </div>
+                              <div>
+                                  <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Client *</label>
+                                  <input type="text" className="w-full border border-[#D6D2C4] rounded px-2 py-1 text-xs h-8 outline-none focus:border-[#007680]" value={targetClient} onChange={(e) => setTargetClient(e.target.value)} placeholder="Starbucks" />
+                              </div>
+                              <div>
+                                  <div className="relative">
+                                    <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Ref *</label>
+                                    <input 
+                                        type="text"
+                                        placeholder="Search Ref..."
+                                        className="w-full border border-[#D6D2C4] rounded px-2 py-1 text-xs h-8 outline-none focus:border-[#007680] text-[#51534a] bg-white hover:border-[#007680]/50"
+                                        value={saleRef}
+                                        onChange={handleContractSelection}
+                                        onFocus={() => setIsRefFocused(true)}
+                                        onBlur={() => setTimeout(() => setIsRefFocused(false), 150)} 
+                                    />
+                                    {isRefFocused && filteredContracts.length > 0 && (
+                                        <div className="absolute top-full left-0 w-full mt-1 bg-white border border-[#D6D2C4] rounded-lg shadow-lg z-50 max-h-40 overflow-y-auto">
+                                            {filteredContracts.map(c => (
+                                                <div 
+                                                    key={c.id} 
+                                                    className="px-3 py-2 text-xs text-[#51534a] hover:bg-[#007680] hover:text-white cursor-pointer transition-colors"
+                                                    onClick={() => {
+                                                        setSaleRef(c.contract_number);
+                                                        setTargetClient(c.client || '');
+                                                        setSalePriceDiff(parseFloat(c.sale_differential) || 0);
+                                                        setIsRefFocused(false);
+                                                    }}
+                                                >
+                                                    {c.contract_number}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                  </div>
+                              </div>
                           </div>
-                          <div className="flex items-center border border-[#D6D2C4] rounded px-2 h-8 flex-1">
-                               <span className="text-[10px] text-[#968C83] mr-2">Sale Diff:</span>
-                               <input type="number" className="w-full bg-transparent border-none text-[#51534a] text-xs text-right" value={salePriceDiff || ''} onChange={e => setSalePriceDiff(parseFloat(e.target.value) || 0)} placeholder="+0.00" />
+                          <div>
+                              <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block mb-1">Costs & Pricing (c/lb)</label>
+                              <div className="flex gap-2">
+                                  <div className="flex items-center border border-[#D6D2C4] rounded px-2 h-8 md:max-w-48">
+                                      <span className="text-[10px] text-[#968C83] mr-2 shrink-0">FOB Cost:</span>
+                                      <input type="number" className="w-full bg-transparent border-none text-[#51534a] text-xs text-right outline-none" value={fobbingCost || ''} onChange={e => setFobbingCost(parseFloat(e.target.value) || 0)} placeholder="0.00" />
+                                  </div>
+                                  <div className="flex items-center border border-[#D6D2C4] rounded px-2 h-8 md:max-w-48">
+                                       <span className="text-[10px] text-[#968C83] mr-2 shrink-0">Sale Diff:</span>
+                                       <input type="number" className="w-full bg-transparent border-none text-[#51534a] text-xs text-right outline-none" value={salePriceDiff || ''} onChange={e => setSalePriceDiff(parseFloat(e.target.value) || 0)} placeholder="+0.00" />
+                                  </div>
+                              </div>
                           </div>
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="col-span-2 flex gap-4 h-full items-center">
-                      <div className="w-48 shrink-0 flex flex-col items-center justify-center relative">
-                        <div className="flex items-center justify-center relative">
-                            {strategyDistribution.length > 0 ? (
-                                <>
-                                    <svg viewBox="-1.2 -1.2 2.4 2.4" className="w-24 h-24 -rotate-90">
-                                        {donutSegments.map((segment, i) => (
-                                            <path key={i} d={segment.pathData} fill={segment.color} stroke="white" strokeWidth="0.05" onMouseEnter={() => setHoveredSegment(segment)} onMouseLeave={() => setHoveredSegment(null)} className="transition-all duration-200 hover:opacity-80 cursor-pointer" />
-                                        ))}
-                                        <circle cx="0" cy="0" r="0.6" fill="white" />
-                                    </svg>
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                        {hoveredSegment ? (
-                                            <div className="flex flex-col items-center bg-white/90 p-1 rounded">
-                                                <span className="text-[10px] font-bold text-[#51534a] truncate max-w-[80px]">{hoveredSegment.name}</span>
-                                                <span className="text-xs font-bold text-[#007680]">{formatNumber(hoveredSegment.percentage, 1)}%</span>
-                                            </div>
-                                        ) : (
-                                            <div className="flex flex-col items-center opacity-50"><span className="text-[9px] text-[#968C83] italic">Distrib.</span></div>
-                                        )}
-                                    </div>
-                                </>
-                            ) : (
-                                <div className="w-20 h-20 rounded-full border-4 border-[#D6D2C4]/30 flex items-center justify-center text-[8px] text-[#968C83] italic">No Data</div>
-                            )}
-                        </div>
-                        
-                        <div className="mt-2 text-center bg-[#F5F5F3] px-3 py-1 rounded-full border border-[#D6D2C4]">
-                            <div className="text-[9px] text-[#968C83] uppercase font-bold tracking-wide">Avg Age</div>
-                            <div className="text-xs font-bold text-[#51534a] flex items-center justify-center gap-1">
-                                <CalendarClock size={12} className="text-[#007680]" />
-                                {formatNumber(blendStats.avgDaysInStock, 0)} days
-                            </div>
-                        </div>
                       </div>
 
-                      <div className="w-36 shrink-0 flex flex-col justify-end pb-1">
-                          <div className="flex justify-between mb-1">
+                      {/* Target Volume Card */}
+                      <div className="w-full lg:w-48 shrink-0 flex flex-col justify-end pb-1 bg-[#F5F5F3] p-3 rounded-lg border border-[#D6D2C4]">
+                          <div className="flex justify-between mb-1 items-end">
                                <label className="text-[10px] font-bold text-[#968C83] uppercase tracking-wider block">Target ({unit})</label>
                                <span className={`text-[10px] font-bold ${isTargetMet ? 'text-[#97D700]' : 'text-[#B9975B]'}`}>{formatNumber(targetProgress, 0)}%</span>
                           </div>
-                          <div className="relative">
-                              <input type="number" className="w-full border border-[#D6D2C4] rounded px-2 py-1 text-xs h-8" value={targetVolume || ''} onChange={(e) => setTargetVolume(parseFloat(e.target.value) || 0)} placeholder="0" />
+                          <div className="relative mb-3">
+                              <input type="number" className="w-full border border-[#D6D2C4] bg-white rounded px-2 py-1 text-xs h-8 outline-none focus:border-[#007680]" value={targetVolume || ''} onChange={(e) => setTargetVolume(parseFloat(e.target.value) || 0)} placeholder="0" />
                               <div className="absolute bottom-0 left-0 h-1 bg-[#D6D2C4] w-full rounded-b overflow-hidden">
-                                  <div className={`h-full ${isTargetMet ? 'bg-[#97D700]' : 'bg-[#007680]'}`} style={{ width: `${Math.min(targetProgress, 100)}%` }} />
+                                  <div className={`h-full transition-all duration-300 ${isTargetMet ? 'bg-[#97D700]' : 'bg-[#007680]'}`} style={{ width: `${Math.min(targetProgress, 100)}%` }} />
+                              </div>
+                          </div>
+                          <div className="text-center bg-white px-3 py-1.5 rounded-full border border-[#D6D2C4]/50 shadow-sm">
+                              <div className="text-[9px] text-[#968C83] uppercase font-bold tracking-wide">Avg Age</div>
+                              <div className="text-xs font-bold text-[#51534a] flex items-center justify-center gap-1">
+                                  <CalendarClock size={12} className="text-[#007680]" />
+                                  {formatNumber(blendStats.avgDaysInStock, 0)} days
                               </div>
                           </div>
                       </div>
                   </div>
+
+                  {/* Horizontal Stacked Bar Charts & Legend */}
+                  <div className="border-t border-[#D6D2C4]/50 pt-3">
+                      <div className="flex flex-col gap-3 w-full">
+                          {/* Target Bar */}
+                          <div className="flex flex-col gap-1 w-full">
+                              <div className="flex justify-between items-center text-[10px] font-bold text-[#968C83] uppercase tracking-wider">
+                                  <span>Target Expectation ({targetBlendData?.name || 'Not Selected'})</span>
+                              </div>
+                              <div className="h-6 w-full bg-[#D6D2C4]/30 rounded flex shadow-inner">
+                                  {targetBlendData && targetBlendData.distribution.length > 0 ? targetBlendData.distribution.map((d, idx, arr) => (
+                                      <div 
+                                          key={d.name} 
+                                          title={`${d.name}: ${formatNumber(d.percentage, 1)}%`}
+                                          style={{ width: `${d.percentage}%`, backgroundColor: getStrategyColor(d.name) }} 
+                                          className={`h-full flex items-center justify-center text-white font-bold text-[9px] cursor-help border-r border-black/10 hover:opacity-90 transition-opacity ${idx === 0 ? 'rounded-l' : ''} ${idx === arr.length - 1 ? 'rounded-r border-0' : ''}`}
+                                      >
+                                          {d.percentage >= 5 && `${formatNumber(d.percentage, 0)}%`}
+                                      </div>
+                                  )) : (
+                                      <div className="w-full h-full flex items-center justify-center text-[10px] text-[#968C83] italic">Please select a Target Blend above</div>
+                                  )}
+                              </div>
+                          </div>
+
+                          {/* Actual Bar */}
+                          <div className="flex flex-col gap-1 w-full">
+                              <div className="flex justify-between items-center text-[10px] font-bold text-[#007680] uppercase tracking-wider">
+                                  <span>Actual Composition</span>
+                              </div>
+                              <div className="h-6 w-full bg-[#D6D2C4]/30 rounded flex shadow-inner">
+                                  {strategyDistribution.length > 0 ? strategyDistribution.map((d, idx, arr) => (
+                                      <div 
+                                          key={d.name} 
+                                          title={`${d.name}: ${formatNumber(d.percentage, 1)}%`}
+                                          style={{ width: `${d.percentage}%`, backgroundColor: getStrategyColor(d.name) }} 
+                                          className={`h-full flex items-center justify-center text-white font-bold text-[9px] cursor-help border-r border-black/10 hover:opacity-90 transition-opacity ${idx === 0 ? 'rounded-l' : ''} ${idx === arr.length - 1 ? 'rounded-r border-0' : ''}`}
+                                      >
+                                          {d.percentage >= 5 && `${formatNumber(d.percentage, 0)}%`}
+                                      </div>
+                                  )) : (
+                                      <div className="w-full h-full flex items-center justify-center text-[10px] text-[#968C83] italic">No batches added to blend</div>
+                                  )}
+                              </div>
+                          </div>
+
+                          {/* Shared Dynamic Legend */}
+                          <div className="flex flex-wrap gap-2 mt-2 pt-2 border-t border-[#D6D2C4]/30">
+                              {uniqueStrategyNames.map(name => (
+                                  <div key={name} className="flex items-center gap-1.5 bg-[#F5F5F3] px-1.5 py-0.5 rounded border border-[#D6D2C4]/50 hover:bg-[#D6D2C4]/50 transition-colors">
+                                      <div className="w-2.5 h-2.5 rounded-sm shadow-sm" style={{ backgroundColor: getStrategyColor(name) }}></div>
+                                      <span className="text-[9px] text-[#51534a] font-medium leading-none">{name}</span>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+                  </div>
+
               </div>
           </div>
           
@@ -2422,7 +2775,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
               <div className="space-y-2">
                   {selectedBatches.map((item) => {
                       const percentOfBlend = blendStats.totalKg > 0 ? (item.useKg / blendStats.totalKg) * 100 : 0;
-                      const hasPrice = item.batch.outrightPrice50kg > 0;
+                      const hasPrice = item.batch.outrightPrice50kg && item.batch.outrightPrice50kg > 0;
                       return (
                       <div key={item.batch.id} className={`p-3 rounded border shadow-sm relative flex justify-between items-center ${hasPrice ? 'bg-white border-[#D6D2C4]' : 'bg-red-50 border-red-200'}`}>
                           <div className="pr-4">
@@ -2431,8 +2784,8 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                                   <span className="text-[10px] text-[#968C83] bg-[#D6D2C4]/30 px-1 rounded">{item.batch.strategy}</span>
                               </div>
                               <div className="text-[10px] text-[#968C83] mt-1 flex gap-3">
-                                  <span>Outright: {formatNumber(item.batch.outrightPrice50kg)}$/50</span>
-                                  <span className={toUSClb(item.batch.outrightPrice50kg) - item.batch.hedgeLevelUSClb >= 0 ? 'text-[#6FA287]' : 'text-[#B9975B]'}>Diff: {formatNumber(toUSClb(item.batch.outrightPrice50kg) - item.batch.hedgeLevelUSClb)}</span>
+                                  <span>Outright: {formatNumber(item.batch.outrightPrice50kg || 0)}$/50</span>
+                                  <span className={toUSClb(item.batch.outrightPrice50kg || 0) - (item.batch.hedgeLevelUSClb || 0) >= 0 ? 'text-[#6FA287]' : 'text-[#B9975B]'}>Diff: {formatNumber(toUSClb(item.batch.outrightPrice50kg || 0) - (item.batch.hedgeLevelUSClb || 0))}</span>
                               </div>
                           </div>
                           
@@ -2530,9 +2883,8 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                    </div>
                </div>
           </div>
-  
         </div>
-        </div>
+      </div>
 
       {/* Toast Notification */}
       {toastMessage && (
@@ -2542,7 +2894,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
         </div>
       )}
 
-      {/* Analysis Details Modal (FULLY INTEGRATED) */}
+      {/* Analysis Details Modal */}
       {analysisModalOpen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-[#F5F2EA] rounded-2xl w-full max-w-6xl max-h-[95vh] shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200 font-Poppins">
@@ -2680,7 +3032,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                         <h3 className="font-bold text-sm text-[#4A4941]">Composition Summary</h3>
                       </div>
                       
-                      {/* The Pie Chart Area (Using RechartsPieChart explicitly) */}
                       <div className="h-48 w-full shrink-0 relative">
                         <ResponsiveContainer width="100%" height="100%">
                           <RechartsPieChart>
@@ -2704,8 +3055,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                             />
                           </RechartsPieChart>
                         </ResponsiveContainer>
-                        
-                        {/* Centered Total Overlay */}
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                            <span className="text-[10px] font-bold text-[#8B8A81] tracking-widest uppercase">Total</span>
                         </div>
@@ -2717,18 +3066,13 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                           {pieData.map((item, idx) => (
                             <div key={item.name} className="flex justify-between items-center text-xs p-2 rounded-lg hover:bg-[#F5F2EA] transition-colors group">
                               <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
-                                <div 
-                                  className="w-2.5 h-2.5 rounded-full shrink-0" 
-                                  style={{ backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} 
-                                />
+                                <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: CHART_COLORS[idx % CHART_COLORS.length] }} />
                                 <span className="truncate font-medium text-[#4A4941] group-hover:text-black transition-colors">{item.name}</span>
                               </div>
                               <span className="font-bold text-[#605F55] shrink-0">{item.value.toFixed(2)}%</span>
                             </div>
                           ))}
-                          {pieData.length === 0 && (
-                            <p className="text-center text-[#8B8A81] text-xs py-4">No composition data</p>
-                          )}
+                          {pieData.length === 0 && <p className="text-center text-[#8B8A81] text-xs py-4">No composition data</p>}
                         </div>
                       </div>
                     </div>
@@ -2744,7 +3088,6 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
           </div>
         </div>
       )}
-
 
       </div>
     );
