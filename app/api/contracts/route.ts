@@ -45,6 +45,7 @@ export async function GET(request: Request) {
                 MAX(sc.certs_declared) as certs_declared,
                 MAX(sc.executed) as executed,
                 MAX(sc.pending_dispatch) as pending_dispatch,
+                MAX(sc.sale_differential) as sale_differential,
                 MAX(b.name) as blend_name,
                 MAX(cst.strategy) as strategy,
                 JSON_ARRAYAGG(c.certificate) as certifications

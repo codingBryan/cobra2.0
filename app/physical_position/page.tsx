@@ -758,7 +758,7 @@ export default function PhysicalPage() {
       }
   };
 
-  async function updateContractBlend(contractId: number, blendId: number | null) {
+    async function updateContractBlend(contractId: number, blendId: number | null) {
     const contract = sales.find((sale) => sale.id === contractId);
     if (!contract) return;
     const response = await fetch("/api/contracts", {
