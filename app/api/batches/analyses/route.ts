@@ -316,8 +316,6 @@ export async function POST(request: Request) {
     await connection.commit();
 
     // ⚡ OPTIMIZATION: Emit WebSocket event to connected clients.
-    // NOTE: If using an external WS server (like Pusher or a standalone Socket.io server), 
-    // trigger the external API POST here so clients receive the notification instantly.
     try {
         const payloadToBroadcast = {
             id: analysisId,
@@ -328,13 +326,10 @@ export async function POST(request: Request) {
             qc_grade: data.grade,
             moisture: data.moisture || null
         };
-        // Example if hitting a local broadcast server:
-        // await fetch('http://localhost:8080/broadcast', { method: 'POST', body: JSON.stringify({ type: 'NEW_ANALYSIS', analysis: payloadToBroadcast }) });
     } catch (wsError) {
         console.error("Failed to broadcast new analysis", wsError);
     }
 
-    // ⚡ Include tracking logs inside the response object for Python to print
     return NextResponse.json({ 
       message: mapped ? 'Analysis saved and mapped successfully' : 'Analysis saved but not mapped', 
       id: analysisId,
@@ -400,3 +395,184 @@ export async function PATCH(request: Request) {
     if (connection) connection.release();
   }
 }
+
+// -----------------------------------------------------------------------------------------
+// ⚡ NEW ENDPOINT: PUT handles manual "Try Remap" commands utilizing the same routing logic
+// -----------------------------------------------------------------------------------------
+export async function PUT(request: Request) {
+    let connection: PoolConnection | undefined;
+    const mappingLogs: string[] = [];
+    const log = (msg: string) => {
+        console.log(`[Remap Diagnostic] ${msg}`);
+        mappingLogs.push(msg);
+    };
+  
+    try {
+      const { id } = await request.json();
+      if (!id) return NextResponse.json({ message: 'Missing analysis ID to remap' }, { status: 400 });
+  
+      if (!pool) throw new Error("Database pool not initialized");
+      connection = await pool.getConnection();
+  
+      // Fetch existing unmapped record from the database
+      const [rows] = await connection.query<RowDataPacket[]>(
+        `SELECT * FROM batch_analysis WHERE id = ? LIMIT 1`, [id]
+      );
+  
+      if (rows.length === 0) return NextResponse.json({ message: 'Analysis not found' }, { status: 404 });
+      
+      const data = rows[0];
+      if (data.mapped) {
+        return NextResponse.json({ message: 'This analysis is already mapped', mapped: true, logs: mappingLogs }, { status: 200 });
+      }
+  
+      let mapped = false;
+      const analysisId = data.id;
+      const analysisType = data.analysis_type;
+      const grade = data.qc_grade;
+      
+      // Duplicated mapping logic ensuring consistency with POST endpoint
+      if (analysisType === 'Auction' || analysisType === 'Direct Sale') {
+          let updateCatalogueQuery = '';
+          let updateParams: any[] = [];
+  
+          if (analysisType === 'Direct Sale') {
+              const outturn = extractOutturn(data.analysis_number);
+              log(`Direct Sale detected. Extracted outturn: ${outturn || 'NONE'}, Grade: ${grade || 'NONE'}`);
+              if (outturn) {
+                  updateCatalogueQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'DS' AND analysis_id IS NULL AND outturn = ? AND grade = ? LIMIT 1`;
+                  updateParams = [analysisId, outturn, grade];
+              }
+          } else if (analysisType === 'Auction') {
+              log(`Auction Sale detected. Targeting lot_number: ${data.analysis_number} in sale: ${data.sale_number}`);
+              updateCatalogueQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'Auction' AND analysis_id IS NULL AND lot_number = ? AND sale_number LIKE CONCAT('%-', ?) LIMIT 1`;
+              updateParams = [analysisId, data.analysis_number, data.sale_number];
+          }
+  
+          if (updateCatalogueQuery) {
+              const [catalogueResult] = await connection.query<ResultSetHeader>(updateCatalogueQuery, updateParams);
+              if (catalogueResult.affectedRows > 0) {
+                  mapped = true;
+                  log(`Successfully mapped to catalogue_summary.`);
+                  
+                  const [catalogueRows] = await connection.query<RowDataPacket[]>(
+                      `SELECT batch_number FROM catalogue_summary WHERE analysis_id = ? LIMIT 1`,
+                      [analysisId]
+                  );
+  
+                  if (catalogueRows.length > 0 && catalogueRows[0].batch_number) {
+                      const mappedBatchNumber = catalogueRows[0].batch_number;
+                      log(`Retrieved batch_number '${mappedBatchNumber}' from catalogue_summary.`);
+  
+                      const [strategyResult] = await connection.query<ResultSetHeader>(
+                          `UPDATE daily_strategy_processing SET analysis_id = ? WHERE batch_number = ? AND analysis_id IS NULL`,
+                          [analysisId, mappedBatchNumber]
+                      );
+                      
+                      log(`Propagated mapping to ${strategyResult.affectedRows} row(s) in daily_strategy_processing.`);
+                  } else {
+                      log(`No batch_number found on the mapped catalogue_summary row. Skipping propagation.`);
+                  }
+              } else {
+                  log(`Failed to map to catalogue_summary. Lot/Outturn/Sale not found or already mapped.`);
+              }
+          }
+      } 
+      else if (process_shortcodes && process_shortcodes.hasOwnProperty(analysisType)) {
+          const shortcode = process_shortcodes[analysisType];
+          const processNumber = buildProcessNumber(shortcode, data.analysis_number);
+          
+          log(`Processing Context: Shortcode=${shortcode}, Original_No=${data.analysis_number}`);
+          log(`Calculated target Process Number: ${processNumber}`);
+  
+          const [processRows] = await connection.query<RowDataPacket[]>(
+              `SELECT id FROM daily_processes WHERE process_number = ? LIMIT 1`, 
+              [processNumber]
+          );
+  
+          if (processRows.length > 0) {
+              const processId = processRows[0].id;
+              log(`Found match in daily_processes. ID: ${processId}`);
+  
+              const [candidateBatches] = await connection.query<RowDataPacket[]>(
+                  `SELECT id, batch_number FROM daily_strategy_processing 
+                   WHERE process_id = ? AND output_qty > 0 AND analysis_id IS NULL`, 
+                  [processId]
+              );
+  
+              log(`Found ${candidateBatches.length} available output batches waiting for mapping.`);
+              let targetBatchNumber: string | null = null;
+  
+              if (candidateBatches.length === 1) {
+                  targetBatchNumber = candidateBatches[0].batch_number;
+                  log(`Single candidate resolved automatically: ${targetBatchNumber}`);
+              } 
+              else if (candidateBatches.length > 1) {
+                  if (grade) {
+                      const gradeLower = grade.toLowerCase().trim();
+                      log(`Multiple candidates found. Evaluating grade substrings against grade: '${gradeLower}'`);
+                      let matchedBatch;
+  
+                      if (shortcode === 'RG') {
+                          if (gradeLower === 'above') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('ABOVE'));
+                          else if (gradeLower === 'below') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('BELOW'));
+                      } 
+                      else if (shortcode === 'CS') {
+                          if (gradeLower === 'clean') matchedBatch = candidateBatches.find(b => !b.batch_number.toUpperCase().includes('REJECT') && !b.batch_number.toUpperCase().includes('ELEVATOR BALANCE'));
+                          else if (gradeLower === 'reject') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('REJECT'));
+                          else if (gradeLower === 'eb') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('ELEVATOR BALANCE'));
+                      } 
+                      else if (shortcode === 'GS') {
+                          if (gradeLower === 'heavy') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('HEAVY'));
+                          else if (gradeLower === 'light') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('LIGHT'));
+                      } 
+                      else if (shortcode === 'HP') {
+                          if (gradeLower === 'clean') matchedBatch = candidateBatches.find(b => !b.batch_number.toUpperCase().includes('REJECT'));
+                          else if (gradeLower === 'reject') matchedBatch = candidateBatches.find(b => b.batch_number.toUpperCase().includes('REJECT'));
+                      }
+  
+                      if (matchedBatch) {
+                          targetBatchNumber = matchedBatch.batch_number;
+                          log(`Grade Logic Success: Resolved to batch ${targetBatchNumber}`);
+                      } else {
+                          log(`Grade Logic Failure: Could not find a substring match for grade '${gradeLower}'.`);
+                      }
+                  } else {
+                      log(`Grade Logic Failure: Multiple output candidates exist, but no 'grade' was provided to filter them.`);
+                  }
+              } else {
+                  log(`Mapping failed: No output batches found for process ${processId} that haven't already been mapped.`);
+              }
+  
+              if (targetBatchNumber) {
+                  const [updateResult] = await connection.query<ResultSetHeader>(
+                      `UPDATE daily_strategy_processing SET analysis_id = ? WHERE process_id = ? AND batch_number = ?`, 
+                      [analysisId, processId, targetBatchNumber]
+                  );
+                  if (updateResult.affectedRows > 0) {
+                      mapped = true;
+                      log(`Batch successfully mapped in daily_strategy_processing.`);
+                  }
+              }
+          } else {
+              log(`Mapping Failed: Could not find a row in 'daily_processes' with process_number '${processNumber}'.`);
+          }
+      }
+  
+      if (mapped) {
+          await connection.query(`UPDATE batch_analysis SET mapped = TRUE WHERE id = ?`, [analysisId]);
+      }
+  
+      return NextResponse.json({ 
+        message: mapped ? 'Analysis successfully remapped' : 'Analysis could not be mapped (No matching batch found)', 
+        mapped: mapped,
+        logs: mappingLogs
+      }, { status: 200 });
+  
+    } catch (error: any) {
+      console.error("Remapping Error:", error);
+      return NextResponse.json({ message: 'Failed during remapping process', error: error.message }, { status: 500 });
+    } finally {
+      if (connection) connection.release();
+    }
+  }
