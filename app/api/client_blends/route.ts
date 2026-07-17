@@ -122,3 +122,35 @@ export async function PUT(req: Request) {
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }
+
+
+export async function DELETE(req: Request) {
+    try {
+        const { searchParams } = new URL(req.url);
+        const id = searchParams.get('id');
+        
+        if (!id) throw new Error("ID is required for deletion");
+
+        await query({ query: 'START TRANSACTION' });
+
+        // Delete child batch records first to maintain relational integrity
+        await query({
+            query: `DELETE FROM blended_batches WHERE client_blend_id = ?`,
+            values: [id]
+        });
+
+        // Delete parent blend record
+        await query({
+            query: `DELETE FROM client_blends WHERE id = ?`,
+            values: [id]
+        });
+
+        await query({ query: 'COMMIT' });
+        return NextResponse.json({ success: true });
+    } catch (error: any) {
+        await query({ query: 'ROLLBACK' });
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+

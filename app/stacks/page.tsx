@@ -2336,7 +2336,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
           doc.setFontSize(11);
           doc.setTextColor(200, 0, 0);
           doc.text("Note: You might want to revisit the target blends for the contracts.", 14, finalY);
-          doc.save(`Blend_Summary_${generatedBlendName}.pdf`);
+        //   doc.save(`Blend_Summary_${generatedBlendName}.pdf`);
 
           // 5. PREPARE EMAIL NOTIFICATION DATA
           setEmailModalData({
@@ -2409,6 +2409,32 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
       } finally {
           setIsSaving(false);
       }
+    };
+
+
+
+
+    const handleDeleteBlend = async (e: React.MouseEvent, id: number) => {
+        e.stopPropagation(); // Prevents the card's onClick from triggering
+        
+        if (!confirm("Are you sure you want to delete this blend?")) return;
+
+        try {
+            const res = await fetch(`/api/client_blends?id=${id}`, {
+                method: 'DELETE'
+            });
+
+            if (res.ok) {
+                setSavedBlendsDb(prev => prev.filter(b => b.id !== id));
+                setToastMessage("Blend deleted successfully!");
+                setTimeout(() => setToastMessage(null), 3000);
+            } else {
+                setValidationMsg("Failed to delete the blend.");
+                setTimeout(() => setValidationMsg(null), 3000);
+            }
+        } catch (error) {
+            console.error(error);
+        }
     };
 
     const handleViewAnalysis = async (batch: Batch) => {
@@ -2535,17 +2561,69 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                     </div>
                     <div className="flex-1 overflow-y-auto p-4 bg-[#F5F2EA]">
                         <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-                            {savedBlendsDb.length > 0 ? savedBlendsDb.map(b => (
-                                <div key={b.id} className="bg-white p-4 rounded-lg shadow-sm border border-[#D1CEC3] flex flex-col gap-2 hover:border-[#007680]/50 transition-colors cursor-pointer group" onClick={() => handleLoadBlend(b)}>
-                                    <div className="font-bold text-[#4A4941] text-base group-hover:text-[#007680] transition-colors">{b.name || `Blend #${b.id}`}</div>
+                            {savedBlendsDb.length > 0 ? savedBlendsDb.map(b => {
+                                // O(N) pass to aggregate batch weights for the composition bar
+                                const totalWeight = b.blended_batches?.reduce((sum: number, batch: any) => sum + Number(batch.use_kg || 0), 0) || 0;
+                                const strategyWeights: Record<string, number> = {};
+                                
+                                b.blended_batches?.forEach((batch: any) => {
+                                    const strat = batch.strategy || 'Unknown';
+                                    strategyWeights[strat] = (strategyWeights[strat] || 0) + Number(batch.use_kg || 0);
+                                });
+                                
+                                const composition = Object.entries(strategyWeights).map(([name, weight]) => ({
+                                    name,
+                                    percentage: totalWeight > 0 ? (weight / totalWeight) * 100 : 0
+                                })).sort((a, b) => b.percentage - a.percentage);
+
+                                return (
+                                <div key={b.id} className="bg-white p-4 rounded-lg shadow-sm border border-[#D1CEC3] flex flex-col gap-2 hover:border-[#007680]/50 transition-colors cursor-pointer group relative" onClick={() => handleLoadBlend(b)}>
+                                    
+                                    {/* Delete Button */}
+                                    <button 
+                                        onClick={(e) => handleDeleteBlend(e, b.id)}
+                                        className="absolute top-3 right-3 text-[#8B8A81] hover:text-red-500 hover:bg-red-50 p-1 rounded transition-all z-10 opacity-0 group-hover:opacity-100"
+                                        title="Delete Blend"
+                                    >
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+
+                                    <div className="font-bold text-[#4A4941] text-base group-hover:text-[#007680] transition-colors pr-6">{b.name || `Blend #${b.id}`}</div>
                                     <div className="text-xs text-[#8B8A81] flex justify-between"><span>Client:</span> <span className="font-medium text-[#4A4941]">{b.client || '-'}</span></div>
                                     <div className="text-xs text-[#8B8A81] flex justify-between"><span>Sale Ref:</span> <span className="font-medium text-[#4A4941]">{b.blend_no || '-'}</span></div>
-                                    <div className="text-[10px] text-[#8B8A81] mt-2 pt-2 border-t border-[#EBE7DC] flex justify-between items-center">
+                                    
+                                    {/* Composition Bar */}
+                                    <div className="mt-2">
+                                        <div className="flex justify-between text-[10px] text-[#8B8A81] mb-1.5 font-medium">
+                                            <span>Composition</span>
+                                            <span>{formatNumber(convertQty(totalWeight, unit), 0)} {unit}</span>
+                                        </div>
+                                        {/* Increased thickness to h-4, added better rounding and inner shadow */}
+                                        <div className="h-4 w-full bg-[#D6D2C4]/30 rounded-md flex overflow-hidden shadow-inner">
+                                            {composition.map(c => {
+                                                // Generates a consistent, safe color index based on the strategy's name characters
+                                                const safeColorIndex = Math.abs(c.name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0));
+                                                const color = CHART_COLORS[safeColorIndex % CHART_COLORS.length];
+
+                                                return (
+                                                    <div 
+                                                        key={c.name}
+                                                        style={{ width: `${c.percentage}%`, backgroundColor: color }}
+                                                        title={`${c.name}: ${formatNumber(c.percentage, 1)}%`}
+                                                        className="h-full border-r border-black/10 last:border-0 hover:opacity-85 transition-opacity cursor-help"
+                                                    />
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+
+                                    <div className="text-[10px] text-[#8B8A81] mt-1 pt-2 border-t border-[#EBE7DC] flex justify-between items-center">
                                         <span>Batches: <strong className="text-[#007680]">{b.blended_batches?.length || 0}</strong></span>
                                         <span>Created: {new Date(b.creation_on).toLocaleDateString()}</span>
                                     </div>
                                 </div>
-                            )) : (
+                                )
+                            }) : (
                                 <div className="col-span-full text-center py-12 text-[#8B8A81] italic">No saved blends found in the database.</div>
                             )}
                         </div>

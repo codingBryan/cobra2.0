@@ -68,7 +68,7 @@ function buildProcessNumber(shortcode: string, numStr: string): string {
 export async function POST(request: Request) {
   let connection: PoolConnection | undefined;
   
-  // ⚡ OPTIMIZATION: Unified logger to return debugging info to the Python client
+  // âš¡ OPTIMIZATION: Unified logger to return debugging info to the Python client
   const mappingLogs: string[] = [];
   const log = (msg: string) => {
       console.log(`[Mapping Diagnostic] ${msg}`);
@@ -76,12 +76,93 @@ export async function POST(request: Request) {
   };
 
   try {
-    const data: IncomingData = await request.json();
+    const data: IncomingData | any = await request.json();
 
+    if (!pool) throw new Error("Database pool not initialized");
+    connection = await pool.getConnection();
+
+    // --- SISTER LOT DUPLICATION LOGIC ---
+    if (data.action === 'duplicate_sister') {
+        await connection.beginTransaction();
+        
+        // 1. Fetch original analysis
+        const [origRows] = await connection.query<RowDataPacket[]>(
+            `SELECT * FROM batch_analysis WHERE id = ? LIMIT 1`, 
+            [data.original_id]
+        );
+        
+        if (origRows.length === 0) throw new Error('Original analysis not found');
+        const orig = origRows[0];
+
+        // 2. Insert new parent with updated analysis_number
+        const insertParentQuery = `
+          INSERT INTO batch_analysis (
+            analysis_type, sale_number, analysis_number, qc_grade, 
+            profile_print_score, sca_defect_count, qc_quality, 
+            primary_defects_percentage, secondary_defects_percentage, 
+            moisture, forein_matter_percentage, grade_aa_percentage, 
+            grade_ab_percentage, grade_abc_percentage, grade_grinder_percentage,
+            mapped
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+
+        const parentValues = [
+          orig.analysis_type,
+          orig.sale_number,
+          data.new_analysis_number, // The sister lot number
+          orig.qc_grade,
+          orig.profile_print_score,
+          orig.sca_defect_count,
+          orig.qc_quality,
+          orig.primary_defects_percentage,
+          orig.secondary_defects_percentage,
+          orig.moisture,
+          orig.forein_matter_percentage,
+          orig.grade_aa_percentage,
+          orig.grade_ab_percentage,
+          orig.grade_abc_percentage,
+          orig.grade_grinder_percentage,
+          false // Sister lot starts unmapped
+        ];
+
+        const [parentResult] = await connection.query<ResultSetHeader>(insertParentQuery, parentValues);
+        const newAnalysisId = parentResult.insertId;
+
+        // 3. Duplicate screensize_breakdown
+        const [screenRows] = await connection.query<RowDataPacket[]>(
+            `SELECT screen_size, percentage FROM screensize_breakdown WHERE analysis_id = ?`, 
+            [data.original_id]
+        );
+        if (screenRows.length > 0) {
+            const breakdownValues = screenRows.map(r => [newAnalysisId, r.screen_size, r.percentage]);
+            await connection.query(
+                `INSERT INTO screensize_breakdown (analysis_id, screen_size, percentage) VALUES ?`, 
+                [breakdownValues]
+            );
+        }
+
+        // 4. Duplicate class_by_screensize
+        const [classRows] = await connection.query<RowDataPacket[]>(
+            `SELECT screen_size, class, percentage FROM class_by_screensize WHERE analysis_id = ?`, 
+            [data.original_id]
+        );
+        if (classRows.length > 0) {
+            const classValues = classRows.map(r => [newAnalysisId, r.screen_size, r.class, r.percentage]);
+            await connection.query(
+                `INSERT INTO class_by_screensize (analysis_id, screen_size, class, percentage) VALUES ?`, 
+                [classValues]
+            );
+        }
+
+        await connection.commit();
+        return NextResponse.json({ message: 'Sister lot duplicated successfully', id: newAnalysisId }, { status: 201 });
+    }
+
+    // --- STANDARD INSERT LOGIC ---
     let foreignMatterTotal = 0.0;
     if (data.defects_by_screensize_breakdown) {
-      Object.values(data.defects_by_screensize_breakdown).forEach((screenDefects) => {
-        screenDefects.forEach(([defectName, percentage]) => {
+      Object.values(data.defects_by_screensize_breakdown).forEach((screenDefects: any) => {
+        screenDefects.forEach(([defectName, percentage]: [string, number]) => {
           if (defectName.toLowerCase().includes('foreign m')) { 
             foreignMatterTotal += Number(percentage);
           }
@@ -90,9 +171,6 @@ export async function POST(request: Request) {
     }
 
     const qcQuality = data.qc_quality || 'Standard'; 
-
-    if (!pool) throw new Error("Database pool not initialized");
-    connection = await pool.getConnection();
 
     await connection.beginTransaction();
 
@@ -137,8 +215,8 @@ export async function POST(request: Request) {
     }
 
     const classRows: any[] = [];
-    Object.entries(data.defects_by_screensize_breakdown).forEach(([screenSize, defects]) => {
-      defects.forEach(([defectName, pct]) => {
+    Object.entries(data.defects_by_screensize_breakdown).forEach(([screenSize, defects]: [string, any]) => {
+      defects.forEach(([defectName, pct]: [string, number]) => {
         classRows.push([analysisId, parseInt(screenSize), defectName, pct]);
       });
     });
@@ -152,7 +230,7 @@ export async function POST(request: Request) {
     let mapped = false;
     const analysisType = data.analysis_type;
 
-    if (analysisType === 'Auction' || analysisType === 'Direct Sale') {
+    if (analysisType === 'Auction purchase' || analysisType === 'Direct Sale') {
         let updateCatalogueQuery = '';
         let updateParams: any[] = [];
 
@@ -160,13 +238,13 @@ export async function POST(request: Request) {
             const outturn = extractOutturn(data.analysis_number);
             log(`Direct Sale detected. Extracted outturn: ${outturn || 'NONE'}, Grade: ${data.grade || 'NONE'}`);
             if (outturn) {
-                // ⚡ OPTIMIZATION: Added grade filter to increase index selectivity and guarantee exact matching.
+                // âš¡ OPTIMIZATION: Added grade filter to increase index selectivity and guarantee exact matching.
                 updateCatalogueQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'DS' AND analysis_id IS NULL AND outturn = ? AND grade = ? LIMIT 1`;
                 updateParams = [analysisId, outturn, data.grade];
             }
-        } else if (analysisType === 'Auction') {
+        } else if (analysisType === 'Auction purchase') {
             log(`Auction Sale detected. Targeting lot_number: ${data.analysis_number} in sale: ${data.sale_number}`);
-            // ⚡ OPTIMIZATION: Database-level string matching using LIKE CONCAT
+            // âš¡ OPTIMIZATION: Database-level string matching using LIKE CONCAT
             updateCatalogueQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'Auction' AND analysis_id IS NULL AND lot_number = ? AND sale_number LIKE CONCAT('%-', ?) LIMIT 1`;
             updateParams = [analysisId, data.analysis_number, data.sale_number];
         }
@@ -177,7 +255,7 @@ export async function POST(request: Request) {
                 mapped = true;
                 log(`Successfully mapped to catalogue_summary.`);
                 
-                // ⚡ OPTIMIZATION: Retrieve the batch_number using the newly assigned analysisId (O(1) lookup)
+                // âš¡ OPTIMIZATION: Retrieve the batch_number using the newly assigned analysisId (O(1) lookup)
                 const [catalogueRows] = await connection.query<RowDataPacket[]>(
                     `SELECT batch_number FROM catalogue_summary WHERE analysis_id = ? LIMIT 1`,
                     [analysisId]
@@ -187,7 +265,7 @@ export async function POST(request: Request) {
                     const mappedBatchNumber = catalogueRows[0].batch_number;
                     log(`Retrieved batch_number '${mappedBatchNumber}' from catalogue_summary.`);
 
-                    // ⚡ OPTIMIZATION: Bulk update all matching processing rows. 
+                    // âš¡ OPTIMIZATION: Bulk update all matching processing rows. 
                     // 'AND analysis_id IS NULL' prevents redundant disk writes.
                     const [strategyResult] = await connection.query<ResultSetHeader>(
                         `UPDATE daily_strategy_processing 
@@ -315,7 +393,7 @@ export async function POST(request: Request) {
 
     await connection.commit();
 
-    // ⚡ OPTIMIZATION: Emit WebSocket event to connected clients.
+    // âš¡ OPTIMIZATION: Emit WebSocket event to connected clients.
     try {
         const payloadToBroadcast = {
             id: analysisId,
@@ -350,13 +428,46 @@ export async function POST(request: Request) {
 }
 
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     if (!pool) throw new Error("Database pool not initialized");
 
-    const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT * FROM batch_analysis ORDER BY id DESC LIMIT 100`
-    );
+    const { searchParams } = new URL(request.url);
+    const fetchTypes = searchParams.get('fetchTypes');
+
+    // 1. Return ONLY the distinct types if specifically requested by the frontend
+    if (fetchTypes === 'true') {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        `SELECT DISTINCT analysis_type FROM batch_analysis WHERE analysis_type IS NOT NULL AND analysis_type != '' ORDER BY analysis_type ASC`
+      );
+      return NextResponse.json(rows.map(r => r.analysis_type), { status: 200 });
+    }
+
+    // 2. Otherwise, return the filtered table data
+    const search = searchParams.get('search') || '';
+    const type = searchParams.get('type') || '';
+
+    let query = `SELECT * FROM batch_analysis`;
+    const params: any[] = [];
+    const conditions: string[] = [];
+
+    if (search) {
+      conditions.push(`(analysis_number LIKE ? OR analysis_type LIKE ?)`);
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    if (type) {
+      conditions.push(`analysis_type = ?`);
+      params.push(type);
+    }
+
+    if (conditions.length > 0) {
+      query += ` WHERE ` + conditions.join(' AND ');
+    }
+
+    query += ` ORDER BY id DESC LIMIT 1000`;
+
+    const [rows] = await pool.query<RowDataPacket[]>(query, params);
 
     return NextResponse.json(rows, { status: 200 });
   } catch (error: any) {
@@ -367,8 +478,6 @@ export async function GET() {
     }, { status: 500 });
   }
 }
-
-
 export async function PATCH(request: Request) {
   let connection: PoolConnection | undefined;
   try {
@@ -397,7 +506,7 @@ export async function PATCH(request: Request) {
 }
 
 // -----------------------------------------------------------------------------------------
-// ⚡ NEW ENDPOINT: PUT handles manual "Try Remap" commands utilizing the same routing logic
+// âš¡ NEW ENDPOINT: PUT handles manual "Try Remap" commands utilizing the same routing logic
 // -----------------------------------------------------------------------------------------
 export async function PUT(request: Request) {
     let connection: PoolConnection | undefined;
@@ -432,7 +541,7 @@ export async function PUT(request: Request) {
       const grade = data.qc_grade;
       
       // Duplicated mapping logic ensuring consistency with POST endpoint
-      if (analysisType === 'Auction' || analysisType === 'Direct Sale') {
+      if (analysisType === 'Auction purchase' || analysisType === 'Direct Sale') {
           let updateCatalogueQuery = '';
           let updateParams: any[] = [];
   
@@ -443,7 +552,7 @@ export async function PUT(request: Request) {
                   updateCatalogueQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'DS' AND analysis_id IS NULL AND outturn = ? AND grade = ? LIMIT 1`;
                   updateParams = [analysisId, outturn, grade];
               }
-          } else if (analysisType === 'Auction') {
+          } else if (analysisType === 'Auction purchase') {
               log(`Auction Sale detected. Targeting lot_number: ${data.analysis_number} in sale: ${data.sale_number}`);
               updateCatalogueQuery = `UPDATE catalogue_summary SET analysis_id = ? WHERE sale_type = 'Auction' AND analysis_id IS NULL AND lot_number = ? AND sale_number LIKE CONCAT('%-', ?) LIMIT 1`;
               updateParams = [analysisId, data.analysis_number, data.sale_number];
