@@ -806,7 +806,7 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
         ]);
 
         const strategy_update = await fetch('/api/update_undefined_strategies', { method: 'POST', body: formData })
-        const strategy_update_reponse = strategy_update.json()
+        // const strategy_update_reponse = strategy_update.json()
         // 4. Extract Data
         const inbound_weight = stiResult.total_delivered_qty;
         const outbound_weight = gdiResult.groupedData?.totalOutbound;

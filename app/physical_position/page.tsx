@@ -41,7 +41,7 @@ const BLEND_COMPONENTS = [
   { key: 'post_specialty_washed', label: 'POST SPECIALTY WASHED' },
   { key: 'post_17_up_top', label: 'POST 17 UP TOP' },
   { key: 'post_16_top', label: 'POST 16 TOP' },
-  { key: 'post_15_top', label: 'POST PB TOP' },
+  { key: 'post_15_top', label: 'POST 15 TOP' },
   { key: 'post_pb_top', label: 'POST PB TOP' },
   { key: 'post_17_up_plus', label: 'POST 17 UP PLUS' },
   { key: 'post_16_plus', label: 'POST 16 PLUS' },
@@ -59,7 +59,8 @@ const BLEND_COMPONENTS = [
   { key: 'post_mh', label: 'POST MH' },
   { key: 'post_ml', label: 'POST ML' },
   { key: 'post_rejects_s', label: 'POST REJECTS S' },
-  { key: 'post_rejects_p', label: 'POST REJECTS P' }
+  { key: 'post_rejects_p', label: 'POST REJECTS P' },
+  { key: 'in_grinder_rc', label: 'IN GRINDER RC' }
 ];
 
 const INITIAL_BLEND_FORM = {

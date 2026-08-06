@@ -1,4 +1,5 @@
 import { process_post_stack_updates } from '@/lib/stack_pricing_utils';
+import { updateUndefinedStrategies } from '@/lib/sti_processing_utils';
 import { NextRequest, NextResponse } from 'next/server';
 ; // Adjust path as needed
 
@@ -15,7 +16,9 @@ export async function POST(request: NextRequest) {
     try {
         // 1. Parse the multipart/form-data payload
         const formData = await request.formData();
-        
+        const test_details_summary:File = formData.get('test_details_summary_file') as File;
+        await updateUndefinedStrategies(test_details_summary);
+
         // 2. Extract the file object
         const file = formData.get(FILE_FORM_FIELD_NAME);
 
