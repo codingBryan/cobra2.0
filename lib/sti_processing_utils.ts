@@ -1279,7 +1279,6 @@ export async function initialize_grade_strategy_activity_records(
 }
 
 
-
 export async function debit_credit_processing(
   new_activity_list: InitializedActivityRecords,
   summary_id: number,
@@ -1295,7 +1294,6 @@ export async function debit_credit_processing(
       return new_activity_list; 
   }
   
-
   // --- Main loop for each process ---
   for (const process_object of processing_summaries) { 
       
@@ -1318,28 +1316,38 @@ export async function debit_credit_processing(
       const processing_loss = parseSafeFloat(process_object.processing_loss);
       const total_process_loss = milling_loss + processing_loss; 
 
-      // --- 2. Create the parent 'daily_processes' row (INSERT IGNORE) ---
-      const processInsertQuery = `
-        INSERT IGNORE INTO daily_processes (
-          summary_id, processing_date, process_type, process_number,
-          input_qty, output_qty, milling_loss, processing_loss_gain_qty,
-          input_value, output_value, pnl, trade_variables_updated
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, FALSE)
-      `;
-      
-      let new_process_id: number = 0;
-      
-      // --- TIMEZONE FIX START ---
-      // Time Efficiency: No need for `if (process_object.processing_date)` wrapper here anymore 
-      // because our early exit guarantees it exists.
       const d = new Date(process_object.processing_date);
       d.setTime(d.getTime() + (12 * 60 * 60 * 1000));
       const safeProcessDate = formatDateAsLocal_YYYYMMDD(d);
-      // --- TIMEZONE FIX END ---
+
+      // --- NEW FEATURE: Instructed Date extraction ---
+      let safeInstructedDate: string | null = null;
+      // Fallback in case it's passed as 'issue_date' or 'instructed_date' from the analysis file
+      const rawInstructedDate =  process_object.instructed_date; 
+      
+      if (rawInstructedDate) {
+          const dIssue = new Date(rawInstructedDate);
+          dIssue.setTime(dIssue.getTime() + (12 * 60 * 60 * 1000));
+          safeInstructedDate = formatDateAsLocal_YYYYMMDD(dIssue);
+      }
+      // -----------------------------------------------
+
+      // --- 2. Create the parent 'daily_processes' row (INSERT IGNORE) ---
+      // Added 'instructed_date' into the INSERT statement
+      const processInsertQuery = `
+        INSERT IGNORE INTO daily_processes (
+          summary_id, processing_date, instructed_date, process_type, process_number,
+          input_qty, output_qty, milling_loss, processing_loss_gain_qty,
+          input_value, output_value, pnl, trade_variables_updated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, FALSE)
+      `;
+      
+      let new_process_id: number = 0;
 
       const insertValues = [
         summary_id,
         safeProcessDate, 
+        safeInstructedDate, // <-- NEW field added to the values array
         process_object.process_type,
         process_object.process_number,
         total_process_input_qty,
@@ -1511,8 +1519,6 @@ export async function debit_credit_processing(
           }
       }
   }
-
-  
   
   return new_activity_list;
 }

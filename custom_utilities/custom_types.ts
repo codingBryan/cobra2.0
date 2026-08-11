@@ -141,7 +141,7 @@ export interface ProcessDetails {
   milling_loss: string | number;
   processing_loss: string | number;
   process_type: string;
-  issue_date: Date | null;
+  instructed_date: Date | null;
   processing_date: Date | null;
   input_item_names: Record<string, number>;
   // --- MODIFIED: Changed to store BatchDetails object ---

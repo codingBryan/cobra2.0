@@ -2,16 +2,18 @@ import { ResultSetHeader, RowDataPacket } from 'mysql2';
 import * as XLSX from 'xlsx';
 
 // Define the structure of an aggregated process object for type safety
+
 interface ProcessDetail {
   process_number: string;
   process_type: string;
-  issue_date: Date | null;
+  instructed_date: Date | null; 
   processing_date: Date | null;
   input_item_names: Record<string, number>;
   input_strategies: Record<string, number>;
   output_item_names: Record<string, number>;
   output_strategies: Record<string, number>;
 }
+
 
 // Define the structure of a single row read from the Excel sheet
 interface ProcessRow {
@@ -52,6 +54,17 @@ function convertExcelDate(excelSerial: number | string): Date | null {
   return isNaN(date.getTime()) ? null : date;
 }
 
+function parseDate(dateValue: number | string | Date | any): Date | null {
+  if (typeof dateValue === 'number') {
+    return convertExcelDate(dateValue);
+  } else if (typeof dateValue === 'string') {
+    const parsedDate = new Date(dateValue);
+    return isNaN(parsedDate.getTime()) ? null : parsedDate;
+  } else if (dateValue instanceof Date) {
+    return dateValue;
+  }
+  return null;
+}
 
 /**
  * Reads and processes the uploaded 'processing_analysis_file'.
@@ -59,7 +72,7 @@ function convertExcelDate(excelSerial: number | string): Date | null {
  * @param uploadedFile The browser's File object for the 'processing_analysis_file'.
  * @returns A promise that resolves to an array of aggregated ProcessDetail objects.
  */
-export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Promise<ProcessDetail[]> {
+export async function getProcessDetails(sinceDate: Date, uploadedFile: File): Promise<ProcessDetail[]> {
   try {
     if (!uploadedFile) {
       console.warn("No 'processing_analysis_file' was provided.");
@@ -88,33 +101,17 @@ export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Pro
     // --- STEP 3: Filter data by 'Receipt Date' ---
     let checkedDateFilter = false;
     const dateFilteredRows = allRows.filter((row: ProcessRow) => {
-      const receiptDateValue = row['Receipt Date'];
-      let dateForComparison: Date | null = null;
+      const dateForComparison = parseDate(row['Receipt Date']);
 
-      // Handle Excel serial number date
-      if (typeof receiptDateValue === 'number') {
-        dateForComparison = convertExcelDate(receiptDateValue);
-      }
-      // Handle date string (fallback)
-      else if (typeof receiptDateValue === 'string') {
-        const parsedDate = new Date(receiptDateValue);
-        dateForComparison = isNaN(parsedDate.getTime()) ? null : parsedDate;
-      }
-      // Handle pre-existing Date object
-      else if (receiptDateValue instanceof Date) {
-        dateForComparison = receiptDateValue;
-      }
-
-      // --- NEW: Diagnostic logging (runs once) ---
+      // Diagnostic logging (runs once)
       if (!checkedDateFilter && allRows.length > 0) {
         console.log(`\n--- Date Filter Diagnostic ---`);
         console.log(`Checking against sinceDate: ${sinceDate.toISOString()}`);
-        console.log(`Original 'Receipt Date' in file:`, receiptDateValue);
+        console.log(`Original 'Receipt Date' in file:`, row['Receipt Date']);
         console.log(`Converted 'Receipt Date':`, dateForComparison ? dateForComparison.toISOString() : dateForComparison);
         console.log(`------------------------------\n`);
         checkedDateFilter = true;
       }
-      // --- END NEW ---
 
       // Check if it's a valid date object and meets the filter criteria
       return dateForComparison instanceof Date && dateForComparison > sinceDate;
@@ -143,16 +140,12 @@ export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Pro
 
       const firstRow = matchingRows[0];
 
-      // 6. Create the base process object
-      const issueDateValue = firstRow['Issue Date'];
-      const processingDateValue = firstRow['Receipt Date'];
-
+      // 6. Create the base process object utilizing the new date parser helper
       const process_object: ProcessDetail = {
         process_number: firstRow['Process No.'].toString(),
         process_type: firstRow['Process Name'],
-        // Convert dates, expecting null if it's not a number
-        issue_date: typeof issueDateValue === 'number' ? convertExcelDate(issueDateValue) : null,
-        processing_date: typeof processingDateValue === 'number' ? convertExcelDate(processingDateValue) : null,
+        instructed_date: parseDate(firstRow['Issue Date']),
+        processing_date: parseDate(firstRow['Receipt Date']),
         input_item_names: {},
         input_strategies: {},
         output_item_names: {},
@@ -162,16 +155,14 @@ export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Pro
       // 7. Loop through all matching rows to aggregate data
       for (const row of matchingRows) {
         // --- Process Inputs ---
-        // Ensure Qty. is treated as a number
         const inputQty = parseFloat(row['Qty.'].toString() || '0');
         if (!isNaN(inputQty) && inputQty > 0) {
-          // A. Aggregate input_item_names
+          
           const inputItemName = row['Item Name'];
           if (inputItemName) {
             process_object.input_item_names[inputItemName] = (process_object.input_item_names[inputItemName] || 0) + inputQty;
           }
 
-          // B. Aggregate input_strategies
           const inputStrategy = row['Position Strategy Allocation'];
           if (inputStrategy) {
             process_object.input_strategies[inputStrategy] = (process_object.input_strategies[inputStrategy] || 0) + inputQty;
@@ -179,17 +170,14 @@ export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Pro
         }
 
         // --- Process Outputs ---
-        // Ensure Qty._1 is treated as a number
         const outputQty = parseFloat(row['Qty._1']?.toString() || '0');
-
         if (!isNaN(outputQty) && outputQty > 0) {
-          // C. Aggregate output_item_names
+          
           const outputItemName = row['Item Name_1'];
           if (outputItemName) {
             process_object.output_item_names[outputItemName] = (process_object.output_item_names[outputItemName] || 0) + outputQty;
           }
 
-          // D. Aggregate output_strategies
           const outputBatchNumber = row['Batch No._1'];
           if (outputBatchNumber) {
             process_object.output_strategies[outputBatchNumber] = (process_object.output_strategies[outputBatchNumber] || 0) + outputQty;
@@ -209,7 +197,6 @@ export async function getProcessDetails(sinceDate: Date,uploadedFile: File): Pro
     throw error;
   }
 }
-
 
 
 /**

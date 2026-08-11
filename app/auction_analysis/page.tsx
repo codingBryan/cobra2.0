@@ -12,6 +12,8 @@ const COLORS = [
   '#84CC16', '#64748B', '#0EA5E9', '#D946EF', '#1E40AF'
 ];
 
+const MAJOR_BUYERS = ['Kenyacof', 'Ibero', 'LDC', 'Taylor Winch', 'C. Dorman', 'Sasini'];
+
 // Custom BoxPlot Shape for Recharts
 const BoxPlotShape = (props: any) => {
   const { x, y, width, height, payload } = props;
@@ -106,6 +108,7 @@ export default function AuctionAnalysis() {
   const [loading, setLoading] = useState(true);
   const [unit, setUnit] = useState('Kilos');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [groupMinorBuyers, setGroupMinorBuyers] = useState(true);
 
   // Toast State
   const [toast, setToast] = useState<{message: string, type: 'success' | 'error'} | null>(null);
@@ -120,6 +123,7 @@ export default function AuctionAnalysis() {
   const [filterStatus, setFilterStatus] = useState('all'); 
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
+  const [availableSeasons, setAvailableSeasons] = useState<string[]>([]);
   const [selectedSeasons, setSelectedSeasons] = useState<string[]>([]);
   const [selectedStrategies, setSelectedStrategies] = useState<string[]>([]);
   const [selectedGrades, setSelectedGrades] = useState<string[]>([]);
@@ -132,10 +136,10 @@ export default function AuctionAnalysis() {
   const [selectedSKL, setSelectedSKL] = useState<boolean>(false);
 
   // Chart Controls
-  const [volumeStack, setVolumeStack] = useState('none'); 
+  const [volumeStack, setVolumeStack] = useState('buyer'); 
   const [priceStack, setPriceStack] = useState('none'); 
-  const [priceMetric, setPriceMetric] = useState('confirmed_price'); 
-  const [distMetric, setDistMetric] = useState('confirmed_price');
+  const [priceMetric, setPriceMetric] = useState('price'); 
+  const [distMetric, setDistMetric] = useState('price');
   const [distGroupBy, setDistGroupBy] = useState('strategy');
 
   // Legend Visibility State
@@ -148,20 +152,35 @@ export default function AuctionAnalysis() {
   };
 
   useEffect(() => {
-    fetchData();
+    fetchData(); // Fetch with no arguments triggers 'initial load' behavior on the backend
   }, []);
 
-  const fetchData = async () => {
+  const fetchData = async (seasonsToFetch?: string[]) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/auction_analysis');
+      // Build the URL based on whether we have active filters
+      let url = '/api/auction_analysis';
+      if (seasonsToFetch && seasonsToFetch.length > 0) {
+        url += `?seasons=${encodeURIComponent(seasonsToFetch.join(','))}`;
+      }
+
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch data');
+      
       const json = await res.json();
-      const data = Array.isArray(json) ? json : [];
+      
+      // Update Raw Data
+      const data = Array.isArray(json.data) ? json.data : Array.isArray(json) ? json : [];
       setRawData(data);
 
-      const seasons = Array.from(new Set(data.map(d => d.season).filter(Boolean))).sort().reverse() as string[];
-      if (seasons.length > 0 && selectedSeasons.length === 0) {
-        setSelectedSeasons([seasons[0]]);
+      // Update Available Seasons dynamically from the database
+      if (json.availableSeasons && Array.isArray(json.availableSeasons)) {
+        setAvailableSeasons(json.availableSeasons);
+      }
+
+      // Handle the first-load auto-detected season
+      if (json.initialSeasonDetected && (!seasonsToFetch || seasonsToFetch.length === 0)) {
+        setSelectedSeasons([json.initialSeasonDetected]);
       }
     } catch (err) {
       console.error(err);
@@ -169,6 +188,11 @@ export default function AuctionAnalysis() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleApplyDataFilters = () => {
+    fetchData(selectedSeasons);
+    setIsSidebarOpen(false);
   };
 
   const handleUploadPurchases = async () => {
@@ -195,7 +219,7 @@ export default function AuctionAnalysis() {
         setShowUploadModal(false);
         setUploadSaleNum('');
         setUploadFile(null);
-        fetchData(); // Refresh the dashboard data
+        fetchData(selectedSeasons); 
       } else {
         showToast(result.error || 'Failed to upload purchases.', 'error');
       }
@@ -208,34 +232,35 @@ export default function AuctionAnalysis() {
   };
 
   const getPrice = (row: any, metric: string) => {
-    // New logic to handle dynamic Differential calculation on the frontend
+    // Determine the base price (Confirmed Price falling back to Floor Price)
+    let basePrice = parseFloat(row.confirmed_price);
+    if (isNaN(basePrice) || basePrice === null) {
+      basePrice = parseFloat(row.floor_price); 
+    }
+
+    // If both are missing, return null to exclude from calculations
+    if (isNaN(basePrice)) return null;
+
     if (metric === 'differential') {
-      let price = parseFloat(row.confirmed_price);
-      if (isNaN(price)) {
-        price = parseFloat(row.floor_price); // Fallback to floor price
-      }
       const fobbing = parseFloat(row.fobbing);
       const hedgeLevel = parseFloat(row.hedge_level);
 
-      if (isNaN(price) || isNaN(fobbing) || isNaN(hedgeLevel)) return null;
-
-      // Differential = (((Price + Fobbing) / 50) * 100 * 0.453592) - Hedge Level (NY Price)
-      const diff = (((price + fobbing) / 50) * 100 * 0.453592) - hedgeLevel;
-      return diff;
+      if (isNaN(fobbing) || isNaN(hedgeLevel)) return null;
+      return (((basePrice + fobbing) / 50) * 100 * 0.453592) - hedgeLevel;
     }
 
-    // Standard static metric
-    const val = parseFloat(row[metric.replace('_usc', '')]);
-    if (isNaN(val)) return null;
-    return metric.includes('_usc') ? val / 1.1023 : val;
+    if (metric === 'price_usc') return basePrice / 1.1023;
+    if (metric === 'price') return basePrice;
+
+    return null;
   };
 
   const weightMultiplier = unit === 'MT' ? 1/1000 : unit === 'Bags' ? 1/60 : 1;
 
+  // Filter options exclusively for local filtering (seasons uses state now)
   const filterOptions = useMemo(() => {
     const getUnique = (key: string) => Array.from(new Set(rawData.map(d => d[key]).filter(v => v && String(v).trim() !== ''))).sort();
     return {
-      seasons: getUnique('season'),
       strategies: getUnique('strategy'),
       grades: getUnique('grade'),
       counties: getUnique('region'),
@@ -246,22 +271,20 @@ export default function AuctionAnalysis() {
     };
   }, [rawData]);
 
-  // --- FILTERING LOGIC ---
   const filteredData = useMemo(() => {
     return rawData.filter(d => {
-      // 1. Status Filter
       if (filterStatus === 'confirmed' && (d.confirmed_price === null || isNaN(parseFloat(d.confirmed_price)))) return false;
       if (filterStatus === 'withdrawn' && (d.confirmed_price !== null && !isNaN(parseFloat(d.confirmed_price)))) return false;
       if (filterStatus === 'floor' && (d.floor_price === null || isNaN(parseFloat(d.floor_price)))) return false;
 
-      // 2. Date Range Filter
       if (d.timestamp) {
           if (dateStart && new Date(d.timestamp) < new Date(dateStart)) return false;
           if (dateEnd && new Date(d.timestamp) > new Date(dateEnd + 'T23:59:59')) return false;
       }
 
-      // 3. Multi-Select Filters
+      // Local fallback in case user toggles a season off before hitting Apply Data Filters
       if (selectedSeasons.length > 0 && !selectedSeasons.includes(d.season)) return false;
+      
       if (selectedStrategies.length > 0 && !selectedStrategies.includes(d.strategy)) return false;
       if (selectedGrades.length > 0 && !selectedGrades.includes(d.grade)) return false;
       if (selectedCounties.length > 0 && !selectedCounties.includes(d.region)) return false;
@@ -272,18 +295,15 @@ export default function AuctionAnalysis() {
 
       const certText = (d.certification || '').toUpperCase() + ' ' + (d.certificate || '').toUpperCase();
 
-      // 4. Checkbox Certifications (AAA, RFA, CAFE)
       if (selectedCertTypes.length > 0) {
         if (!selectedCertTypes.some(type => certText.includes(type.toUpperCase()))) return false;
       }
 
-      // 5. Kenyacof Supply Chain (SKL)
       if (selectedSKL && !certText.includes('SKL')) return false;
 
       return true;
     });
   }, [rawData, filterStatus, dateStart, dateEnd, selectedSeasons, selectedStrategies, selectedGrades, selectedCounties, selectedCooperatives, selectedWetmills, selectedCertifications, selectedBuyers, selectedCertTypes, selectedSKL]);
-
 
   const handleDownloadCSV = () => {
     if (!filteredData || filteredData.length === 0) {
@@ -291,26 +311,16 @@ export default function AuctionAnalysis() {
       return;
     }
 
-    // Capture all headers from the first filtered object
     const baseHeaders = Object.keys(filteredData[0]);
-    // Append our dynamically calculated 'differential' column
     const headers = [...baseHeaders, 'differential'];
 
     const csvRows = filteredData.map(row => {
-      // Calculate the differential for this specific row
       const diff = getPrice(row, 'differential');
-      
       return headers.map(header => {
-        let val = header === 'differential' 
-          ? (diff !== null ? Number(diff).toFixed(2) : '') 
-          : row[header];
-
-        // Format and escape CSV values
+        let val = header === 'differential' ? (diff !== null ? Number(diff).toFixed(2) : '') : row[header];
         if (val === null || val === undefined) val = '';
         let str = String(val);
-        // Escape quotes by doubling them
         str = str.replace(/"/g, '""');
-        // Wrap in quotes if it contains commas, newlines, or quotes
         if (str.search(/("|,|\n)/g) >= 0) str = `"${str}"`;
         return str;
       }).join(',');
@@ -331,7 +341,6 @@ export default function AuctionAnalysis() {
     window.URL.revokeObjectURL(url);
   };
 
-  // --- KPIs ---
   const kpis = useMemo(() => {
     let totalVol = 0;
     let certVol = 0;
@@ -377,13 +386,6 @@ export default function AuctionAnalysis() {
     };
   }, [filteredData, weightMultiplier]);
 
-  const certChartData = [
-    { name: 'AAA', value: kpis.aaaVol },
-    { name: 'RFA', value: kpis.rfaVol },
-    { name: 'CAFE', value: kpis.cafeVol }
-  ];
-
-  // Volume Chart Data
   const { volumeData, volumeKeys } = useMemo(() => {
     const grouped: any = {};
     const keys = new Set<string>();
@@ -394,17 +396,26 @@ export default function AuctionAnalysis() {
       grouped[d.sale_number].total += w;
 
       if (volumeStack !== 'none') {
-        const stackVal = d[volumeStack === 'county' ? 'region' : volumeStack] || 'Unknown';
+        let stackVal = d[volumeStack === 'county' ? 'region' : volumeStack] || 'Unknown';
+        
+        if (volumeStack === 'buyer' && groupMinorBuyers) {
+            const isMajor = MAJOR_BUYERS.some(mb => mb.toLowerCase() === String(stackVal).toLowerCase());
+            if (!isMajor && stackVal !== 'Unknown') {
+                stackVal = 'Others';
+            } else if (isMajor) {
+                stackVal = MAJOR_BUYERS.find(mb => mb.toLowerCase() === String(stackVal).toLowerCase()) || stackVal;
+            }
+        }
+        
         grouped[d.sale_number][stackVal] = (grouped[d.sale_number][stackVal] || 0) + w;
         keys.add(stackVal);
       }
     });
 
-    const data = Object.values(grouped).sort((a: any, b: any) => String(a.sale_number).localeCompare(String(b.sale_number)));
+    const data = Object.values(grouped).sort((a: any, b: any) => String(a.sale_number).localeCompare(String(b.sale_number), undefined, {numeric: true}));
     return { volumeData: data, volumeKeys: Array.from(keys) };
-  }, [filteredData, volumeStack, weightMultiplier]);
+  }, [filteredData, volumeStack, groupMinorBuyers, weightMultiplier]);
 
-  // Price Chart Data
   const { priceData, priceKeys } = useMemo(() => {
     const grouped: any = {};
     const keys = new Set<string>();
@@ -416,7 +427,16 @@ export default function AuctionAnalysis() {
       const val = getPrice(d, priceMetric);
       const w = parseFloat(d.weight) || 0; 
       const hedge = parseFloat(d.hedge_level);
-      const key = d[stackField] || 'Unknown';
+      let key = d[stackField] || 'Unknown';
+
+      if (stackField === 'buyer' && groupMinorBuyers) {
+          const isMajor = MAJOR_BUYERS.some(mb => mb.toLowerCase() === String(key).toLowerCase());
+          if (!isMajor && key !== 'Unknown') {
+              key = 'Others';
+          } else if (isMajor) {
+              key = MAJOR_BUYERS.find(mb => mb.toLowerCase() === String(key).toLowerCase()) || key;
+          }
+      }
 
       if (w > 0) {
         if (!isNaN(hedge)) {
@@ -441,16 +461,25 @@ export default function AuctionAnalysis() {
         if (k !== 'sale_number' && !k.startsWith('_')) result[k] = saleGroup[k].sum / saleGroup[k].weight;
       });
       return result;
-    }).sort((a: any, b: any) => String(a.sale_number).localeCompare(String(b.sale_number)));
+    }).sort((a: any, b: any) => String(a.sale_number).localeCompare(String(b.sale_number), undefined, {numeric: true}));
 
     return { priceData: data, priceKeys: Array.from(keys) };
-  }, [filteredData, priceMetric, priceStack]);
+  }, [filteredData, priceMetric, priceStack, groupMinorBuyers]);
 
-  // Box Plot Data
   const boxData = useMemo(() => {
     const grouped: any = {};
     filteredData.forEach(d => {
-      const groupVal = d[distGroupBy] || 'Unknown';
+      let groupVal = d[distGroupBy] || 'Unknown';
+      
+      if (distGroupBy === 'buyer' && groupMinorBuyers) {
+          const isMajor = MAJOR_BUYERS.some(mb => mb.toLowerCase() === String(groupVal).toLowerCase());
+          if (!isMajor && groupVal !== 'Unknown') {
+              groupVal = 'Others';
+          } else if (isMajor) {
+              groupVal = MAJOR_BUYERS.find(mb => mb.toLowerCase() === String(groupVal).toLowerCase()) || groupVal;
+          }
+      }
+
       const val = getPrice(d, distMetric);
       if (val !== null) {
         if (!grouped[groupVal]) grouped[groupVal] = [];
@@ -470,10 +499,9 @@ export default function AuctionAnalysis() {
         q3: quantile(arr, 0.75)
       };
     }).filter(Boolean).sort((a: any, b: any) => b.median - a.median);
-  }, [filteredData, distMetric, distGroupBy]);
+  }, [filteredData, distMetric, distGroupBy, groupMinorBuyers]);
 
 
-  // --- RENDER HELPERS ---
   const formatNum = (num: number) => num.toLocaleString('en-US', { maximumFractionDigits: 2 });
 
   const renderCustomLegend = (payload: any[], hiddenSet: Set<string>, setHiddenState: Function, allKeys: string[]) => {
@@ -563,7 +591,6 @@ export default function AuctionAnalysis() {
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #D1CEC3; border-radius: 4px; }
       `}</style>
 
-      {/* Toast Notification */}
       {toast && (
         <div className={`fixed bottom-6 right-6 p-4 rounded-xl shadow-2xl z-[100] font-bold text-sm flex items-center gap-3 animate-in slide-in-from-bottom-5 fade-in duration-300 ${toast.type === 'success' ? 'bg-[#0d9488] text-white' : 'bg-red-500 text-white'}`}>
           {toast.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <X className="w-5 h-5" />}
@@ -631,7 +658,7 @@ export default function AuctionAnalysis() {
         </div>
       )}
 
-      {/* FILTER SIDEBAR (SLIDE-IN) */}
+      {}
       <aside className={`fixed inset-y-0 right-0 w-80 bg-[#f9fafb] border-l border-gray-200 shadow-2xl z-50 transform transition-transform duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] flex flex-col ${isSidebarOpen ? 'translate-x-0' : 'translate-x-full'}`}>
         <div className="p-4 border-b border-gray-200 bg-white flex justify-between items-center shrink-0">
           <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Filter className="w-4 h-4 text-[#0d9488]" /> Data Filters</h2>
@@ -641,8 +668,6 @@ export default function AuctionAnalysis() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-          
-          {/* Status Filter */}
           <div className="mb-5">
             <label className="block text-[10px] font-bold text-gray-500 mb-1.5 uppercase tracking-wider">Lot Status</label>
             <div className="grid grid-cols-2 gap-1.5">
@@ -657,7 +682,6 @@ export default function AuctionAnalysis() {
             </div>
           </div>
 
-          {/* Date Range Filter */}
           <div className="mb-5">
             <label className="block text-[10px] font-bold text-gray-500 mb-1.5 uppercase tracking-wider">Date Range</label>
             <div className="grid grid-cols-2 gap-2">
@@ -674,8 +698,9 @@ export default function AuctionAnalysis() {
 
           <hr className="border-gray-200 my-5" />
 
-          {/* Core Multi-Selects */}
-          <MultiSelect label="Seasons" placeholder="Search seasons..." options={filterOptions.seasons} selected={selectedSeasons} onChange={setSelectedSeasons} />
+          {/* Note: Seasons is now driven by availableSeasons state rather than extracted from rawData */}
+          <MultiSelect label="Seasons" placeholder="Search seasons..." options={availableSeasons} selected={selectedSeasons} onChange={setSelectedSeasons} />
+          
           <MultiSelect label="Strategy" placeholder="Search strategy..." options={filterOptions.strategies} selected={selectedStrategies} onChange={setSelectedStrategies} />
           <MultiSelect label="Buyer" placeholder="Search buyers..." options={filterOptions.buyers} selected={selectedBuyers} onChange={setSelectedBuyers} />
           <MultiSelect label="Grade" placeholder="Search grades..." options={filterOptions.grades} selected={selectedGrades} onChange={setSelectedGrades} />
@@ -686,7 +711,6 @@ export default function AuctionAnalysis() {
 
           <hr className="border-gray-200 my-5" />
 
-          {/* Specific Cert Checkboxes */}
           <div className="mb-4">
             <label className="block text-[10px] font-bold text-gray-500 mb-2 uppercase tracking-wider">Certification Types</label>
             <div className="flex flex-col gap-2">
@@ -707,7 +731,6 @@ export default function AuctionAnalysis() {
             </div>
           </div>
 
-          {/* SKL Filter */}
           <div className="mb-6">
             <label className="block text-[10px] font-bold text-gray-500 mb-2 uppercase tracking-wider">Kenyacof Supply Chain</label>
             <label className="flex items-center gap-2 cursor-pointer">
@@ -723,27 +746,33 @@ export default function AuctionAnalysis() {
 
         </div>
         
-        {/* Sidebar Footer */}
-        <div className="p-4 border-t border-gray-200 bg-white shrink-0">
+        {}
+        <div className="p-4 border-t border-gray-200 bg-white shrink-0 space-y-2 flex flex-col">
+           <button 
+             onClick={handleApplyDataFilters}
+             className="w-full py-2 bg-[#0d9488] text-white font-bold text-xs rounded-lg hover:bg-[#0f766e] transition-colors shadow-sm"
+           >
+             Apply Data Filters & Close
+           </button>
            <button 
              onClick={() => {
                setFilterStatus('all'); setDateStart(''); setDateEnd('');
                setSelectedStrategies([]); setSelectedGrades([]); setSelectedCounties([]);
                setSelectedCooperatives([]); setSelectedWetmills([]); setSelectedCertifications([]); setSelectedCertTypes([]);
                setSelectedBuyers([]); setSelectedSKL(false);
-               if (filterOptions.seasons.length > 0) setSelectedSeasons([filterOptions.seasons[0]]);
+               setSelectedSeasons([]); 
+               fetchData([]); // Empty array triggers 'First Load' backend logic
              }}
              className="w-full py-2 bg-gray-100 text-gray-600 font-bold text-xs rounded-lg hover:bg-gray-200 transition-colors"
            >
-             Clear All Filters
+             Clear Filters & Reload Data
            </button>
         </div>
       </aside>
 
-      {/* Main Content Area */}
+      {}
       <div className="flex-1 flex flex-col min-w-0">
         
-        {/* Header */}
         <div className="p-3 md:p-4 shrink-0 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white border-b border-gray-200 z-10">
           <div>
             <h1 className="text-xl md:text-2xl font-bold text-gray-800 leading-tight">Kenyan Coffee Auction Dashboard</h1>
@@ -751,8 +780,6 @@ export default function AuctionAnalysis() {
           </div>
           
           <div className="flex flex-wrap items-center gap-3">
-            
-            {/* Upload Button */}
             <button 
               onClick={() => setShowUploadModal(true)}
               className="px-3 py-1.5 text-[11px] font-bold rounded-md bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 shadow-sm flex items-center gap-1.5 transition-colors"
@@ -760,7 +787,6 @@ export default function AuctionAnalysis() {
               <Upload className="w-3.5 h-3.5 text-[#0d9488]" /> Upload Confirmed Purchases
             </button>
 
-            {/* Download Button */}
             <button 
               onClick={handleDownloadCSV}
               className="px-3 py-1.5 text-[11px] font-bold rounded-md bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 shadow-sm flex items-center gap-1.5 transition-colors"
@@ -768,7 +794,6 @@ export default function AuctionAnalysis() {
               <Download className="w-3.5 h-3.5 text-[#0d9488]" /> Download Data
             </button>
 
-            {/* Unit Toggle */}
             <div className="flex bg-gray-100 rounded-lg p-1 shadow-inner border border-gray-200">
               {['Kilos', 'MT', 'Bags'].map(u => (
                 <button
@@ -781,15 +806,18 @@ export default function AuctionAnalysis() {
               ))}
             </div>
 
-            {/* Filters Sidebar Toggle */}
             <button 
               onClick={() => setIsSidebarOpen(true)}
               className="px-3 py-1.5 text-[11px] font-bold rounded-md bg-white border border-gray-200 text-gray-700 hover:bg-gray-50 shadow-sm flex items-center gap-1.5 transition-colors"
             >
               <Filter className="w-3.5 h-3.5 text-[#0d9488]" /> Filters
+              {selectedSeasons.length > 0 && (
+                <span className="bg-[#ccfbf1] text-[#0f766e] px-1.5 py-0.5 rounded-full text-[9px] ml-1">
+                  {selectedSeasons.length}
+                </span>
+              )}
             </button>
 
-            {/* Tab Toggles */}
             <div className="flex bg-white rounded-lg p-1 shadow-sm border border-gray-200 hidden sm:flex">
               <button 
                 className={`px-3 py-1.5 text-[11px] font-bold rounded-md transition-colors ${activeTab === 'season' ? 'bg-[#0d9488] text-white shadow-sm' : 'text-gray-600 hover:bg-gray-50'}`}
@@ -807,7 +835,7 @@ export default function AuctionAnalysis() {
           </div>
         </div>
 
-        {/* Dynamic Content */}
+        {}
         {activeTab === 'auction' ? (
           <div className="flex-1 flex flex-col min-h-0 p-3 md:p-4 gap-3 animate-in fade-in duration-300 overflow-y-auto custom-scrollbar">
             
@@ -824,43 +852,41 @@ export default function AuctionAnalysis() {
                 </div>
               </div>
 
-              {/* Certified Volume Card */}
               <div className="bg-white p-3 rounded-xl shadow-sm border border-gray-200 border-l-4 border-l-[#D97706] flex flex-col justify-between">
-                
-                {/* Header Row with Badges */}
                 <div className="flex justify-between items-start mb-1">
                   <h3 className="text-[10px] font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
                     <CheckCircle2 className="w-3.5 h-3.5" /> Certified Volume
                   </h3>
                   <div className="flex items-center gap-1.5">
-                    {/* SKL Volume Badge */}
                     <div className="text-[9px] font-bold text-[#0d9488] bg-[#0d9488]/10 px-1.5 py-0.5 rounded">
                       SKL: {formatNum(kpis.sklVol || 0)}
                     </div>
-                    {/* Percentage Badge */}
                     <div className="text-[9px] font-bold text-[#D97706] bg-[#D97706]/10 px-1.5 py-0.5 rounded">
                       {kpis.totalVolume > 0 ? formatNum((kpis.certifiedVolume / kpis.totalVolume) * 100) : 0}%
                     </div>
                   </div>
                 </div>
 
-                {/* Main Volume Number */}
                 <div className="flex items-baseline gap-1.5 mb-1.5">
                   <span className="text-xl font-black text-gray-800 leading-none">{formatNum(kpis.certifiedVolume)}</span>
                   <span className="text-[9px] font-bold text-gray-500">{unit}</span>
                 </div>
 
-                {/* Specific Certs Bar Chart */}
-                <div className="h-10 w-full mt-auto">
-                   <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={certChartData} layout="vertical" margin={{ top: 0, right: 35, left: -25, bottom: 0 }}>
-                        <XAxis type="number" hide />
-                        <YAxis type="category" dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 8, fill: '#8B8A81', fontWeight: 'bold'}} width={40} />
-                        <Bar dataKey="value" fill="#14B8A6" radius={[0, 2, 2, 0]} barSize={6}>
-                          <LabelList dataKey="value" position="right" formatter={(v: number) => v > 0 ? formatNum(v) : ''} style={{ fontSize: '8px', fill: '#4A4941', fontWeight: 'bold' }} />
-                        </Bar>
-                      </BarChart>
-                   </ResponsiveContainer>
+                <div className="mt-auto flex justify-between items-center pt-2 border-t border-gray-100">
+                   <div className="flex flex-col">
+                     <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">AAA</span>
+                     <span className="text-xs font-black text-gray-700">{formatNum(kpis.aaaVol)}</span>
+                   </div>
+                   <div className="w-[1px] h-6 bg-gray-200"></div>
+                   <div className="flex flex-col">
+                     <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">RFA</span>
+                     <span className="text-xs font-black text-gray-700">{formatNum(kpis.rfaVol)}</span>
+                   </div>
+                   <div className="w-[1px] h-6 bg-gray-200"></div>
+                   <div className="flex flex-col">
+                     <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">CAFE</span>
+                     <span className="text-xs font-black text-gray-700">{formatNum(kpis.cafeVol)}</span>
+                   </div>
                 </div>
               </div>
 
@@ -892,6 +918,12 @@ export default function AuctionAnalysis() {
                     <BarChart3 className="w-4 h-4 text-[#0d9488]" /> Volume Over Time
                   </h2>
                   <div className="flex items-center gap-2">
+                    {volumeStack === 'buyer' && (
+                       <label className="flex items-center gap-1.5 cursor-pointer bg-gray-100 px-2 py-1 rounded transition-colors hover:bg-gray-200">
+                         <input type="checkbox" checked={groupMinorBuyers} onChange={e => setGroupMinorBuyers(e.target.checked)} className="w-3.5 h-3.5 text-[#0d9488] rounded border-gray-300 focus:ring-[#0d9488]" />
+                         <span className="text-[10px] font-bold text-gray-600 uppercase">Group Minor Buyers</span>
+                       </label>
+                    )}
                     <label className="text-[10px] font-bold text-gray-500 uppercase">Stack By:</label>
                     <select 
                       className="bg-gray-50 border border-gray-300 text-[11px] rounded flex-1 focus:ring-[#0d9488] focus:border-[#0d9488] block px-2 py-1 font-medium"
@@ -953,13 +985,18 @@ export default function AuctionAnalysis() {
                         className="bg-gray-50 border border-gray-300 text-[11px] rounded focus:ring-[#0d9488] focus:border-[#0d9488] block px-2 py-1 font-medium"
                         value={priceMetric} onChange={e => setPriceMetric(e.target.value)}
                       >
-                        <option value="confirmed_price">Confirmed Price</option>
-                        <option value="floor_price">Floor Price</option>
-                        <option value="confirmed_price_usc">Confirmed Price (USc/lb)</option>
+                        <option value="price">Price</option>
+                        <option value="price_usc">Price (USc/lb)</option>
                         <option value="differential">Differential (USc/lb)</option>
                       </select>
                     </div>
                     <div className="flex items-center gap-2">
+                      {priceStack === 'buyer' && (
+                         <label className="flex items-center gap-1.5 cursor-pointer bg-gray-100 px-2 py-1 rounded transition-colors hover:bg-gray-200">
+                           <input type="checkbox" checked={groupMinorBuyers} onChange={e => setGroupMinorBuyers(e.target.checked)} className="w-3.5 h-3.5 text-[#0d9488] rounded border-gray-300 focus:ring-[#0d9488]" />
+                           <span className="text-[10px] font-bold text-gray-600 uppercase">Group Minor Buyers</span>
+                         </label>
+                      )}
                       <label className="text-[10px] font-bold text-gray-500 uppercase">Compare By:</label>
                       <select 
                         className="bg-gray-50 border border-gray-300 text-[11px] rounded focus:ring-[#0d9488] focus:border-[#0d9488] block px-2 py-1 font-medium"
@@ -1024,13 +1061,18 @@ export default function AuctionAnalysis() {
                         className="bg-gray-50 border border-gray-300 text-[11px] rounded focus:ring-[#0d9488] focus:border-[#0d9488] block px-2 py-1 font-medium"
                         value={distMetric} onChange={e => setDistMetric(e.target.value)}
                       >
-                        <option value="confirmed_price">Confirmed Price</option>
-                        <option value="floor_price">Floor Price</option>
-                        <option value="confirmed_price_usc">Confirmed Price (USc/lb)</option>
+                        <option value="price">Price</option>
+                        <option value="price_usc">Price (USc/lb)</option>
                         <option value="differential">Differential (USc/lb)</option>
                       </select>
                     </div>
                     <div className="flex items-center gap-2">
+                      {distGroupBy === 'buyer' && (
+                         <label className="flex items-center gap-1.5 cursor-pointer bg-gray-100 px-2 py-1 rounded transition-colors hover:bg-gray-200">
+                           <input type="checkbox" checked={groupMinorBuyers} onChange={e => setGroupMinorBuyers(e.target.checked)} className="w-3.5 h-3.5 text-[#0d9488] rounded border-gray-300 focus:ring-[#0d9488]" />
+                           <span className="text-[10px] font-bold text-gray-600 uppercase">Group Minor Buyers</span>
+                         </label>
+                      )}
                       <label className="text-[10px] font-bold text-gray-500 uppercase">Group By:</label>
                       <select 
                         className="bg-gray-50 border border-gray-300 text-[11px] rounded focus:ring-[#0d9488] focus:border-[#0d9488] block px-2 py-1 font-medium"
