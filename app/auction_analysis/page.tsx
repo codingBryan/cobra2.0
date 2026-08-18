@@ -207,7 +207,8 @@ export default function AuctionAnalysis() {
     formData.append('file', uploadFile);
 
     try {
-      const response = await fetch('/api/upload_confirmed_purchases', {
+      const upload_url = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL + '/api/upload_confirmed_purchases'
+      const response = await fetch(upload_url,{
         method: 'POST',
         body: formData,
       });
@@ -305,40 +306,62 @@ export default function AuctionAnalysis() {
     });
   }, [rawData, filterStatus, dateStart, dateEnd, selectedSeasons, selectedStrategies, selectedGrades, selectedCounties, selectedCooperatives, selectedWetmills, selectedCertifications, selectedBuyers, selectedCertTypes, selectedSKL]);
 
-  const handleDownloadCSV = () => {
+   const handleDownloadCSV = () => {
     if (!filteredData || filteredData.length === 0) {
+      // Adjust this based on how your showToast or alert is implemented
       showToast('No data available to download based on current filters.', 'error');
       return;
     }
 
-    const baseHeaders = Object.keys(filteredData[0]);
+    // Extract all unique columns from the entire dataset, not just the first row
+    const uniqueKeys = new Set<string>();
+    
+    // EXPLICITLY REQUIRE THESE COLUMNS TO BE INCLUDED
+    uniqueKeys.add('region');
+    uniqueKeys.add('grower_code');
+    uniqueKeys.add('lot_id');
+
+    filteredData.forEach(row => {
+      if (row) {
+        Object.keys(row).forEach(key => uniqueKeys.add(key));
+      }
+    });
+    
+    // Remove differential if it naturally occurred to avoid duplicates, we append it manually
+    uniqueKeys.delete('differential');
+    
+    const baseHeaders = Array.from(uniqueKeys);
     const headers = [...baseHeaders, 'differential'];
 
     const csvRows = filteredData.map(row => {
       const diff = getPrice(row, 'differential');
+      
       return headers.map(header => {
-        let val = header === 'differential' ? (diff !== null ? Number(diff).toFixed(2) : '') : row[header];
-        if (val === null || val === undefined) val = '';
-        let str = String(val);
-        str = str.replace(/"/g, '""');
-        if (str.search(/("|,|\n)/g) >= 0) str = `"${str}"`;
-        return str;
+        let value;
+        if (header === 'differential') {
+          value = diff;
+        } else {
+          value = row[header];
+        }
+        
+        // Handle null/undefined and escape commas/quotes to prevent CSV breakage
+        const stringValue = value !== null && value !== undefined ? String(value) : '';
+        const escapedString = stringValue.replace(/"/g, '""');
+        return `"${escapedString}"`;
       }).join(',');
     });
 
-    const csvString = [headers.join(','), ...csvRows].join('\n');
-    const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-    const url = window.URL.createObjectURL(blob);
+    const csvContent = [headers.join(','), ...csvRows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    
     const link = document.createElement('a');
-    
-    link.href = url;
-    const dateStr = new Date().toISOString().split('T')[0];
-    link.setAttribute('download', `Kenyan_Auction_Data_${dateStr}.csv`);
-    
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'auction_data_export.csv');
+    link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
   };
 
   const kpis = useMemo(() => {
