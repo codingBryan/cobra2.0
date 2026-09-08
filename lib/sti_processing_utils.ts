@@ -1519,7 +1519,36 @@ export async function debit_credit_processing(
           }
       }
   }
-  
+
+  // --- 10. Sweepings Cleanup ---
+  // After all processes for this run have been inserted, sweep the whole table for
+  // BA- batches that were left with strategy = 'UNDEFINED' and normalize them to SWEEPINGS.
+  try {
+      interface SweepingsBatchRow extends RowDataPacket {
+          id: number;
+          batch_number: string;
+      }
+
+      const baSweepingsBatches = await query<SweepingsBatchRow[]>({
+          query: `SELECT id, batch_number FROM daily_strategy_processing WHERE strategy = 'UNDEFINED' AND batch_number LIKE 'BA-%'`,
+      });
+
+      if (baSweepingsBatches && baSweepingsBatches.length > 0) {
+          console.log(`[DEBIT/CREDIT] Found ${baSweepingsBatches.length} BA- batch(es) with UNDEFINED strategy:`,
+              baSweepingsBatches.map(b => ({ id: b.id, batch_number: b.batch_number })));
+
+          const result = await query<ResultSetHeader>({
+              query: `UPDATE daily_strategy_processing
+                      SET strategy = 'SWEEPINGS', input_hedge_level_usc_lb = 0, input_cost_usd_50 = 0, input_differential = 0
+                      WHERE strategy = 'UNDEFINED' AND batch_number LIKE 'BA-%'`,
+          });
+
+          console.log(`[DEBIT/CREDIT] Updated ${result?.affectedRows ?? 0} BA- batch(es) to SWEEPINGS.`);
+      }
+  } catch (error) {
+      console.error(`[DEBIT/CREDIT] Failed to update BA- SWEEPINGS batches.`, error);
+  }
+
   return new_activity_list;
 }
 

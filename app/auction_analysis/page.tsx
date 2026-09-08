@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend, LabelList
 } from 'recharts';
-import { Activity, BarChart3, Filter, BoxSelect, DollarSign, Layers, CheckCircle2, X, Upload, Download } from 'lucide-react';
+import { Activity, BarChart3, Filter, BoxSelect, DollarSign, Layers, CheckCircle2, X, Upload, Download, Users, TrendingUp } from 'lucide-react';
 
 const COLORS = [
   '#0d9488', '#D97706', '#3B82F6', '#8B5CF6', '#EC4899', 
@@ -40,6 +40,14 @@ const BoxPlotShape = (props: any) => {
   );
 };
 
+// Bar shape for projection charts: solid for historical sales, hatched/translucent for projected ones.
+// Recharts forwards the Bar's own `fill` into the shape's props, so no extra plumbing is needed.
+const ProjectedBarShape = (props: any) => {
+  const { x, y, width, height, payload, fill } = props;
+  const isProjected = !!payload?._isProjected;
+  return <rect x={x} y={y} width={width} height={Math.max(0, height)} fill={fill} fillOpacity={isProjected ? 0.35 : 1} stroke={isProjected ? fill : 'none'} strokeWidth={isProjected ? 1.5 : 0} strokeDasharray={isProjected ? '3 2' : undefined} />;
+};
+
 function quantile(arr: number[], q: number) {
   const sorted = arr.slice().sort((a, b) => a - b);
   const pos = (sorted.length - 1) * q;
@@ -49,28 +57,99 @@ function quantile(arr: number[], q: number) {
   return sorted[base];
 }
 
-// Reusable MultiSelect Component
-const MultiSelect = ({ label, options, selected, onChange, placeholder }: any) => {
+// Simple ordinary-least-squares line of best fit, used to project grade volumes/prices forward.
+function linearRegression(points: { x: number, y: number }[]) {
+  const n = points.length;
+  if (n < 2) return null;
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  points.forEach(p => { sumX += p.x; sumY += p.y; sumXY += p.x * p.y; sumXX += p.x * p.x; });
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return null;
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  return { slope, intercept };
+}
+
+const PROJECTION_HORIZON = 2;
+
+// A tightly-padded [min, max] domain for a numeric axis, computed straight from the actual finite
+// values present across the given keys. Using this instead of Recharts' 'auto' avoids the axis
+// occasionally "nice-rounding" itself into a much wider range than the data (which reads as the
+// line looking flattened/stretched) — most noticeable on charts with very few data points.
+function getPaddedDomain(data: any[], keys: string[]): [number, number] {
+  let min = Infinity, max = -Infinity;
+  data.forEach(row => {
+    keys.forEach(k => {
+      const v = row[k];
+      if (typeof v === 'number' && isFinite(v)) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+    });
+  });
+  if (!isFinite(min) || !isFinite(max)) return [0, 1];
+  if (min === max) {
+    const pad = Math.abs(min) * 0.1 || 1;
+    return [min - pad, max + pad];
+  }
+  const pad = (max - min) * 0.12;
+  return [min - pad, max + pad];
+}
+
+// Multiple OLS regression y = b0 + b1*x1 + b2*x2 (via the 3x3 normal-equations, solved with Cramer's rule).
+// Used to project a grade's price/differential from BOTH the sale index and its volume, since the two move together.
+function multiLinearRegression(points: { x1: number, x2: number, y: number }[]) {
+  const n = points.length;
+  if (n < 3) return null;
+  let sX1 = 0, sX2 = 0, sY = 0, sX1X1 = 0, sX2X2 = 0, sX1X2 = 0, sX1Y = 0, sX2Y = 0;
+  points.forEach(p => {
+    sX1 += p.x1; sX2 += p.x2; sY += p.y;
+    sX1X1 += p.x1 * p.x1; sX2X2 += p.x2 * p.x2; sX1X2 += p.x1 * p.x2;
+    sX1Y += p.x1 * p.y; sX2Y += p.x2 * p.y;
+  });
+  const A = [[n, sX1, sX2], [sX1, sX1X1, sX1X2], [sX2, sX1X2, sX2X2]];
+  const B = [sY, sX1Y, sX2Y];
+  const det3 = (m: number[][]) =>
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+    m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  const D = det3(A);
+  if (Math.abs(D) < 1e-9) return null;
+  const withCol = (col: number) => A.map((row, i) => row.map((v, j) => j === col ? B[i] : v));
+  return { intercept: det3(withCol(0)) / D, slopeSale: det3(withCol(1)) / D, slopeVolume: det3(withCol(2)) / D };
+}
+
+// Reusable MultiSelect Component. `badgeLayout` controls where selected-item badges go:
+// 'wrap' (default) — above the input, wrapping to multiple rows.
+// 'row' — above the input, on one horizontally-scrollable line.
+// 'side' — to the right of the input, stacked vertically in a scrollable column.
+const MultiSelect = ({ label, options, selected, onChange, placeholder, badgeLayout = 'wrap' }: any) => {
   const [search, setSearch] = useState('');
   const [isOpen, setIsOpen] = useState(false);
-  
-  const filteredOptions = options.filter((o: string) => !selected.includes(o) && o.toLowerCase().includes(search.toLowerCase()));
 
-  return (
-    <div className="mb-4 relative">
-      <label className="block text-[10px] font-bold text-gray-500 mb-1 uppercase tracking-wider">{label}</label>
-      
-      {selected.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {selected.map((sel: string) => (
-              <span key={sel} className="inline-flex items-center gap-1 bg-[#ccfbf1] text-[#0f766e] px-2 py-0.5 rounded-md text-[10px] font-bold border border-[#0d9488]/20 shadow-sm max-w-full">
-                <span className="truncate">{sel}</span> 
-                <X className="w-3 h-3 cursor-pointer shrink-0 hover:text-red-600 transition-colors" onClick={() => onChange(selected.filter((s: string) => s !== sel))} />
-              </span>
-            ))}
-          </div>
-      )}
+  // Options aren't always strings (e.g. sale numbers can come through as numbers), so coerce before
+  // doing string operations on them.
+  const filteredOptions = options.filter((o: any) => !selected.includes(o) && String(o).toLowerCase().includes(search.toLowerCase()));
 
+  const badgeContainerClass = badgeLayout === 'side'
+    ? 'flex flex-col gap-1.5 max-h-[76px] overflow-y-auto custom-scrollbar shrink-0 w-28'
+    : badgeLayout === 'row'
+      ? 'flex flex-nowrap overflow-x-auto gap-1.5 mb-2 custom-scrollbar pb-1'
+      : 'flex flex-wrap gap-1.5 mb-2';
+
+  const badges = selected.length > 0 && (
+    <div className={badgeContainerClass}>
+      {selected.map((sel: any) => (
+        <span key={sel} className={`inline-flex items-center gap-1 bg-[#ccfbf1] text-[#0f766e] px-2 py-0.5 rounded-md text-[10px] font-bold border border-[#0d9488]/20 shadow-sm max-w-full ${badgeLayout !== 'wrap' ? 'shrink-0' : ''}`}>
+          <span className="truncate">{sel}</span>
+          <X className="w-3 h-3 cursor-pointer shrink-0 hover:text-red-600 transition-colors" onClick={() => onChange(selected.filter((s: any) => s !== sel))} />
+        </span>
+      ))}
+    </div>
+  );
+
+  const inputAndDropdown = (
+    <div className="relative flex-1 min-w-0">
       <input
         type="text"
         className="w-full bg-gray-50 border border-gray-300 rounded-lg px-3 py-1.5 text-xs focus:ring-[#0d9488] focus:border-[#0d9488] shadow-sm transition-colors"
@@ -80,23 +159,40 @@ const MultiSelect = ({ label, options, selected, onChange, placeholder }: any) =
         onFocus={() => setIsOpen(true)}
         onBlur={() => setTimeout(() => setIsOpen(false), 200)}
       />
-      
+
       {isOpen && filteredOptions.length > 0 && (
          <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-48 overflow-y-auto custom-scrollbar">
-           {filteredOptions.map((opt: string) => (
-             <div 
-                key={opt} 
-                className="px-3 py-2 text-xs cursor-pointer hover:bg-gray-50 border-b border-gray-100 last:border-0 truncate" 
-                onMouseDown={(e) => { 
-                    e.preventDefault(); 
-                    onChange([...selected, opt]); 
-                    setSearch(''); 
+           {filteredOptions.map((opt: any) => (
+             <div
+                key={opt}
+                className="px-3 py-2 text-xs cursor-pointer hover:bg-gray-50 border-b border-gray-100 last:border-0 truncate"
+                onMouseDown={(e) => {
+                    e.preventDefault();
+                    onChange([...selected, opt]);
+                    setSearch('');
                 }}
              >
                  {opt}
              </div>
            ))}
          </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className={badgeLayout === 'side' ? '' : 'mb-4'}>
+      {label && <label className="block text-[10px] font-bold text-gray-500 mb-1 uppercase tracking-wider">{label}</label>}
+      {badgeLayout === 'side' ? (
+        <div className="flex gap-2 items-start">
+          {inputAndDropdown}
+          {badges}
+        </div>
+      ) : (
+        <>
+          {badges}
+          {inputAndDropdown}
+        </>
       )}
     </div>
   );
@@ -145,6 +241,20 @@ export default function AuctionAnalysis() {
   // Legend Visibility State
   const [hiddenVolumeSeries, setHiddenVolumeSeries] = useState<Set<string>>(new Set());
   const [hiddenPriceSeries, setHiddenPriceSeries] = useState<Set<string>>(new Set());
+
+  // Season Analysis Tab Controls
+  const [seasonAnalysisSeason, setSeasonAnalysisSeason] = useState('');
+  const [seasonAnalysisSales, setSeasonAnalysisSales] = useState<string[]>([]);
+  const [projectionMetric, setProjectionMetric] = useState('price');
+  const [projectionGroupBy, setProjectionGroupBy] = useState('grade');
+  const [seasonBuyers, setSeasonBuyers] = useState<string[]>([]);
+  const [buyerPriceMetric, setBuyerPriceMetric] = useState('price');
+  const [buyerMixGroupBy, setBuyerMixGroupBy] = useState('grade');
+
+  // Season Analysis Legend Visibility State
+  const [hiddenProjectionSeries, setHiddenProjectionSeries] = useState<Set<string>>(new Set());
+  const [hiddenBuyerTrendSeries, setHiddenBuyerTrendSeries] = useState<Set<string>>(new Set());
+  const [hiddenBuyerMixSeries, setHiddenBuyerMixSeries] = useState<Set<string>>(new Set());
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -524,6 +634,380 @@ export default function AuctionAnalysis() {
     }).filter(Boolean).sort((a: any, b: any) => b.median - a.median);
   }, [filteredData, distMetric, distGroupBy, groupMinorBuyers]);
 
+  // ============================================================
+  // SEASON ANALYSIS: shared helpers — everything below compares SALE TO SALE
+  // within one selected season, not season to season.
+  // ============================================================
+
+  // Seasons present in the currently loaded/filtered data, chronological (string) order.
+  const seasonsSorted = useMemo(() => {
+    return Array.from(new Set(filteredData.map(d => d.season).filter(Boolean))).sort((a, b) => String(a).localeCompare(String(b)));
+  }, [filteredData]);
+
+  // Default (and auto-correct) the season picker to the most recent loaded season.
+  useEffect(() => {
+    if (seasonsSorted.length === 0) return;
+    if (!seasonAnalysisSeason || !seasonsSorted.includes(seasonAnalysisSeason)) {
+      setSeasonAnalysisSeason(seasonsSorted[seasonsSorted.length - 1]);
+    }
+  }, [seasonsSorted, seasonAnalysisSeason]);
+
+  // Every sale number that belongs to the selected season, in chronological order.
+  const salesInSeason = useMemo(() => {
+    if (!seasonAnalysisSeason) return [];
+    return Array.from(new Set(
+      filteredData.filter(d => d.season === seasonAnalysisSeason).map(d => d.sale_number).filter(v => v !== null && v !== undefined && String(v).trim() !== '')
+    )).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+  }, [filteredData, seasonAnalysisSeason]);
+
+  // Default to the last 10 sales of the selected season (most recent), and re-default whenever the season (or its sale list) changes.
+  const DEFAULT_SALE_COUNT = 10;
+  useEffect(() => {
+    setSeasonAnalysisSales(salesInSeason.slice(-DEFAULT_SALE_COUNT));
+  }, [salesInSeason]);
+
+  // Default the Buyer Deep-Dive to Kenyacof, once, as soon as it's available in the buyer list.
+  const buyerDefaultApplied = useRef(false);
+  useEffect(() => {
+    if (buyerDefaultApplied.current) return;
+    const match = filterOptions.buyers.find((b: string) => String(b).toLowerCase() === 'kenyacof');
+    if (match) {
+      setSeasonBuyers([match]);
+      buyerDefaultApplied.current = true;
+    }
+  }, [filterOptions.buyers]);
+
+  // Whichever sales are actually selected, kept in chronological order for the x-axis.
+  const saleAxis = useMemo(() => salesInSeason.filter(s => seasonAnalysisSales.includes(s)), [salesInSeason, seasonAnalysisSales]);
+
+  // The working dataset for every chart/table below: selected season, selected sales only.
+  const saleScopedData = useMemo(() => {
+    if (!seasonAnalysisSeason || seasonAnalysisSales.length === 0) return [];
+    const saleSet = new Set(seasonAnalysisSales);
+    return filteredData.filter(d => d.season === seasonAnalysisSeason && saleSet.has(d.sale_number));
+  }, [filteredData, seasonAnalysisSeason, seasonAnalysisSales]);
+
+  const rankByVolume = (rows: any[], field: string, topN: number) => {
+    const totals: Record<string, number> = {};
+    rows.forEach(d => {
+      const key = d[field];
+      if (!key) return;
+      const w = (parseFloat(d.weight) || 0) * weightMultiplier;
+      totals[key] = (totals[key] || 0) + w;
+    });
+    return Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, topN).map(([k]) => k);
+  };
+
+  // Grade Projections can group by either Grade or Strategy.
+  const projectionField = projectionGroupBy === 'strategy' ? 'strategy' : 'grade';
+  const projectionCategories = useMemo(() => rankByVolume(saleScopedData, projectionField, 8), [saleScopedData, projectionField, weightMultiplier]);
+
+  // Builds { sale_number -> { category -> { sum, weight (for price), vol } } } for a given field/metric.
+  const buildSaleCategoryStats = (rows: any[], field: string, categories: string[], metric: string) => {
+    const bySaleCat: Record<string, Record<string, { sum: number, weight: number, vol: number }>> = {};
+    rows.forEach(d => {
+      const sale = d.sale_number;
+      const cat = d[field];
+      if (!sale || !cat || !categories.includes(cat)) return;
+      const w = parseFloat(d.weight) || 0;
+      if (w <= 0) return;
+      if (!bySaleCat[sale]) bySaleCat[sale] = {};
+      if (!bySaleCat[sale][cat]) bySaleCat[sale][cat] = { sum: 0, weight: 0, vol: 0 };
+      bySaleCat[sale][cat].vol += w * weightMultiplier;
+      const price = getPrice(d, metric);
+      if (price !== null) {
+        bySaleCat[sale][cat].sum += price * w;
+        bySaleCat[sale][cat].weight += w;
+      }
+    });
+    return bySaleCat;
+  };
+
+  // Overall (all grades/strategies combined) weighted-average of a metric, per sale — used to plot
+  // Differential for comparison alongside whatever price metric a chart is currently showing.
+  const buildSaleAvgMetric = (rows: any[], metric: string) => {
+    const bySale: Record<string, { sum: number, weight: number }> = {};
+    rows.forEach(d => {
+      const sale = d.sale_number;
+      if (!sale) return;
+      const w = parseFloat(d.weight) || 0;
+      if (w <= 0) return;
+      const val = getPrice(d, metric);
+      if (val === null) return;
+      if (!bySale[sale]) bySale[sale] = { sum: 0, weight: 0 };
+      bySale[sale].sum += val * w;
+      bySale[sale].weight += w;
+    });
+    return bySale;
+  };
+
+  // Volume by grade/strategy, sale by sale — always shown as its own bar chart alongside the Grade Projections.
+  const volumeByCategorySaleData = useMemo(() => {
+    const stats = buildSaleCategoryStats(saleScopedData, projectionField, projectionCategories, 'price');
+    return saleAxis.map(sale => {
+      const row: any = { sale_number: sale };
+      projectionCategories.forEach(c => {
+        row[c] = stats[sale]?.[c] ? stats[sale][c].vol : 0;
+      });
+      return row;
+    });
+  }, [saleScopedData, projectionField, projectionCategories, saleAxis]);
+
+  // Whichever price-like metric is being projected (Price / USc per lb / Differential), by grade/strategy, sale by sale.
+  const projectionPriceSource = useMemo(() => {
+    const stats = buildSaleCategoryStats(saleScopedData, projectionField, projectionCategories, projectionMetric);
+    return saleAxis.map(sale => {
+      const row: any = { sale_number: sale };
+      projectionCategories.forEach(c => {
+        const cell = stats[sale]?.[c];
+        row[c] = cell && cell.weight > 0 ? cell.sum / cell.weight : null;
+      });
+      return row;
+    });
+  }, [saleScopedData, projectionField, projectionCategories, saleAxis, projectionMetric]);
+
+  // ---- Grade projections ----
+  // Volume gets a plain line of best fit over the sale index. Price/differential is then projected with a
+  // volume-aware regression (price ~ sale index + volume) so the two move together — e.g. a grade trending
+  // toward higher volume gets projected toward whatever price that volume trend implies. Falls back to a
+  // plain sale-index trend when there isn't enough paired data for the coupled model.
+  const projectionResults = useMemo(() => {
+    const n = saleAxis.length;
+    const results: Record<string, {
+      lastValue: number | null, nextValue: number | null, pctChange: number | null, usedVolumeModel: boolean,
+      volumeLast: number | null, volumeNext: number | null, volumePctChange: number | null,
+      volReg: { slope: number, intercept: number } | null,
+      multiReg: { intercept: number, slopeSale: number, slopeVolume: number } | null,
+      simpleReg: { slope: number, intercept: number } | null,
+    }> = {};
+
+    projectionCategories.forEach(category => {
+      // Volume side: plain trend over the sale index.
+      const volPoints: { x: number, y: number }[] = [];
+      volumeByCategorySaleData.forEach((row: any, idx: number) => {
+        const v = row[category];
+        if (v !== null && v !== undefined && !isNaN(v)) volPoints.push({ x: idx, y: v });
+      });
+      const volReg = volPoints.length >= 2 ? linearRegression(volPoints) : null;
+      const volumeLast = volPoints.length > 0 ? volPoints[volPoints.length - 1].y : null;
+      const volumeNext = volReg ? Math.max(0, volReg.slope * n + volReg.intercept) : null;
+      const volumePctChange = (volumeLast !== null && volumeNext !== null && volumeLast !== 0) ? ((volumeNext - volumeLast) / volumeLast) * 100 : null;
+
+      // Price/differential side: paired with that same sale's volume wherever both exist.
+      const pairedPoints: { x1: number, x2: number, y: number }[] = [];
+      const simplePoints: { x: number, y: number }[] = [];
+      projectionPriceSource.forEach((row: any, idx: number) => {
+        const y = row[category];
+        if (y === null || y === undefined || isNaN(y)) return;
+        simplePoints.push({ x: idx, y });
+        const vol = volumeByCategorySaleData[idx]?.[category];
+        if (vol !== null && vol !== undefined && !isNaN(vol)) pairedPoints.push({ x1: idx, x2: vol, y });
+      });
+
+      const multiReg = pairedPoints.length >= 3 ? multiLinearRegression(pairedPoints) : null;
+      const simpleReg = simplePoints.length >= 2 ? linearRegression(simplePoints) : null;
+      const lastValue = simplePoints.length > 0 ? simplePoints[simplePoints.length - 1].y : null;
+
+      let nextValue: number | null = null;
+      let usedVolumeModel = false;
+      if (multiReg && volumeNext !== null) {
+        nextValue = multiReg.intercept + multiReg.slopeSale * n + multiReg.slopeVolume * volumeNext;
+        usedVolumeModel = true;
+      } else if (simpleReg) {
+        nextValue = simpleReg.slope * n + simpleReg.intercept;
+      }
+
+      const pctChange = (lastValue !== null && nextValue !== null && lastValue !== 0) ? ((nextValue - lastValue) / lastValue) * 100 : null;
+
+      results[category] = { lastValue, nextValue, pctChange, usedVolumeModel, volumeLast, volumeNext, volumePctChange, volReg, multiReg, simpleReg };
+    });
+
+    return results;
+  }, [projectionCategories, projectionPriceSource, volumeByCategorySaleData, saleAxis]);
+
+  // Project a category's volume/price forward by h sales beyond the last selected one, reusing the fitted regressions above.
+  const projectCategoryVolumeAt = (category: string, h: number) => {
+    const r = projectionResults[category];
+    if (!r || !r.volReg) return null;
+    return Math.max(0, r.volReg.slope * (saleAxis.length - 1 + h) + r.volReg.intercept);
+  };
+
+  const projectCategoryMetricAt = (category: string, h: number) => {
+    const r = projectionResults[category];
+    if (!r) return null;
+    const n = saleAxis.length;
+    if (r.multiReg) {
+      const vol = projectCategoryVolumeAt(category, h);
+      if (vol !== null) return r.multiReg.intercept + r.multiReg.slopeSale * (n - 1 + h) + r.multiReg.slopeVolume * vol;
+    }
+    if (r.simpleReg) return r.simpleReg.slope * (n - 1 + h) + r.simpleReg.intercept;
+    return null;
+  };
+
+  const projectionChartData = useMemo(() => {
+    const n = projectionPriceSource.length;
+    const rows: any[] = projectionPriceSource.map((row: any, idx: number) => {
+      const out: any = { sale_number: row.sale_number };
+      projectionCategories.forEach(c => {
+        out[c] = row[c] !== undefined ? row[c] : null;
+        // Seed the dashed projection series with the last real point so it connects visually.
+        out[`${c}_proj`] = idx === n - 1 ? row[c] : null;
+      });
+      return out;
+    });
+
+    for (let h = 1; h <= PROJECTION_HORIZON; h++) {
+      const futureRow: any = { sale_number: `+${h}` };
+      projectionCategories.forEach(c => {
+        futureRow[c] = null;
+        futureRow[`${c}_proj`] = projectCategoryMetricAt(c, h);
+      });
+      rows.push(futureRow);
+    }
+    return rows;
+  }, [projectionCategories, projectionPriceSource, projectionResults]);
+
+  // Volume by category, historical + projected, for the bar chart (projected bars are flagged via _isProjected).
+  const volumeProjectionChartData = useMemo(() => {
+    const rows: any[] = volumeByCategorySaleData.map((row: any) => ({ ...row, _isProjected: false }));
+    for (let h = 1; h <= PROJECTION_HORIZON; h++) {
+      const futureRow: any = { sale_number: `+${h}`, _isProjected: true };
+      projectionCategories.forEach(c => { futureRow[c] = projectCategoryVolumeAt(c, h) ?? 0; });
+      rows.push(futureRow);
+    }
+    return rows;
+  }, [projectionCategories, volumeByCategorySaleData, projectionResults]);
+
+  // ---- Buyer deep-dive (scoped to the selected season + sales) ----
+  const buyerData = useMemo(() => {
+    if (seasonBuyers.length === 0) return [];
+    return saleScopedData.filter(d => seasonBuyers.includes(d.buyer));
+  }, [saleScopedData, seasonBuyers]);
+
+  const buyerKpis = useMemo(() => {
+    let vol = 0, sum = 0, weight = 0, marketVol = 0, diffSum = 0, diffWeight = 0;
+    const gradeVol: Record<string, number> = {};
+    const stratVol: Record<string, number> = {};
+
+    saleScopedData.forEach(d => { marketVol += (parseFloat(d.weight) || 0) * weightMultiplier; });
+
+    buyerData.forEach(d => {
+      const w = parseFloat(d.weight) || 0;
+      const scaledW = w * weightMultiplier;
+      vol += scaledW;
+      if (d.grade) gradeVol[d.grade] = (gradeVol[d.grade] || 0) + scaledW;
+      if (d.strategy) stratVol[d.strategy] = (stratVol[d.strategy] || 0) + scaledW;
+      if (w > 0) {
+        const price = getPrice(d, buyerPriceMetric);
+        if (price !== null) { sum += price * w; weight += w; }
+        const diff = getPrice(d, 'differential');
+        if (diff !== null) { diffSum += diff * w; diffWeight += w; }
+      }
+    });
+
+    const topGrade = Object.entries(gradeVol).sort((a, b) => b[1] - a[1])[0];
+    const topStrategy = Object.entries(stratVol).sort((a, b) => b[1] - a[1])[0];
+
+    return {
+      totalVolume: vol,
+      avgPrice: weight > 0 ? sum / weight : 0,
+      avgDifferential: diffWeight > 0 ? diffSum / diffWeight : 0,
+      marketShare: marketVol > 0 ? (vol / marketVol) * 100 : 0,
+      topGrade: topGrade ? topGrade[0] : '-',
+      topGradeShare: topGrade && vol > 0 ? (topGrade[1] / vol) * 100 : 0,
+      topStrategy: topStrategy ? topStrategy[0] : '-',
+      topStrategyShare: topStrategy && vol > 0 ? (topStrategy[1] / vol) * 100 : 0,
+      lotCount: buyerData.length,
+    };
+  }, [buyerData, saleScopedData, weightMultiplier, buyerPriceMetric]);
+
+  const buyerGradeBreakdown = useMemo(() => {
+    const totals: Record<string, number> = {};
+    buyerData.forEach(d => {
+      if (!d.grade) return;
+      totals[d.grade] = (totals[d.grade] || 0) + (parseFloat(d.weight) || 0) * weightMultiplier;
+    });
+    return Object.entries(totals).map(([grade, volume]) => ({ grade, volume })).sort((a, b) => b.volume - a.volume).slice(0, 10);
+  }, [buyerData, weightMultiplier]);
+
+  const buyerStrategyBreakdown = useMemo(() => {
+    const totals: Record<string, number> = {};
+    buyerData.forEach(d => {
+      if (!d.strategy) return;
+      totals[d.strategy] = (totals[d.strategy] || 0) + (parseFloat(d.weight) || 0) * weightMultiplier;
+    });
+    return Object.entries(totals).map(([strategy, volume]) => ({ strategy, volume })).sort((a, b) => b.volume - a.volume);
+  }, [buyerData, weightMultiplier]);
+
+  // Selected buyer(s) vs overall market: price paid, sale by sale, plus overall differential for comparison.
+  const buyerTrendData = useMemo(() => {
+    const marketBySaleStats: Record<string, { sum: number, weight: number }> = {};
+    const diffBySaleStats = buildSaleAvgMetric(saleScopedData, 'differential');
+    saleScopedData.forEach(d => {
+      const sale = d.sale_number;
+      if (!sale) return;
+      const w = parseFloat(d.weight) || 0;
+      if (w <= 0) return;
+      if (!marketBySaleStats[sale]) marketBySaleStats[sale] = { sum: 0, weight: 0 };
+      const price = getPrice(d, buyerPriceMetric);
+      if (price !== null) { marketBySaleStats[sale].sum += price * w; marketBySaleStats[sale].weight += w; }
+    });
+
+    const buyerBySaleStats: Record<string, Record<string, { sum: number, weight: number }>> = {};
+    buyerData.forEach(d => {
+      const sale = d.sale_number;
+      if (!sale) return;
+      const w = parseFloat(d.weight) || 0;
+      if (w <= 0) return;
+      if (!buyerBySaleStats[sale]) buyerBySaleStats[sale] = {};
+      if (!buyerBySaleStats[sale][d.buyer]) buyerBySaleStats[sale][d.buyer] = { sum: 0, weight: 0 };
+      const price = getPrice(d, buyerPriceMetric);
+      if (price !== null) { buyerBySaleStats[sale][d.buyer].sum += price * w; buyerBySaleStats[sale][d.buyer].weight += w; }
+    });
+
+    return saleAxis.map(sale => {
+      const row: any = { sale_number: sale };
+      const m = marketBySaleStats[sale];
+      row['Market Avg'] = m && m.weight > 0 ? m.sum / m.weight : null;
+      const diff = diffBySaleStats[sale];
+      row['Avg Differential'] = diff && diff.weight > 0 ? diff.sum / diff.weight : null;
+      seasonBuyers.forEach(b => {
+        const cell = buyerBySaleStats[sale]?.[b];
+        row[b] = cell && cell.weight > 0 ? cell.sum / cell.weight : null;
+      });
+      return row;
+    });
+  }, [saleScopedData, buyerData, saleAxis, seasonBuyers, buyerPriceMetric]);
+
+  // Explicit, tightly-padded domains for the buyer trend chart's two axes (see getPaddedDomain).
+  const buyerTrendPriceDomain = useMemo(() => getPaddedDomain(buyerTrendData, ['Market Avg', ...seasonBuyers]), [buyerTrendData, seasonBuyers]);
+  const buyerTrendDiffDomain = useMemo(() => getPaddedDomain(buyerTrendData, ['Avg Differential']), [buyerTrendData]);
+
+  // Grade/Strategy mix sale-by-sale — focused on the first selected buyer so it stays legible.
+  const buyerMixOverTime = useMemo(() => {
+    if (seasonBuyers.length === 0) return { data: [] as any[], keys: [] as string[] };
+    const focusBuyer = seasonBuyers[0];
+    const field = buyerMixGroupBy === 'strategy' ? 'strategy' : 'grade';
+    const rows = saleScopedData.filter(d => d.buyer === focusBuyer);
+    const cats = rankByVolume(rows, field, 8);
+
+    const stats: Record<string, Record<string, number>> = {};
+    rows.forEach(d => {
+      const sale = d.sale_number;
+      const cat = d[field];
+      if (!sale || !cat || !cats.includes(cat)) return;
+      const w = (parseFloat(d.weight) || 0) * weightMultiplier;
+      if (!stats[sale]) stats[sale] = {};
+      stats[sale][cat] = (stats[sale][cat] || 0) + w;
+    });
+
+    const data = saleAxis.map(sale => {
+      const row: any = { sale_number: sale };
+      cats.forEach(c => { row[c] = stats[sale]?.[c] || 0; });
+      return row;
+    });
+    return { data, keys: cats };
+  }, [saleScopedData, seasonBuyers, buyerMixGroupBy, saleAxis, weightMultiplier]);
 
   const formatNum = (num: number) => num.toLocaleString('en-US', { maximumFractionDigits: 2 });
 
@@ -1131,16 +1615,280 @@ export default function AuctionAnalysis() {
 
           </div>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center bg-white m-3 md:m-4 rounded-xl shadow-sm border border-gray-200">
-             <Layers className="w-12 h-12 text-gray-300 mb-3" />
-             <h2 className="text-xl font-bold text-gray-700">Season Analysis</h2>
-             <p className="text-gray-500 mt-1.5 text-sm text-center max-w-md">The season analysis module is currently under construction. Please switch back to the Auction Analysis tab to view the data.</p>
-             <button 
-                className="mt-4 px-5 py-1.5 bg-[#0d9488] text-white text-sm font-bold rounded-lg hover:bg-[#0f766e] transition-colors"
-                onClick={() => setActiveTab('auction')}
-              >
-                Back to Auction Analysis
-              </button>
+          <div className="flex-1 flex flex-col min-h-0 p-3 md:p-4 gap-2 animate-in fade-in duration-300 overflow-y-auto custom-scrollbar">
+
+            {seasonsSorted.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-xl shadow-sm border border-gray-200 py-16">
+                <Layers className="w-12 h-12 text-gray-300 mb-3" />
+                <h2 className="text-xl font-bold text-gray-700">No Season Data Loaded</h2>
+                <p className="text-gray-500 mt-1.5 text-sm text-center max-w-md">Open the Filters panel, select one or more seasons, and click &quot;Apply Data Filters&quot; to view sale-by-sale analytics.</p>
+                <button
+                  className="mt-4 px-5 py-1.5 bg-[#0d9488] text-white text-sm font-bold rounded-lg hover:bg-[#0f766e] transition-colors"
+                  onClick={() => setIsSidebarOpen(true)}
+                >
+                  Open Filters
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Sale Selector — everything below compares sale to sale within one season */}
+                <div className="bg-white p-2.5 rounded-xl shadow-sm border border-gray-200 flex flex-col gap-1 shrink-0">
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-500 mb-1 uppercase tracking-wider">Season</label>
+                      <select
+                        className="bg-gray-50 border border-gray-300 text-xs rounded-lg focus:ring-[#0d9488] focus:border-[#0d9488] block px-3 py-1.5 font-bold min-w-[160px]"
+                        value={seasonAnalysisSeason} onChange={e => setSeasonAnalysisSeason(e.target.value)}
+                      >
+                        {seasonsSorted.slice().reverse().map(s => (
+                          <option key={s} value={s}>{s}{s === seasonsSorted[seasonsSorted.length - 1] ? ' (Most Recent)' : ''}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex-1 min-w-[320px]">
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider">Sales in {seasonAnalysisSeason || 'season'} ({saleAxis.length}/{salesInSeason.length} selected)</label>
+                        <button
+                          className="text-[9px] font-bold text-[#0d9488] hover:text-[#0f766e] uppercase tracking-wider"
+                          onClick={() => setSeasonAnalysisSales(salesInSeason)}
+                        >
+                          Select All Sales
+                        </button>
+                      </div>
+                      <MultiSelect label="" placeholder="Search sale numbers..." options={salesInSeason} selected={seasonAnalysisSales} onChange={setSeasonAnalysisSales} badgeLayout="side" />
+                    </div>
+                  </div>
+                  <p className="text-[9px] text-gray-400">Grade/strategy pricing, projections, and buyer analytics below compare the selected sales sale-by-sale — defaults to the last {DEFAULT_SALE_COUNT} sales of the most recent season.</p>
+                </div>
+
+                {saleScopedData.length === 0 ? (
+                  <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-xl shadow-sm border border-gray-200 py-16">
+                    <Layers className="w-12 h-12 text-gray-300 mb-3" />
+                    <h2 className="text-lg font-bold text-gray-700">No Sales Selected</h2>
+                    <p className="text-gray-500 mt-1.5 text-sm text-center max-w-md">Select at least one sale above to view analytics.</p>
+                  </div>
+                ) : (
+                <>
+                {/* Grade Projections */}
+                <div className="bg-white p-2.5 rounded-xl shadow-sm border border-gray-200 flex flex-col shrink-0">
+                  <div className="flex flex-wrap justify-between items-center mb-1 shrink-0 gap-2">
+                    <h2 className="text-sm font-bold text-gray-800 flex items-center gap-1.5">
+                      <TrendingUp className="w-4 h-4 text-[#8B5CF6]" /> {projectionGroupBy === 'strategy' ? 'Strategy' : 'Grade'} Projections (Volume-Aware Line of Best Fit)
+                    </h2>
+                    <div className="flex items-center gap-3">
+                      <div className="flex bg-gray-100 rounded-lg p-0.5 shadow-inner border border-gray-200">
+                        {['grade', 'strategy'].map(opt => (
+                          <button
+                            key={opt}
+                            className={`px-2.5 py-1 text-[10px] font-bold rounded-md capitalize transition-colors ${projectionGroupBy === opt ? 'bg-[#8B5CF6] text-white shadow-sm' : 'text-gray-600 hover:bg-gray-200'}`}
+                            onClick={() => setProjectionGroupBy(opt)}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <label className="text-[10px] font-bold text-gray-500 uppercase">Price Metric:</label>
+                        <select
+                          className="bg-gray-50 border border-gray-300 text-[11px] rounded focus:ring-[#0d9488] focus:border-[#0d9488] block px-2 py-1 font-medium"
+                          value={projectionMetric} onChange={e => setProjectionMetric(e.target.value)}
+                        >
+                          <option value="price">Price</option>
+                          <option value="price_usc">Price (USc/lb)</option>
+                          <option value="differential">Differential (USc/lb)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {saleAxis.length < 2 ? (
+                    <div className="py-10 text-center text-gray-400 text-xs font-medium">Select at least 2 sales above to generate a linear projection.</div>
+                  ) : (
+                    <>
+                      {/* Shared legend — toggling a series here hides/shows it in both charts below, since they cover the same categories. */}
+                      {renderCustomLegend(projectionCategories.map((c, i) => ({ value: c, dataKey: c, color: COLORS[i % COLORS.length] })), hiddenProjectionSeries, setHiddenProjectionSeries, projectionCategories)}
+
+                      <h3 className="text-[11px] font-bold text-gray-600 mt-0.5 mb-0.5">Price / Differential Trend</h3>
+                      <div style={{ height: 150 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={projectionChartData} margin={{ top: 6, right: 20, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                            <XAxis dataKey="sale_number" interval={0} tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} />
+                            <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v} />
+                            <Tooltip content={<CustomTooltip />} />
+                            {projectionCategories.map((c, i) => (
+                              <Line key={c} type="monotone" dataKey={c} name={c} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 4 }} hide={hiddenProjectionSeries.has(c)} connectNulls={false} />
+                            ))}
+                            {projectionCategories.map((c, i) => (
+                              <Line key={`${c}_proj`} type="monotone" dataKey={`${c}_proj`} name={`${c} (Projected)`} legendType="none" stroke={COLORS[i % COLORS.length]} strokeWidth={2} strokeDasharray="5 4" dot={false} activeDot={{ r: 4 }} hide={hiddenProjectionSeries.has(c)} connectNulls />
+                            ))}
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+
+                      <h3 className="text-[11px] font-bold text-gray-600 mt-1.5 mb-0.5">Volume Trend ({unit}) — feeds the price projection above</h3>
+                      <div style={{ height: 150 }}>
+                        <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={volumeProjectionChartData} margin={{ top: 6, right: 20, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                            <XAxis dataKey="sale_number" interval={0} tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} />
+                            <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v} />
+                            <Tooltip content={<CustomTooltip />} />
+                            {projectionCategories.map((c, i) => (
+                              <Bar key={c} dataKey={c} name={c} stackId="a" fill={COLORS[i % COLORS.length]} shape={<ProjectedBarShape />} hide={hiddenProjectionSeries.has(c)} maxBarSize={50} />
+                            ))}
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </div>
+
+                      <p className="text-[9px] text-gray-400 mt-1 mb-0">
+                        Dashed lines and hatched bars (sale labels &quot;+1&quot;/&quot;+2&quot;) are a linear (least-squares) extrapolation across the selected sales.
+                        Where enough data exists, the price/differential trend is fitted jointly against both the sale sequence and each {projectionGroupBy}&apos;s volume, so a projected shift in volume moves the projected price with it — otherwise it falls back to a simple sale-index trend.
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                {/* Buyer Deep-Dive */}
+                <div className="bg-white p-3 rounded-xl shadow-sm border border-gray-200 flex flex-col gap-3 shrink-0">
+                  <h2 className="text-sm font-bold text-gray-800 flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-[#EC4899]" /> Buyer Deep-Dive
+                  </h2>
+                  <div className="max-w-md">
+                    <MultiSelect label="Search &amp; Select Buyer(s)" placeholder="Type a buyer name..." options={filterOptions.buyers} selected={seasonBuyers} onChange={setSeasonBuyers} />
+                  </div>
+
+                  {seasonBuyers.length === 0 ? (
+                    <div className="py-10 text-center text-gray-400 text-xs font-medium">Search and select one or more buyers above to see their buying patterns — grades, strategies, prices paid, and how these shift sale by sale.</div>
+                  ) : (
+                    <>
+                      {/* Buyer KPIs */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                        <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 flex flex-col justify-center">
+                          <h3 className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-1">Volume Bought</h3>
+                          <div className="flex items-baseline gap-1.5">
+                            <span className="text-lg font-black text-gray-800">{formatNum(buyerKpis.totalVolume)}</span>
+                            <span className="text-[10px] font-bold text-gray-500">{unit}</span>
+                          </div>
+                        </div>
+                        <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 flex flex-col justify-center">
+                          <h3 className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-1">Market Share</h3>
+                          <div className="text-lg font-black text-gray-800">{formatNum(buyerKpis.marketShare)}%</div>
+                        </div>
+                        <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 flex flex-col justify-center">
+                          <div className="flex justify-between items-center mb-1">
+                            <h3 className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Avg Price Paid</h3>
+                            <select
+                              className="bg-white border border-gray-300 text-[9px] rounded px-1 py-0.5 font-medium focus:ring-[#0d9488] focus:border-[#0d9488]"
+                              value={buyerPriceMetric} onChange={e => setBuyerPriceMetric(e.target.value)}
+                            >
+                              <option value="price">Price</option>
+                              <option value="price_usc">USc/lb</option>
+                              <option value="differential">Diff.</option>
+                            </select>
+                          </div>
+                          <div className="text-lg font-black text-gray-800">{formatNum(buyerKpis.avgPrice)}</div>
+                        </div>
+                        <div className="bg-gray-50 p-3 rounded-xl border border-gray-200 flex flex-col justify-center">
+                          <h3 className="text-[9px] font-bold text-gray-400 uppercase tracking-wider mb-1">Top Grade / Strategy</h3>
+                          <div className="text-xs font-black text-gray-800 truncate">{buyerKpis.topGrade} ({formatNum(buyerKpis.topGradeShare)}%)</div>
+                          <div className="text-[10px] font-bold text-gray-500 truncate">{buyerKpis.topStrategy} ({formatNum(buyerKpis.topStrategyShare)}%)</div>
+                        </div>
+                      </div>
+
+                      {/* Grade & Strategy breakdown */}
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <div className="flex flex-col" style={{ minHeight: '240px' }}>
+                          <h3 className="text-[11px] font-bold text-gray-600 mb-1">Volume by Grade</h3>
+                          <div className="flex-1 min-h-0 w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={buyerGradeBreakdown} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
+                                <XAxis type="number" tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v} />
+                                <YAxis type="category" dataKey="grade" interval={0} tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={80} />
+                                <Tooltip content={<CustomTooltip />} />
+                                <Bar dataKey="volume" name={`Volume (${unit})`} fill="#0d9488" radius={[0, 4, 4, 0]} maxBarSize={18}>
+                                  <LabelList dataKey="volume" position="right" style={{ fontSize: 9, fill: '#4A4941', fontWeight: 700 }} formatter={(v: number) => formatNum(v)} />
+                                </Bar>
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                        <div className="flex flex-col" style={{ minHeight: '240px' }}>
+                          <h3 className="text-[11px] font-bold text-gray-600 mb-1">Volume by Strategy</h3>
+                          <div className="flex-1 min-h-0 w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={buyerStrategyBreakdown} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e5e7eb" />
+                                <XAxis type="number" tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v} />
+                                <YAxis type="category" dataKey="strategy" interval={0} tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={80} />
+                                <Tooltip content={<CustomTooltip />} />
+                                <Bar dataKey="volume" name={`Volume (${unit})`} fill="#D97706" radius={[0, 4, 4, 0]} maxBarSize={18}>
+                                  <LabelList dataKey="volume" position="right" style={{ fontSize: 9, fill: '#4A4941', fontWeight: 700 }} formatter={(v: number) => formatNum(v)} />
+                                </Bar>
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Price trend vs market & grade/strategy mix, sale by sale */}
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <div className="flex flex-col">
+                          <h3 className="text-[11px] font-bold text-gray-600 mb-1">Price Paid vs Market Avg (Sale-by-Sale)</h3>
+                          <div style={{ height: 260 }}>
+                            <ResponsiveContainer width="100%" height="100%">
+                              <LineChart data={buyerTrendData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                                <XAxis dataKey="sale_number" interval={0} tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} />
+                                <YAxis yAxisId="left" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} domain={buyerTrendPriceDomain} tickFormatter={(v) => v.toFixed(2)} />
+                                <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} domain={buyerTrendDiffDomain} tickFormatter={(v) => v.toFixed(2)} />
+                                <Tooltip content={<CustomTooltip />} />
+                                <Legend content={(props) => renderCustomLegend(props.payload || [], hiddenBuyerTrendSeries, setHiddenBuyerTrendSeries, ['Market Avg', 'Avg Differential', ...seasonBuyers])} />
+                                <Line yAxisId="left" type="monotone" dataKey="Market Avg" name="Market Avg" stroke="#4A4941" strokeWidth={2} strokeDasharray="6 6" dot={false} activeDot={{ r: 4 }} hide={hiddenBuyerTrendSeries.has('Market Avg')} connectNulls />
+                                <Line yAxisId="right" type="monotone" dataKey="Avg Differential" name="Avg Differential" stroke="#8B5CF6" strokeWidth={2} strokeDasharray="2 3" dot={false} activeDot={{ r: 4 }} hide={hiddenBuyerTrendSeries.has('Avg Differential')} connectNulls />
+                                {seasonBuyers.map((b, i) => (
+                                  <Line yAxisId="left" key={b} type="monotone" dataKey={b} name={b} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 4 }} hide={hiddenBuyerTrendSeries.has(b)} connectNulls />
+                                ))}
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col" style={{ minHeight: '260px' }}>
+                          <div className="flex justify-between items-center mb-1 gap-2 flex-wrap">
+                            <h3 className="text-[11px] font-bold text-gray-600 truncate">{seasonBuyers[0]}&apos;s Mix, Sale-by-Sale{seasonBuyers.length > 1 ? ' (1st selected buyer)' : ''}</h3>
+                            <select
+                              className="bg-gray-50 border border-gray-300 text-[9px] rounded px-1.5 py-0.5 font-medium focus:ring-[#0d9488] focus:border-[#0d9488]"
+                              value={buyerMixGroupBy} onChange={e => setBuyerMixGroupBy(e.target.value)}
+                            >
+                              <option value="grade">By Grade</option>
+                              <option value="strategy">By Strategy</option>
+                            </select>
+                          </div>
+                          <div className="flex-1 min-h-0 w-full">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={buyerMixOverTime.data} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                                <XAxis dataKey="sale_number" interval={0} tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} />
+                                <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v} />
+                                <Tooltip content={<CustomTooltip />} />
+                                <Legend content={(props) => renderCustomLegend(props.payload || [], hiddenBuyerMixSeries, setHiddenBuyerMixSeries, buyerMixOverTime.keys)} />
+                                {buyerMixOverTime.keys.map((key, i) => (
+                                  <Bar key={key} dataKey={key} name={key} stackId="a" fill={COLORS[i % COLORS.length]} hide={hiddenBuyerMixSeries.has(key)} maxBarSize={50} />
+                                ))}
+                              </BarChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+                </>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>
