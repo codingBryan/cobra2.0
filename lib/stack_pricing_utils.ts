@@ -574,18 +574,17 @@ export async function logMissingBatchData(processNumber: string, batchNumber: st
     }
 }
 
-// --- OPTIMIZATION 1: API Caching ---
-// Caches the Python API responses in RAM to avoid expensive HTTP requests on every process loop
-let cachedValoData: { mappings: Record<string, string[]>, valos: Record<string, number> } | null = null;
-
 // --- PROCESSING FUNCTIONS ---
 const KG_TO_LBS = 2.20462;
 
 
-// Helper to fetch from your Python endpoints
-async function fetchMappingsAndValos() {
+// Helper to fetch from your Python endpoints. Callers that loop over many processes (e.g.
+// update_post_trade_variables) should call this ONCE per run and pass the result down via the
+// `mappingsAndValos` parameter on calculate_and_update_trade_variables_for_other_processes, rather
+// than letting each process re-fetch it — the mappings/valos don't change mid-run.
+async function fetchMappingsAndValos(): Promise<{ mappings: Record<string, string[]>, valos: Record<string, number> }> {
     // Replace with your actual Python API base URL if different
-    const BASE_URL = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL; 
+    const BASE_URL = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL;
     const [mapRes, valoRes] = await Promise.all([
         fetch(`${BASE_URL}/get_strategy_mappings`),
         fetch(`${BASE_URL}/get_strategy_valos`)
@@ -812,9 +811,14 @@ function getMappedStrategy(strategy: string, mappings: Record<string, string[]>)
 
 export async function calculate_and_update_trade_variables_for_other_processes(
 
-    process: DailyProcessRow, 
+    process: DailyProcessRow,
 
-    enablePush: boolean
+    enablePush: boolean,
+
+    // Optional pre-fetched mappings/valos so a caller looping over many processes can fetch these
+    // once for the whole run instead of once per process. Falls back to fetching internally when
+    // a caller doesn't supply it.
+    mappingsAndValos?: Awaited<ReturnType<typeof fetchMappingsAndValos>>
 
 ): Promise<boolean> {
 
@@ -968,9 +972,8 @@ export async function calculate_and_update_trade_variables_for_other_processes(
 
 
 
-    // --- NEW: Fetch Mappings & Valos (O(1) using cache) ---
-
-    const { mappings, valos } = await fetchMappingsAndValos();
+    // Reuse the caller-supplied mappings/valos when available so this doesn't hit the endpoints on every process.
+    const { mappings, valos } = mappingsAndValos ?? await fetchMappingsAndValos();
 
 
 
@@ -1390,9 +1393,72 @@ async function processHasMultipleOutputBatches(processId: number): Promise<boole
     return count > 1;
 }
 
+// Some output batches have "sister" batches that share the same trade economics but are recorded
+// under their own batch number suffixed with ".<n>" (e.g. CS-01540-AA.1, CS-01540-AA.2 alongside
+// the parent CS-01540-AA). Run this AFTER all trade variables have been updated: for every output
+// row whose batch_number ends in ".<n>", look up the parent row (same batch_number with the suffix
+// stripped) and copy its output_differential, output_hedge_level_usc_lb and output_cost_usd_50
+// onto the suffixed row.
+async function propagateSisterBatchTradeVariables(): Promise<void> {
+    console.log("\n--- Propagating trade variables to suffixed sister batches (.N) ---");
+
+    // Narrow with LIKE first (cheap), then confirm the actual "<base>.<digits>" shape in JS.
+    const candidates = await query<DailyStrategyProcessingRow[]>({
+        query: `SELECT id, batch_number FROM daily_strategy_processing WHERE output_qty > 0 AND batch_number LIKE '%.%'`,
+    });
+
+    if (!candidates || candidates.length === 0) {
+        console.log("No suffixed sister batches found.");
+        return;
+    }
+
+    const suffixPattern = /^(.+)\.\d+$/;
+    // De-duplicate: multiple rows can share the same suffixed batch_number (e.g. across processes).
+    const suffixedToParent = new Map<string, string>();
+    for (const row of candidates) {
+        const match = row.batch_number?.match(suffixPattern);
+        if (match) suffixedToParent.set(row.batch_number, match[1]);
+    }
+
+    if (suffixedToParent.size === 0) {
+        console.log("No suffixed sister batches found.");
+        return;
+    }
+
+    for (const [suffixedBatch, parentBatch] of suffixedToParent) {
+        // Same "latest priced row" convention used elsewhere for a batch_number lookup.
+        const parentRows = await query<DailyStrategyProcessingTradeVars[]>({
+            query: `SELECT output_differential, output_hedge_level_usc_lb, output_cost_usd_50
+                    FROM daily_strategy_processing
+                    WHERE batch_number = ? AND output_qty > 0 AND output_cost_usd_50 IS NOT NULL
+                    ORDER BY id DESC LIMIT 1`,
+            values: [parentBatch],
+        });
+
+        const parent = parentRows?.[0];
+        if (!parent) {
+            console.warn(`[Sister Batch Propagation] No priced parent batch "${parentBatch}" found for suffixed batch "${suffixedBatch}" — skipping.`);
+            continue;
+        }
+
+        await query<ResultSetHeader>({
+            query: `UPDATE daily_strategy_processing
+                    SET output_differential = ?, output_hedge_level_usc_lb = ?, output_cost_usd_50 = ?
+                    WHERE batch_number = ? AND output_qty > 0`,
+            values: [parent.output_differential, parent.output_hedge_level_usc_lb, parent.output_cost_usd_50, suffixedBatch],
+        });
+
+        console.log(`[Sister Batch Propagation] Copied trade variables from "${parentBatch}" to "${suffixedBatch}".`);
+    }
+}
+
 export async function update_post_trade_variables(excelFiles: File[] = []): Promise<string[]> {
     console.log("Starting update_post_trade_variables process.");
     const skippedProcessNumbers: string[] = [];
+
+    // Fetch strategy mappings & valos ONCE for the whole run and reuse them for every process below,
+    // instead of each process re-fetching them from the microservice.
+    const mappingsAndValos = await fetchMappingsAndValos();
 
     // 1. Strategy Updates from Excel (Standard)
     if (excelFiles.length > 0) {
@@ -1438,12 +1504,12 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
                 const multiOutput = await processHasMultipleOutputBatches(process.id);
                 if (multiOutput) {
                     console.log(`[${process.process_number}] BULKING with multiple output batches — using generic multi-input/multi-output calculation.`);
-                    await calculate_and_update_trade_variables_for_other_processes(process, true); // enablePush = true
+                    await calculate_and_update_trade_variables_for_other_processes(process, true, mappingsAndValos); // enablePush = true
                 } else {
                     await process_bulking(process, true); // enablePush = true
                 }
             } else {
-                await calculate_and_update_trade_variables_for_other_processes(process, true); // enablePush = true
+                await calculate_and_update_trade_variables_for_other_processes(process, true, mappingsAndValos); // enablePush = true
             }
         }
     }
@@ -1461,12 +1527,12 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
                 const multiOutput = await processHasMultipleOutputBatches(process.id);
                 if (multiOutput) {
                     console.log(`[${process.process_number}] BULKING with multiple output batches — using generic multi-input/multi-output calculation.`);
-                    success = await calculate_and_update_trade_variables_for_other_processes(process, false); // enablePush = false
+                    success = await calculate_and_update_trade_variables_for_other_processes(process, false, mappingsAndValos); // enablePush = false
                 } else {
                     success = await process_bulking(process, false); // enablePush = false
                 }
             } else {
-                success = await calculate_and_update_trade_variables_for_other_processes(process, false); // enablePush = false
+                success = await calculate_and_update_trade_variables_for_other_processes(process, false, mappingsAndValos); // enablePush = false
             }
             if (!success) skippedProcessNumbers.push(process.process_number);
         }
@@ -1475,6 +1541,10 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
     if (skippedProcessNumbers.length > 0) {
         console.log(`Skipped: ${skippedProcessNumbers.join(', ')}`);
     }
+
+    // Once every process has had its trade variables updated, propagate them onto any suffixed sister batches.
+    await propagateSisterBatchTradeVariables();
+
     return skippedProcessNumbers;
 }
 
@@ -1482,6 +1552,10 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
 export async function update_post_trade_variables_unorthodox(): Promise<string[]> {
     console.log("Starting update_post_trade_variables process (DB-Driven Mode).");
     const skippedProcessNumbers: string[] = [];
+
+    // Fetch strategy mappings & valos ONCE for the whole run and reuse them for every process below,
+    // instead of each process re-fetching them from the microservice.
+    const mappingsAndValos = await fetchMappingsAndValos();
 
     // --- 1. PHASE 1: Chronological Processing with "Push" ---
     // Optimization: Fetch all pending processes at once ordered by date to ensure correct dependency flow.
@@ -1500,7 +1574,7 @@ export async function update_post_trade_variables_unorthodox(): Promise<string[]
                     if (process.process_type === 'BULKING') {
                         return await process_bulking(process, true); // enablePush = true
                     } else {
-                        return await calculate_and_update_trade_variables_for_other_processes(process, true); // enablePush = true
+                        return await calculate_and_update_trade_variables_for_other_processes(process, true, mappingsAndValos); // enablePush = true
                     }
                 })();
 
@@ -1540,7 +1614,7 @@ export async function update_post_trade_variables_unorthodox(): Promise<string[]
                     if (process.process_type === 'BULKING') {
                         return await process_bulking(process, false); // enablePush = false
                     } else {
-                        return await calculate_and_update_trade_variables_for_other_processes(process, false); // enablePush = false
+                        return await calculate_and_update_trade_variables_for_other_processes(process, false, mappingsAndValos); // enablePush = false
                     }
                 })();
 
@@ -1572,6 +1646,10 @@ export async function update_post_trade_variables_unorthodox(): Promise<string[]
     } else {
         console.log("All processes updated successfully.");
     }
+
+    // Once every process has had its trade variables updated, propagate them onto any suffixed sister batches.
+    await propagateSisterBatchTradeVariables();
+
     return skippedProcessNumbers;
 }
 
