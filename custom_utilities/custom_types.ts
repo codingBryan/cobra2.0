@@ -288,7 +288,7 @@ export interface Batch {
   analysis_id:string|null;
   batch_number:string;
   strategy: string;
-  outrightPrice50kg: number; // $/50kg
+  outrightPrice50kg: number | null; // $/50kg — null means not yet priced; a real price can legitimately be 0
   quantityKg: number;
   hedgeLevelUSClb: number; // USC/lb
   composition?: Ingredient[];

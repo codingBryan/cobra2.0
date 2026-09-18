@@ -1452,6 +1452,41 @@ async function propagateSisterBatchTradeVariables(): Promise<void> {
     }
 }
 
+// A batch can get stacked (inserted into post_stack_batches by process_post_stack_updates) BEFORE its
+// price is resolved in daily_strategy_processing, leaving price_usd_50/hedge_level NULL on that
+// snapshot row — which is what the Stacks page's Batch Blender reads, so it shows "Unpriced" forever
+// even after daily_strategy_processing is later filled in, until the next full stock-file re-upload.
+// Run this AFTER trade variables have been updated (and sister batches propagated) to backfill any
+// post_stack_batches rows that are still missing a price with the now-current daily_strategy_processing value.
+// NOTE: only a genuine NULL counts as "not yet priced" — a batch legitimately priced at 0 is left alone.
+async function resyncMissingStackBatchPrices(): Promise<void> {
+    console.log("\n--- Resyncing missing post_stack_batches prices from daily_strategy_processing ---");
+
+    const result = await query<ResultSetHeader>({
+        query: `UPDATE post_stack_batches psb
+                INNER JOIN (
+                    SELECT dsp2.batch_number, dsp2.output_cost_usd_50, dsp2.output_hedge_level_usc_lb
+                    FROM daily_strategy_processing dsp2
+                    INNER JOIN (
+                        SELECT batch_number, MAX(id) as max_id
+                        FROM daily_strategy_processing
+                        WHERE output_qty > 0 AND output_cost_usd_50 IS NOT NULL
+                        GROUP BY batch_number
+                    ) latest_dsp ON dsp2.id = latest_dsp.max_id
+                ) live_price ON live_price.batch_number = psb.batch_number
+                SET psb.price_usd_50 = live_price.output_cost_usd_50,
+                    psb.hedge_level = live_price.output_hedge_level_usc_lb
+                WHERE psb.price_usd_50 IS NULL`,
+    });
+
+    const updated = result?.affectedRows ?? 0;
+    if (updated > 0) {
+        console.log(`[Stack Price Resync] Backfilled price/hedge on ${updated} previously-unpriced post_stack_batches row(s).`);
+    } else {
+        console.log("[Stack Price Resync] No unpriced post_stack_batches rows needed backfilling.");
+    }
+}
+
 export async function update_post_trade_variables(excelFiles: File[] = []): Promise<string[]> {
     console.log("Starting update_post_trade_variables process.");
     const skippedProcessNumbers: string[] = [];
@@ -1542,8 +1577,10 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
         console.log(`Skipped: ${skippedProcessNumbers.join(', ')}`);
     }
 
-    // Once every process has had its trade variables updated, propagate them onto any suffixed sister batches.
+    // Once every process has had its trade variables updated, propagate them onto any suffixed sister batches,
+    // then backfill any stacked batches that were snapshotted before they had a price.
     await propagateSisterBatchTradeVariables();
+    await resyncMissingStackBatchPrices();
 
     return skippedProcessNumbers;
 }
@@ -1647,8 +1684,10 @@ export async function update_post_trade_variables_unorthodox(): Promise<string[]
         console.log("All processes updated successfully.");
     }
 
-    // Once every process has had its trade variables updated, propagate them onto any suffixed sister batches.
+    // Once every process has had its trade variables updated, propagate them onto any suffixed sister batches,
+    // then backfill any stacked batches that were snapshotted before they had a price.
     await propagateSisterBatchTradeVariables();
+    await resyncMissingStackBatchPrices();
 
     return skippedProcessNumbers;
 }
@@ -2094,14 +2133,19 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
     // OPTIMIZED: Replaced O(N*M) correlated subqueries with an O(N+M) pre-aggregated LEFT JOIN.
     // OPTIMIZED: Replaced O(N*M) correlated subqueries with an O(N+M) pre-aggregated LEFT JOIN.
     // ADDED: INNER JOIN to latest_psb to fetch only the MAX(id) per batch in O(N) time.
+    // ADDED: LEFT JOIN to the latest PRICED daily_strategy_processing row per batch, so a batch that
+    // was stacked before it had a price (post_stack_batches.price_usd_50/hedge_level left NULL)
+    // still shows its now-resolved live price instead of staying stuck on that stale snapshot.
+    // NOTE: only a genuine NULL counts as "not yet priced" — a batch legitimately priced at 0 is
+    // still priced, so it must NOT fall through to the live-price lookup.
     const activeQuery = `
-        SELECT 
+        SELECT
             psb.id,
             psb.batch_number,
-            ps.stack_type as strategy, 
-            psb.price_usd_50, 
-            psb.quantity, 
-            psb.hedge_level,
+            ps.stack_type as strategy,
+            COALESCE(psb.price_usd_50, live_price.output_cost_usd_50) as price_usd_50,
+            psb.quantity,
+            COALESCE(psb.hedge_level, live_price.output_hedge_level_usc_lb) as hedge_level,
             dsp.first_date as date_in,
             dsp.first_analysis as analysis_id
         FROM post_stack_batches psb
@@ -2112,23 +2156,34 @@ export async function fetchBatchData(): Promise<{ activeBatches: Batch[], histor
         ) latest_psb ON psb.id = latest_psb.max_id
         JOIN post_stack ps ON psb.stack_id = ps.id
         LEFT JOIN (
-            SELECT 
+            SELECT
                 batch_number,
                 MIN(date_in) as first_date,
                 MAX(analysis_id) as first_analysis
             FROM daily_strategy_processing
             GROUP BY batch_number
         ) dsp ON dsp.batch_number = psb.batch_number
+        LEFT JOIN (
+            SELECT dsp2.batch_number, dsp2.output_cost_usd_50, dsp2.output_hedge_level_usc_lb
+            FROM daily_strategy_processing dsp2
+            INNER JOIN (
+                SELECT batch_number, MAX(id) as max_id
+                FROM daily_strategy_processing
+                WHERE output_qty > 0 AND output_cost_usd_50 IS NOT NULL
+                GROUP BY batch_number
+            ) latest_dsp ON dsp2.id = latest_dsp.max_id
+        ) live_price ON live_price.batch_number = psb.batch_number
     `;
     // Execute the optimized query
     const activeRows = await query<any[]>({ query: activeQuery });
 
-    // Map Active Batches
+    // Map Active Batches. price_usd_50 is kept as `null` when unresolved instead of coercing to 0 — a
+    // batch genuinely priced at 0 must not be indistinguishable from one that hasn't been priced yet.
     const activeBatches: Batch[] = (activeRows || []).map(row => ({
         id: row.id?.toString() || Math.random().toString(36).substring(7), // Safe fallback if id is null
         batch_number: row.batch_number,
         strategy: row.strategy || 'UNDEFINED',
-        outrightPrice50kg: Number(row.price_usd_50) || 0,
+        outrightPrice50kg: row.price_usd_50 === null || row.price_usd_50 === undefined ? null : Number(row.price_usd_50),
         quantityKg: Number(row.quantity),
         hedgeLevelUSClb: Number(row.hedge_level) || 0,
         status: 'active',

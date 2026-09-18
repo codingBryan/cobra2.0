@@ -373,7 +373,7 @@ const convertQty = (kg: number, unit: Unit): number => {
   return kg;
 };
 
-const formatNumber = (num: number, decimals = 2) => {
+const formatNumber = (num: number | null | undefined, decimals = 2) => {
   if (num === undefined || num === null || isNaN(num)) return "0.00";
   return new Intl.NumberFormat('en-US', { 
     minimumFractionDigits: decimals, 
@@ -1269,7 +1269,7 @@ export default function EffectivePriceTool() {
         agg.batches.push(b);
         agg.totalKg += b.quantityKg;
 
-        if (b.outrightPrice50kg && b.outrightPrice50kg > 0) {
+        if (b.outrightPrice50kg !== null) {
             const valUSClb = (b.outrightPrice50kg / 50 / KG_TO_LB) * 100;
             agg._valUSC += valUSClb * b.quantityKg;
             agg._hedgeUSC += b.hedgeLevelUSClb * b.quantityKg;
@@ -1483,7 +1483,7 @@ function InventoryView({ data, unit }: { data: StrategyAggregate[], unit: Unit }
     let strategyPricedKg = 0;
     
     d.batches.forEach(b => {
-        if (b.outrightPrice50kg && b.outrightPrice50kg > 0) {
+        if (b.outrightPrice50kg !== null) {
             strategyPricedKg += b.quantityKg;
         }
     });
@@ -1559,7 +1559,7 @@ function InventoryView({ data, unit }: { data: StrategyAggregate[], unit: Unit }
             <tbody className="divide-y divide-[#D6D2C4]">
               {filteredData.length > 0 ? filteredData.map((row) => {
                 // Calculate missing value metrics for the row display
-                const validBatchesKg = row.batches.reduce((sum, b) => (b.outrightPrice50kg ? sum + b.quantityKg : sum), 0);
+                const validBatchesKg = row.batches.reduce((sum, b) => (b.outrightPrice50kg !== null ? sum + b.quantityKg : sum), 0);
                 const hasMissingValues = validBatchesKg < row.totalKg;
                 const coveragePct = row.totalKg > 0 ? (validBatchesKg / row.totalKg) * 100 : 100;
 
@@ -1609,8 +1609,8 @@ function InventoryView({ data, unit }: { data: StrategyAggregate[], unit: Unit }
                             </thead>
                             <tbody className="divide-y divide-[#D6D2C4]/30">
                               {row.batches.map((batch, idx) => {
-                                const isBatchMissing = !batch.outrightPrice50kg;
-                                const batchDiff = toUSClb(batch.outrightPrice50kg) - batch.hedgeLevelUSClb;
+                                const isBatchMissing = batch.outrightPrice50kg === null;
+                                const batchDiff = toUSClb(batch.outrightPrice50kg ?? 0) - batch.hedgeLevelUSClb;
                                 return (
                                   <tr key={`${batch.id}-${idx}`} className={isBatchMissing ? 'bg-amber-50' : ''}> 
                                     <td className="py-2 px-4 font-mono text-[#007680] flex items-center gap-2">
@@ -2019,7 +2019,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
                             b.strategy.toLowerCase().includes(search.toLowerCase());
       const matchesStrategy = b.strategy.toUpperCase().startsWith(filter);
       const matchesSubStrategy = selectedSubStrategies.length === 0 || selectedSubStrategies.includes(b.strategy);
-      const matchesPrice = !hideUnpriced || (b.outrightPrice50kg && b.outrightPrice50kg > 0);
+      const matchesPrice = !hideUnpriced || b.outrightPrice50kg !== null;
 
       return matchesStrategy && matchesSearch && matchesSubStrategy && matchesPrice;
     }).sort((a, b) => {
@@ -2683,7 +2683,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
             
             <div className="flex-1 overflow-y-auto p-2 space-y-2 bg-[#D6D2C4]/20">
               {filteredBatches.length > 0 ? filteredBatches.map(batch => {
-                const hasPrice = batch.outrightPrice50kg && batch.outrightPrice50kg > 0;
+                const hasPrice = batch.outrightPrice50kg !== null;
                 
                 // Visualization formatting logic
                 const days = getDaysInStock(batch.date_in);
@@ -2960,7 +2960,7 @@ function BatchBlender({ data, unit }: { data: StrategyAggregate[], unit: Unit })
               <div className="space-y-2">
                   {selectedBatches.map((item) => {
                       const percentOfBlend = blendStats.totalKg > 0 ? (item.useKg / blendStats.totalKg) * 100 : 0;
-                      const hasPrice = item.batch.outrightPrice50kg && item.batch.outrightPrice50kg > 0;
+                      const hasPrice = item.batch.outrightPrice50kg !== null;
                       return (
                       <div key={item.batch.id} className={`p-3 rounded border shadow-sm relative flex justify-between items-center ${hasPrice ? 'bg-white border-[#D6D2C4]' : 'bg-red-50 border-red-200'}`}>
                           <div className="pr-4">
