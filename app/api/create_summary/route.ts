@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { 
+import {
   assembleStockSummary,
   debit_credit_processing,
   initialize_daily_summary,
   initialize_grade_strategy_activity_records,
-  update_daily_summary, 
-   
-} from '@/lib/sti_processing_utils'; 
+  update_daily_summary,
+  updateWeeklyProcessSummary,
+
+} from '@/lib/sti_processing_utils';
 import '@/lib/stock_movement_db'; 
 import { InitializedActivityRecords, ProcessSummary, StockData } from '@/custom_utilities/custom_types';
 import { update_post_process_intake_dates, update_post_trade_variables } from '@/lib/stack_pricing_utils';
@@ -100,8 +101,12 @@ export async function POST(request: NextRequest) {
       targetDate
     );
 
-    
+
     console.log(`[API] Successfully updated summary and activities for ID: ${summary_id}`);
+
+    // Recompute the weekly (Mon-Sat) input/output/loss rollup for every week this batch touched.
+    await updateWeeklyProcessSummary(process_summary as ProcessSummary);
+
     await update_post_process_intake_dates()
     const skipped_process_numbers = await update_post_trade_variables();
     if (skipped_process_numbers.length < 1){

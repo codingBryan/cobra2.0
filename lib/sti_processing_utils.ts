@@ -970,8 +970,8 @@ export async function getProcessDetails(
       processMap.set(processNo, {
         process_number: processNo,
         process_type: row['Process Name'] || 'N/A',
-        issue_date: row['Issue Date'], 
-        processing_date: row['Receipt Date'], 
+        instructed_date: row['Issue Date'],
+        processing_date: row['Receipt Date'],
         input_item_names: {},
         input_batches: {},
         output_item_names: {},
@@ -1320,10 +1320,9 @@ export async function debit_credit_processing(
       d.setTime(d.getTime() + (12 * 60 * 60 * 1000));
       const safeProcessDate = formatDateAsLocal_YYYYMMDD(d);
 
-      // --- NEW FEATURE: Instructed Date extraction ---
+      // --- Instructed Date: sourced from the "Issue Date" column of the first row per Process No. (see getProcessDetails) ---
       let safeInstructedDate: string | null = null;
-      // Fallback in case it's passed as 'issue_date' or 'instructed_date' from the analysis file
-      const rawInstructedDate =  process_object.instructed_date; 
+      const rawInstructedDate = process_object.instructed_date;
       
       if (rawInstructedDate) {
           const dIssue = new Date(rawInstructedDate);
@@ -1550,6 +1549,171 @@ export async function debit_credit_processing(
   }
 
   return new_activity_list;
+}
+
+// Row shape for the weekly_process_summary output/loss aggregation query (daily_processes only —
+// see the note on process_instructions below for why input can't be sourced from this table).
+interface WeeklyProcessAggRow extends RowDataPacket {
+  instructed_date: string | Date | null;
+  processing_date: string | Date | null;
+  process_type: string;
+  input_qty: number;
+  output_qty: number;
+}
+
+// Ledger row: every instructed process, complete or not (see process_instructions below).
+interface ProcessInstructionRow extends RowDataPacket {
+  instructed_date: string | Date;
+  process_type: string;
+  input_qty: number;
+}
+
+/**
+ * Returns the week string ("YYYY-Www") for a date, for weeks that run Monday-Saturday (not the
+ * standard ISO Monday-Sunday) — matches weekly_process_summary.calendar_week's format (e.g.
+ * '2026-W42'). Sunday is treated as belonging to the following week (the one starting next Monday),
+ * since it falls outside the Monday-Saturday work week.
+ */
+function getISOWeekString(input: Date | string): string {
+  const base = input instanceof Date ? input : new Date(input);
+  // Normalize to UTC midnight so DST / local-timezone boundaries can't shift which week a date lands in.
+  const date = new Date(Date.UTC(base.getFullYear(), base.getMonth(), base.getDate()));
+  if (date.getUTCDay() === 0) {
+    // Sunday -> roll forward onto next Monday before computing the week number.
+    date.setUTCDate(date.getUTCDate() + 1);
+  }
+  const dayNum = date.getUTCDay() || 7; // Monday=1 ... Saturday=6 (never 7/Sunday after the roll-forward above)
+  // Week-numbering still anchors on the Thursday of the (now Mon-Sat-only) week, same as ISO 8601.
+  date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((date.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+/**
+ * Recomputes and upserts weekly_process_summary for every week (Mon-Sat) touched by this
+ * batch's instructed_date values.
+ *
+ * Per (calendar_week, process_type):
+ *  - input_weight  = sum of input_qty for every process instructed that week, complete or not.
+ *    IMPORTANT: this can't be read from daily_processes — debit_credit_processing only inserts a
+ *    process there once it has a processing_date AND output batches, so a process that was
+ *    instructed but not yet completed never lands in daily_processes at all. Instead this is
+ *    sourced from `process_instructions`, a small ledger upserted (by process_number) from the raw
+ *    parsed upload on every run, so it accumulates every instructed process ever seen regardless of
+ *    completion, without double-counting a process re-seen across multiple uploads.
+ *  - output_weight = sum of output_qty from daily_processes, but ONLY for processes that were also
+ *                    completed (processing_date) within that SAME week and have output_qty > 0 ("complete").
+ *  - processing_loss = (sum of input_qty) - (sum of output_qty) across that same "complete" subset only,
+ *                    so input and output are always compared apples-to-apples.
+ *
+ * Existing rows for a (week, process_type) are overwritten with the freshly recomputed totals.
+ */
+export async function updateWeeklyProcessSummary(processSummary: ProcessSummary): Promise<void> {
+  try {
+    const processes = (processSummary.processes || []).filter(p => p.instructed_date && p.process_number);
+    if (processes.length === 0) {
+      console.log("[Weekly Summary] No instructed dates in this batch — skipping.");
+      return;
+    }
+
+    // --- Step 1: upsert every instructed process from this batch into the ledger (dedup by process_number). ---
+    const ledgerValues = processes.map(p => {
+      const instructedDate = p.instructed_date instanceof Date ? p.instructed_date : new Date(p.instructed_date!);
+      const totalInput = Object.values(p.input_item_names || {}).reduce((sum, qty) => sum + (parseSafeFloat(qty)), 0);
+      return [String(p.process_number), p.process_type || 'N/A', formatDateForMySQL(instructedDate), totalInput];
+    });
+
+    await query<ResultSetHeader>({
+      query: `
+        INSERT INTO process_instructions (process_number, process_type, instructed_date, input_qty)
+        VALUES ?
+        ON DUPLICATE KEY UPDATE
+          process_type = VALUES(process_type),
+          instructed_date = VALUES(instructed_date),
+          input_qty = VALUES(input_qty)
+      `,
+      values: [ledgerValues],
+    });
+
+    const instructedDates = ledgerValues.map(v => new Date(v[2] as string));
+    // Pad by a day on each side: debit_credit_processing nudges stored dates by +12h before
+    // formatting, so the raw file date and the stored date can land a day apart at the boundary.
+    const minTime = Math.min(...instructedDates.map(d => d.getTime())) - 86400000;
+    const maxTime = Math.max(...instructedDates.map(d => d.getTime())) + 86400000;
+    const minDate = formatDateForMySQL(new Date(minTime));
+    const maxDate = formatDateForMySQL(new Date(maxTime));
+
+    type Agg = { inputWeight: number; outputWeight: number; completeInput: number; completeOutput: number };
+    const agg = new Map<string, Agg>(); // key: `${calendar_week}|${process_type}`
+    const ensureAgg = (key: string) => {
+      if (!agg.has(key)) agg.set(key, { inputWeight: 0, outputWeight: 0, completeInput: 0, completeOutput: 0 });
+      return agg.get(key)!;
+    };
+
+    // --- Step 2: input_weight — every instructed process for the affected weeks, from the ledger. ---
+    const ledgerRows = await query<ProcessInstructionRow[]>({
+      query: `SELECT instructed_date, process_type, input_qty FROM process_instructions WHERE instructed_date BETWEEN ? AND ?`,
+      values: [minDate, maxDate],
+    });
+    for (const row of ledgerRows || []) {
+      const week = getISOWeekString(row.instructed_date);
+      const key = `${week}|${row.process_type || 'N/A'}`;
+      ensureAgg(key).inputWeight += parseSafeFloat(row.input_qty);
+    }
+
+    // --- Step 3: output_weight / processing_loss — same-week-completed processes, from daily_processes. ---
+    const completedRows = await query<WeeklyProcessAggRow[]>({
+      query: `
+        SELECT instructed_date, processing_date, process_type, input_qty, output_qty
+        FROM daily_processes
+        WHERE instructed_date BETWEEN ? AND ?
+      `,
+      values: [minDate, maxDate],
+    });
+    for (const row of completedRows || []) {
+      if (!row.instructed_date) continue;
+      const week = getISOWeekString(row.instructed_date);
+      const type = row.process_type || 'N/A';
+      const outputQty = parseSafeFloat(row.output_qty);
+
+      // "Complete" = has output AND was completed in the SAME week it was instructed.
+      if (outputQty > 0 && row.processing_date) {
+        const completedWeek = getISOWeekString(row.processing_date);
+        if (completedWeek === week) {
+          const inputQty = parseSafeFloat(row.input_qty);
+          const a = ensureAgg(`${week}|${type}`);
+          a.outputWeight += outputQty;
+          a.completeInput += inputQty;
+          a.completeOutput += outputQty;
+        }
+      }
+    }
+
+    if (agg.size === 0) return;
+
+    const insertValues = Array.from(agg.entries()).map(([key, a]) => {
+      const [calendar_week, process_type] = key.split('|');
+      return [calendar_week, process_type, a.inputWeight, a.outputWeight, a.completeInput - a.completeOutput];
+    });
+
+    await query<ResultSetHeader>({
+      query: `
+        INSERT INTO weekly_process_summary (calendar_week, process_type, input_weight, output_weight, processing_loss)
+        VALUES ?
+        ON DUPLICATE KEY UPDATE
+          input_weight = VALUES(input_weight),
+          output_weight = VALUES(output_weight),
+          processing_loss = VALUES(processing_loss)
+      `,
+      values: [insertValues],
+    });
+
+    console.log(`[Weekly Summary] Upserted ${insertValues.length} (week, process_type) row(s).`);
+  } catch (error) {
+    // Never let this secondary aggregation break the main upload pipeline.
+    console.error("[Weekly Summary] Failed to update weekly_process_summary:", error);
+  }
 }
 
 export async function update_daily_summary(

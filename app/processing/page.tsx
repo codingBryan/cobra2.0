@@ -26,12 +26,14 @@ import {
   Check,
   Minus
 } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 // --- Types ---
 interface DailyProcess {
   id: number;
   summary_id: number;
   processing_date: string;
+  instructed_date: string | null;
   process_type: string;
   process_number: string;
   input_qty: number;
@@ -39,10 +41,45 @@ interface DailyProcess {
   milling_loss: number;
   processing_loss_gain_qty: number;
   physical_loss_gain_pnl: number; // ADDED
+  transformation_pnl: number | null;
   input_value: number;
   output_value: number;
   pnl: number;
   trade_variables_updated: boolean;
+}
+
+// --- Process Type Summary Matrix: shared types & helpers ---
+interface StrategyBreakdownRow {
+  strategy: string;
+  process_type: string;
+  input_qty: number | string;
+  output_qty: number | string;
+}
+
+interface ProcessTypeTotalRow {
+  process_type: string;
+  input_qty: number | string;
+  output_qty: number | string;
+  pnl: number | string;
+  transformation_pnl: number | string;
+  physical_loss_gain_pnl: number | string;
+  processing_loss_gain_qty: number | string;
+}
+
+interface WeeklyProcessSummaryRow {
+  calendar_week: string;
+  process_type: string;
+  input_weight: number | string;
+  output_weight: number | string;
+  processing_loss: number | string | null;
+}
+
+interface WeeklyProcessingTrendPoint {
+  calendar_week: string;
+  total_input: number;
+  total_output: number;
+  total_loss: number;
+  pct_work_done: number;
 }
 
 interface StrategyProcessing {
@@ -118,11 +155,22 @@ interface AnalysisResponse {
 }
 
 // --- Helper Functions ---
+type Unit = 'kg' | 'bag' | 'mt';
+
+// Same conversion convention used across the rest of the app (stacks, certification_position): all
+// quantities are stored/returned in kg; convert for display only.
+const convertQty = (kg: number | undefined | null, unit: Unit): number => {
+  const val = Number(kg) || 0;
+  if (unit === 'bag') return val / 60;
+  if (unit === 'mt') return val / 1000;
+  return val;
+};
+
 const formatNumber = (num: number | undefined | null, decimals = 2) => {
   if (num === undefined || num === null || isNaN(num)) return "0.00";
-  return new Intl.NumberFormat('en-US', { 
-    minimumFractionDigits: decimals, 
-    maximumFractionDigits: decimals 
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
   }).format(num);
 };
 
@@ -232,6 +280,8 @@ const MiniDonutChart = ({ data, size = 100 }: { data: { label: string; value: nu
 
 export default function ProcessingPage() {
   const router = useRouter();
+  const [activeTab, setActiveTab] = useState<'processes' | 'summary'>('processes');
+  const [unit, setUnit] = useState<Unit>('kg');
   const [processes, setProcesses] = useState<DailyProcess[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -294,8 +344,8 @@ export default function ProcessingPage() {
     }
 
     data.sort((a, b) => {
-      const aVal = a[sortConfig.key];
-      const bVal = b[sortConfig.key];
+      const aVal = a[sortConfig.key] ?? '';
+      const bVal = b[sortConfig.key] ?? '';
 
       if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
       if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
@@ -330,9 +380,55 @@ export default function ProcessingPage() {
   const selectedProcess = processes.find(p => p.id === selectedProcessId);
 
   return (
-    <div className="h-screen bg-[#D6D2C4] font-sans text-[#51534a] p-4 md:p-8 flex justify-center overflow-hidden">
+    <div className="h-screen bg-[#D6D2C4] font-sans text-[#51534a] flex flex-col overflow-hidden">
+
+      {/* --- TABS --- */}
+      <div className="shrink-0 bg-white border-b border-[#D6D2C4] px-4 md:px-8 pt-3">
+        <div className="w-full max-w-7xl mx-auto flex items-center justify-between gap-2">
+          <div className="flex gap-1">
+            {([
+              { key: 'processes', label: 'Processes' },
+              { key: 'summary', label: 'Summary' },
+            ] as const).map(tab => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`px-4 py-2 text-sm font-bold rounded-t-lg border-b-2 transition-colors ${
+                  activeTab === tab.key
+                    ? 'border-[#007680] text-[#007680] bg-[#007680]/5'
+                    : 'border-transparent text-[#968C83] hover:text-[#51534a] hover:bg-[#F5F5F3]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Unit Toggle — applies to every quantity shown on this page */}
+          <div className="flex items-center bg-[#F5F5F3] p-1 rounded-lg border border-[#968C83]/20 mb-1.5">
+            {(['kg', 'bag', 'mt'] as Unit[]).map((u) => (
+              <button
+                key={u}
+                onClick={() => setUnit(u)}
+                className={`px-3 py-1 rounded-md text-xs font-bold transition-all ${
+                  unit === u
+                    ? 'bg-[#007680] text-white shadow-sm'
+                    : 'text-[#968C83] hover:bg-[#D6D2C4]/30'
+                }`}
+              >
+                {u.toUpperCase()}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className={`flex-1 min-h-0 overflow-hidden flex p-4 md:p-8 ${activeTab === 'processes' ? 'justify-center' : ''}`}>
+      {activeTab === 'summary' ? (
+        <ProcessSummaryTab unit={unit} />
+      ) : (
       <div className="w-full max-w-7xl flex gap-6 relative h-full">
-      
+
       {/* LEFT PANE */}
       <div className={`flex-1 flex flex-col gap-6 h-full transition-all duration-300 ${selectedProcessId ? 'w-1/2 hidden md:flex' : 'w-full'}`}>
         
@@ -390,7 +486,7 @@ export default function ProcessingPage() {
             <Card className="p-4 border-l-4 border-l-[#007680] flex items-center justify-between">
                 <div>
                     <div className="text-xs text-[#968C83] uppercase font-bold tracking-wider">Total Input</div>
-                    <div className="text-xl font-bold text-[#007680] mt-1">{formatNumber(stats.totalInput, 0)} <span className="text-xs text-[#968C83]">kg</span></div>
+                    <div className="text-xl font-bold text-[#007680] mt-1">{formatNumber(convertQty(stats.totalInput, unit), unit === 'kg' ? 0 : 2)} <span className="text-xs text-[#968C83]">{unit}</span></div>
                 </div>
                  <div className="bg-[#007680]/10 p-2 rounded-full text-[#007680]">
                     <Layers size={20} />
@@ -487,10 +583,10 @@ export default function ProcessingPage() {
                     <div className="flex items-center">Process # <SortIcon column="process_number" /></div>
                   </th>
                   <th className="py-3 px-4 text-right cursor-pointer hover:bg-white/10" onClick={() => handleSort('input_qty')}>
-                    <div className="flex items-center justify-end">In Qty <SortIcon column="input_qty" /></div>
+                    <div className="flex items-center justify-end">In Qty ({unit.toUpperCase()}) <SortIcon column="input_qty" /></div>
                   </th>
                   <th className="py-3 px-4 text-right cursor-pointer hover:bg-white/10" onClick={() => handleSort('output_qty')}>
-                    <div className="flex items-center justify-end">Out Qty <SortIcon column="output_qty" /></div>
+                    <div className="flex items-center justify-end">Out Qty ({unit.toUpperCase()}) <SortIcon column="output_qty" /></div>
                   </th>
                   <th className="py-3 px-4 text-center cursor-pointer hover:bg-white/10" onClick={() => handleSort('trade_variables_updated')}>
                     <div className="flex items-center justify-center">Trade Vars <SortIcon column="trade_variables_updated" /></div>
@@ -542,8 +638,8 @@ export default function ProcessingPage() {
                                 </button>
                             </div>
                         </td>
-                        <td className="py-3 px-4 text-right text-[#968C83] font-mono">{formatNumber(row.input_qty, 0)}</td>
-                        <td className="py-3 px-4 text-right text-[#51534a] font-mono font-medium">{formatNumber(row.output_qty, 0)}</td>
+                        <td className="py-3 px-4 text-right text-[#968C83] font-mono">{formatNumber(convertQty(row.input_qty, unit), unit === 'kg' ? 0 : 2)}</td>
+                        <td className="py-3 px-4 text-right text-[#51534a] font-mono font-medium">{formatNumber(convertQty(row.output_qty, unit), unit === 'kg' ? 0 : 2)}</td>
                         
                         <td className="py-3 px-4 text-center">
                             {row.trade_variables_updated ? (
@@ -594,6 +690,563 @@ export default function ProcessingPage() {
         <AnalysisModal processId={selectedAnalysisId} onClose={() => setSelectedAnalysisId(null)} />
       )}
 
+      </div>
+      )}
+      </div>
+    </div>
+  );
+}
+
+// --- SUB-COMPONENT: SUMMARY TAB (Process Type Summary Matrix + sortable process cards) ---
+function ProcessSummaryTab({ unit }: { unit: Unit }) {
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+
+  const [matrixLoading, setMatrixLoading] = useState(true);
+  const [breakdown, setBreakdown] = useState<StrategyBreakdownRow[]>([]);
+  const [groupTotalsRaw, setGroupTotalsRaw] = useState<ProcessTypeTotalRow[]>([]);
+
+  const [cardsLoading, setCardsLoading] = useState(true);
+  const [cardProcesses, setCardProcesses] = useState<DailyProcess[]>([]);
+  const [cardSort, setCardSort] = useState<{ key: 'pnl' | 'process_type'; direction: 'asc' | 'desc' }>({
+    key: 'pnl',
+    direction: 'desc'
+  });
+
+  // Processing Activities card: always the most recent week in weekly_process_summary —
+  // independent of the matrix's date filter above, so it isn't fetched in that effect.
+  const [weeklyActivityLoading, setWeeklyActivityLoading] = useState(true);
+  const [weeklyActivityWeek, setWeeklyActivityWeek] = useState<string | null>(null);
+  const [weeklyActivityRows, setWeeklyActivityRows] = useState<WeeklyProcessSummaryRow[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadWeeklyActivity() {
+      setWeeklyActivityLoading(true);
+      try {
+        const res = await fetch('/api/processes/weekly-summary');
+        if (!cancelled && res.ok) {
+          const data = await res.json();
+          setWeeklyActivityWeek(data.calendar_week || null);
+          setWeeklyActivityRows(data.rows || []);
+        }
+      } catch (e) {
+        console.error('Failed to load weekly process activity', e);
+      } finally {
+        if (!cancelled) setWeeklyActivityLoading(false);
+      }
+    }
+    loadWeeklyActivity();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Weekly trend chart: total processing loss & % work done, last 4 weeks — also independent of
+  // the matrix's date filter.
+  const [trendLoading, setTrendLoading] = useState(true);
+  const [trendPoints, setTrendPoints] = useState<WeeklyProcessingTrendPoint[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTrend() {
+      setTrendLoading(true);
+      try {
+        const res = await fetch('/api/processes/weekly-trend?weeks=4');
+        if (!cancelled && res.ok) {
+          const data = await res.json();
+          setTrendPoints(Array.isArray(data) ? data : []);
+        }
+      } catch (e) {
+        console.error('Failed to load weekly processing trend', e);
+      } finally {
+        if (!cancelled) setTrendLoading(false);
+      }
+    }
+    loadTrend();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Standard strategy mappings — so "Position Strategy" rows show the canonical strategy name
+  // instead of whatever raw variant is stored on daily_strategy_processing.strategy.
+  const COBRA_SERVICE = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL;
+  const [strategyMappings, setStrategyMappings] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadStrategyMappings() {
+      try {
+        const mapData = await fetch(COBRA_SERVICE + '/get_strategy_mappings', { cache: 'no-store' })
+          .then(res => res.ok ? res.json() : {})
+          .catch(() => ({}));
+
+        // O(1) lookup inversion: { standardStrategy: [rawVariant, ...] } -> { rawVariant: standardStrategy }
+        const invertedMap: Record<string, string> = {};
+        Object.entries(mapData || {}).forEach(([stdStrat, rawStrats]) => {
+          if (Array.isArray(rawStrats)) {
+            rawStrats.forEach(raw => { invertedMap[typeof raw === 'string' ? raw.trim().toLowerCase() : String(raw)] = stdStrat; });
+          }
+        });
+        if (!cancelled) setStrategyMappings(invertedMap);
+      } catch (e) {
+        console.error('Failed to load strategy mappings', e);
+      }
+    }
+    loadStrategyMappings();
+    return () => { cancelled = true; };
+  }, [COBRA_SERVICE]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setMatrixLoading(true);
+      setCardsLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (fromDate) params.append('fromDate', fromDate);
+        if (toDate) params.append('toDate', toDate);
+
+        const [matrixRes, cardsRes] = await Promise.all([
+          fetch(`/api/processes/summary?${params.toString()}`),
+          fetch(`/api/processes?dateField=processing_date&allTime=true&${params.toString()}`)
+        ]);
+
+        if (!cancelled && matrixRes.ok) {
+          const data = await matrixRes.json();
+          setBreakdown(data.breakdown || []);
+          setGroupTotalsRaw(data.totals || []);
+        }
+        if (!cancelled && cardsRes.ok) {
+          const data = await cardsRes.json();
+          setCardProcesses(data || []);
+        }
+      } catch (e) {
+        console.error('Failed to load process summary', e);
+      } finally {
+        if (!cancelled) {
+          setMatrixLoading(false);
+          setCardsLoading(false);
+        }
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [fromDate, toDate]);
+
+  // Reshape the two flat query results into: one column per EXACT process_type string (no bucketing —
+  // "COLOUR SORTING" and "RE-COLOUR SORTING" each get their own column), and a strategy x type cell map.
+  const { processTypes, strategies, cellMap, groupTotals } = useMemo(() => {
+    type Cell = { input: number; output: number };
+    type TypeTotal = { input: number; output: number; pnl: number; transformationPnl: number; physicalPnl: number; lossGainQty: number };
+
+    const normalize = (t: string | null | undefined) => {
+      const trimmed = (t || '').trim();
+      return trimmed || 'N/A';
+    };
+
+    const totals = new Map<string, TypeTotal>();
+    const typeVolume = new Map<string, number>();
+    const ensureTotal = (type: string) => {
+      if (!totals.has(type)) totals.set(type, { input: 0, output: 0, pnl: 0, transformationPnl: 0, physicalPnl: 0, lossGainQty: 0 });
+      return totals.get(type)!;
+    };
+
+    groupTotalsRaw.forEach(row => {
+      const type = normalize(row.process_type);
+      const t = ensureTotal(type);
+      const inQty = Number(row.input_qty) || 0;
+      const outQty = Number(row.output_qty) || 0;
+      t.input += inQty;
+      t.output += outQty;
+      t.pnl += Number(row.pnl) || 0;
+      t.transformationPnl += Number(row.transformation_pnl) || 0;
+      t.physicalPnl += Number(row.physical_loss_gain_pnl) || 0;
+      t.lossGainQty += Number(row.processing_loss_gain_qty) || 0;
+      typeVolume.set(type, (typeVolume.get(type) || 0) + inQty + outQty);
+    });
+
+    // Busiest process type first (by total volume).
+    const processTypes = Array.from(totals.keys()).sort((a, b) => (typeVolume.get(b) || 0) - (typeVolume.get(a) || 0));
+
+    const cellMap = new Map<string, Map<string, Cell>>();
+    const strategyVolume = new Map<string, number>();
+
+    breakdown.forEach(row => {
+      const rawStrat = String(row.strategy || 'UNDEFINED');
+      // Map to the standard strategy name so raw variants that alias the same strategy get merged
+      // into one "Position Strategy" row; fall back to the raw value when it's not in the mapping.
+      const strat = rawStrat === 'UNDEFINED' ? 'UNDEFINED' : (strategyMappings[rawStrat.toLowerCase()] || rawStrat);
+      const type = normalize(row.process_type);
+      if (!cellMap.has(strat)) cellMap.set(strat, new Map<string, Cell>());
+      const stratCells = cellMap.get(strat)!;
+      if (!stratCells.has(type)) stratCells.set(type, { input: 0, output: 0 });
+      const cell = stratCells.get(type)!;
+      const inQty = Number(row.input_qty) || 0;
+      const outQty = Number(row.output_qty) || 0;
+      cell.input += inQty;
+      cell.output += outQty;
+      strategyVolume.set(strat, (strategyVolume.get(strat) || 0) + inQty + outQty);
+    });
+
+    // Busiest strategy first; "UNDEFINED" always last.
+    const strategies = Array.from(cellMap.keys()).sort((a, b) => {
+      if (a === 'UNDEFINED') return 1;
+      if (b === 'UNDEFINED') return -1;
+      return (strategyVolume.get(b) || 0) - (strategyVolume.get(a) || 0);
+    });
+
+    return { processTypes, strategies, cellMap, groupTotals: totals };
+  }, [breakdown, groupTotalsRaw, strategyMappings]);
+
+  // "Processing Activities" card: Input/Output/Gain-Loss per process type, in the selected unit,
+  // alphabetical, for the most recent week in weekly_process_summary — leaving out any process
+  // type with no activity at all that week.
+  const activityRows = useMemo(() => {
+    const rows = weeklyActivityRows
+      .map(r => ({
+        type: r.process_type,
+        input: convertQty(Number(r.input_weight) || 0, unit),
+        output: convertQty(Number(r.output_weight) || 0, unit),
+        lossGain: convertQty(Number(r.processing_loss) || 0, unit),
+      }))
+      .filter(r => r.input > 0 || r.output > 0)
+      .sort((a, b) => a.type.localeCompare(b.type));
+
+    const totalInput = rows.reduce((sum, r) => sum + r.input, 0);
+    const totalOutput = rows.reduce((sum, r) => sum + r.output, 0);
+    const totalLossGain = rows.reduce((sum, r) => sum + r.lossGain, 0);
+
+    return { rows, totalInput, totalOutput, totalLossGain };
+  }, [weeklyActivityRows, unit]);
+
+  // Weekly trend chart data: short "Www" label for the axis, loss converted to the selected unit,
+  // % work done kept as-is (output / input instructed that week * 100).
+  const trendChartData = useMemo(() => {
+    return trendPoints.map(p => ({
+      week: p.calendar_week,
+      weekLabel: p.calendar_week.split('-W')[1] ? `W${p.calendar_week.split('-W')[1]}` : p.calendar_week,
+      loss: convertQty(p.total_loss, unit),
+      pctWorkDone: p.pct_work_done,
+    }));
+  }, [trendPoints, unit]);
+
+  const sortedCards = useMemo(() => {
+    const data = [...cardProcesses];
+    data.sort((a, b) => {
+      const aVal = a[cardSort.key] ?? '';
+      const bVal = b[cardSort.key] ?? '';
+      if (aVal < bVal) return cardSort.direction === 'asc' ? -1 : 1;
+      if (aVal > bVal) return cardSort.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+    return data;
+  }, [cardProcesses, cardSort]);
+
+  const toggleCardSort = (key: 'pnl' | 'process_type') => {
+    setCardSort(curr => ({ key, direction: curr.key === key && curr.direction === 'desc' ? 'asc' : 'desc' }));
+  };
+
+  return (
+    <div className="w-full h-full flex flex-col gap-2 min-h-0">
+      {/* Date range filter — filters by processing_date, independent of the Processes tab's filter */}
+      <Card className="p-2 flex items-center gap-2 shrink-0 w-fit">
+        <Calendar size={14} className="text-[#007680]" />
+        <span className="text-xs font-bold text-[#968C83] uppercase">Processing Date</span>
+        <input type="date" className="text-xs outline-none border border-[#D6D2C4] rounded px-2 py-1 text-[#51534a] font-medium" value={fromDate} onChange={e => setFromDate(e.target.value)} />
+        <span className="text-[#D6D2C4]">-</span>
+        <input type="date" className="text-xs outline-none border border-[#D6D2C4] rounded px-2 py-1 text-[#51534a] font-medium" value={toDate} onChange={e => setToDate(e.target.value)} />
+        {(fromDate || toDate) && (
+          <button onClick={() => { setFromDate(''); setToDate(''); }} className="ml-1 text-[#B9975B] hover:text-[#968C83] transition-colors p-1" title="Clear dates">
+            <X size={14} />
+          </button>
+        )}
+      </Card>
+
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-3">
+
+        {/* LEFT: Process Type Summary Matrix (~70%) */}
+        <div className="lg:w-[70%] min-h-0 flex flex-col">
+          <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-md border-none">
+            <div className="px-3 py-2 border-b border-[#D6D2C4] bg-white shrink-0">
+              <h2 className="text-sm font-bold text-[#51534a]">Process Type Summary Matrix</h2>
+            </div>
+            <div className="flex-1 overflow-auto custom-scrollbar">
+              {matrixLoading ? (
+                <div className="p-8 text-center text-[#968C83]">Loading matrix...</div>
+              ) : strategies.length === 0 ? (
+                <div className="p-8 text-center text-[#968C83]">No data for this date range.</div>
+              ) : (
+                // NOTE: border-separate (not border-collapse) is required here — sticky thead/tfoot
+                // rows reliably paint an opaque background over scrolled-under content only with
+                // separate borders; border-collapse is the classic cause of "sticky row shows the
+                // scrolled content bleeding through" in table layouts.
+                <table className="w-full text-xs text-left border-separate border-spacing-0">
+                  <thead className="sticky top-0 z-10">
+                    <tr>
+                      <th rowSpan={2} className="py-1.5 px-2 text-[#51534a] font-bold border-b border-r border-[#D6D2C4] align-bottom sticky left-0 bg-[#F5F5F3] z-20">
+                        Position Strategy
+                      </th>
+                      {processTypes.map(type => (
+                        <th key={type} colSpan={2} className="py-1.5 px-2 text-center text-[#51534a] font-bold border-b border-r border-[#D6D2C4] bg-[#F5F5F3] whitespace-nowrap">
+                          {type}
+                        </th>
+                      ))}
+                    </tr>
+                    <tr>
+                      {processTypes.map(type => (
+                        <React.Fragment key={type}>
+                          <th className="py-1 px-2 text-right text-[#968C83] font-semibold border-b border-[#D6D2C4] bg-[#F5F5F3]">In</th>
+                          <th className="py-1 px-2 text-right text-[#968C83] font-semibold border-b border-r border-[#D6D2C4] bg-[#F5F5F3]">Out</th>
+                        </React.Fragment>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {strategies.map(strat => {
+                      const cells = cellMap.get(strat)!;
+                      return (
+                        <tr key={strat} className="hover:bg-[#F5F5F3]/60">
+                          <td className="py-1.5 px-2 font-bold text-[#51534a] sticky left-0 bg-white z-10 border-b border-r border-[#D6D2C4] whitespace-nowrap">
+                            {strat}
+                          </td>
+                          {processTypes.map(type => {
+                            const cell = cells.get(type) || { input: 0, output: 0 };
+                            const total = groupTotals.get(type)!;
+                            const outPct = cell.output > 0 && total.output > 0 ? (cell.output / total.output) * 100 : null;
+                            return (
+                              <React.Fragment key={type}>
+                                <td className="py-1.5 px-2 text-right text-[#51534a] font-mono border-b border-[#F5F5F3]">
+                                  {cell.input > 0 ? formatNumber(convertQty(cell.input, unit), unit === 'kg' ? 0 : 2) : ''}
+                                </td>
+                                <td className="py-1.5 px-2 text-right font-mono border-b border-r border-[#F5F5F3]">
+                                  {cell.output > 0 ? (
+                                    <>
+                                      <span className="text-[#51534a]">{formatNumber(convertQty(cell.output, unit), unit === 'kg' ? 0 : 2)}</span>
+                                      {outPct !== null && <div className="text-[9px] text-[#968C83]">({formatNumber(outPct, 1)}%)</div>}
+                                    </>
+                                  ) : ''}
+                                </td>
+                              </React.Fragment>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className="sticky bottom-0 z-10 shadow-[0_-2px_4px_rgba(0,0,0,0.08)]">
+                    <tr>
+                      <td className="py-1.5 px-2 sticky left-0 bg-[#51534a] text-white font-bold z-10 whitespace-nowrap">Totals ({unit.toUpperCase()})</td>
+                      {processTypes.map(type => {
+                        const t = groupTotals.get(type)!;
+                        return (
+                          <React.Fragment key={type}>
+                            <td className="py-1.5 px-2 text-right font-mono bg-[#51534a] text-white font-bold">{formatNumber(convertQty(t.input, unit), unit === 'kg' ? 0 : 2)}</td>
+                            <td className="py-1.5 px-2 text-right font-mono bg-[#51534a] text-white font-bold border-r border-white/10">{formatNumber(convertQty(t.output, unit), unit === 'kg' ? 0 : 2)}</td>
+                          </React.Fragment>
+                        );
+                      })}
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2 sticky left-0 bg-[#F5F5F3] z-10 text-[#51534a] font-semibold whitespace-nowrap">Loss/Gain ({unit.toUpperCase()})</td>
+                      {processTypes.map(type => {
+                        const t = groupTotals.get(type)!;
+                        const lossGain = t.output - t.input;
+                        const pct = t.input > 0 ? (lossGain / t.input) * 100 : 0;
+                        const colorClass = lossGain > 0 ? 'text-[#97D700]' : lossGain < 0 ? 'text-[#B9975B]' : 'text-[#968C83]';
+                        return (
+                          <td key={type} colSpan={2} className={`py-1.5 px-2 text-right font-mono bg-[#F5F5F3] ${colorClass}`}>
+                            {lossGain > 0 ? '+' : ''}{formatNumber(convertQty(lossGain, unit), unit === 'kg' ? 0 : 2)} ({pct > 0 ? '+' : ''}{formatNumber(pct, 1)}%)
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2 sticky left-0 bg-white z-10 text-[#51534a] font-semibold border-t border-[#D6D2C4] whitespace-nowrap">Transformation PNL</td>
+                      {processTypes.map(type => {
+                        const val = groupTotals.get(type)!.transformationPnl;
+                        const colorClass = val > 0 ? 'text-[#97D700]' : val < 0 ? 'text-[#B9975B]' : 'text-[#968C83]';
+                        return (
+                          <td key={type} colSpan={2} className={`py-1.5 px-2 text-right font-mono font-bold bg-white border-t border-[#D6D2C4] ${colorClass}`}>
+                            {val > 0 ? '+' : ''}${formatNumber(val)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2 sticky left-0 bg-white z-10 text-[#51534a] font-semibold whitespace-nowrap">Physical Loss PNL</td>
+                      {processTypes.map(type => {
+                        const val = groupTotals.get(type)!.physicalPnl;
+                        const colorClass = val > 0 ? 'text-[#97D700]' : val < 0 ? 'text-[#B9975B]' : 'text-[#968C83]';
+                        return (
+                          <td key={type} colSpan={2} className={`py-1.5 px-2 text-right font-mono font-bold bg-white ${colorClass}`}>
+                            {val > 0 ? '+' : ''}${formatNumber(val)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr>
+                      <td className="py-1.5 px-2 sticky left-0 bg-[#F5F5F3] z-10 text-[#51534a] font-bold border-t border-[#D6D2C4] whitespace-nowrap">Total PNL</td>
+                      {processTypes.map(type => {
+                        const t = groupTotals.get(type)!;
+                        const val = t.pnl;
+                        const colorClass = val > 0 ? 'text-[#97D700]' : val < 0 ? 'text-[#B9975B]' : 'text-[#968C83]';
+                        return (
+                          <td key={type} colSpan={2} className={`py-1.5 px-2 text-right font-mono font-bold bg-[#F5F5F3] border-t border-[#D6D2C4] ${colorClass}`}>
+                            {val > 0 ? '+' : ''}${formatNumber(val)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </tfoot>
+                </table>
+              )}
+            </div>
+          </Card>
+        </div>
+
+        {/* RIGHT: Process cards, sortable by P&L / process type (~30%) */}
+        <div className="lg:w-[30%] min-h-0 flex flex-col gap-3">
+          <Card className="p-3 flex items-center justify-between gap-2 shrink-0">
+            <span className="text-xs font-bold text-[#968C83] uppercase">Sort By</span>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => toggleCardSort('pnl')}
+                className={`px-2.5 py-1 rounded text-xs font-bold flex items-center gap-1 transition-colors ${cardSort.key === 'pnl' ? 'bg-[#007680] text-white' : 'bg-[#F5F5F3] text-[#51534a] hover:bg-[#D6D2C4]/50'}`}
+              >
+                P&amp;L {cardSort.key === 'pnl' && <ArrowUpDown size={11} className={cardSort.direction === 'asc' ? 'rotate-180' : ''} />}
+              </button>
+              <button
+                onClick={() => toggleCardSort('process_type')}
+                className={`px-2.5 py-1 rounded text-xs font-bold flex items-center gap-1 transition-colors ${cardSort.key === 'process_type' ? 'bg-[#007680] text-white' : 'bg-[#F5F5F3] text-[#51534a] hover:bg-[#D6D2C4]/50'}`}
+              >
+                Type {cardSort.key === 'process_type' && <ArrowUpDown size={11} className={cardSort.direction === 'asc' ? 'rotate-180' : ''} />}
+              </button>
+            </div>
+          </Card>
+
+          {/* Capped height — leaves room for the Processing Activities card below */}
+          <div className="shrink-0 overflow-y-auto custom-scrollbar flex flex-col gap-2 pr-1" style={{ maxHeight: '240px' }}>
+            {cardsLoading ? (
+              <div className="p-8 text-center text-[#968C83] text-sm">Loading processes...</div>
+            ) : sortedCards.length === 0 ? (
+              <div className="p-8 text-center text-[#968C83] text-sm">No processes found.</div>
+            ) : (
+              sortedCards.map(p => (
+                <Card key={p.id} className="p-3 shrink-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-mono text-[#007680] text-xs font-bold truncate">{p.process_number}</div>
+                      <div className="text-[9px] text-[#968C83] uppercase font-semibold truncate">{p.process_type}</div>
+                    </div>
+                    <div className={`text-right font-mono font-bold text-sm shrink-0 ${p.pnl > 0 ? 'text-[#97D700]' : p.pnl < 0 ? 'text-[#B9975B]' : 'text-[#968C83]'}`}>
+                      {p.pnl > 0 ? '+' : ''}{formatNumber(p.pnl)}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-[#F5F5F3] text-[10px] text-[#968C83]">
+                    <span>{p.instructed_date ? formatDate(p.instructed_date) : 'No instructed date'}</span>
+                    <span className="font-mono">{formatNumber(convertQty(p.input_qty, unit), unit === 'kg' ? 0 : 2)} → {formatNumber(convertQty(p.output_qty, unit), unit === 'kg' ? 0 : 2)} {unit}</span>
+                  </div>
+                </Card>
+              ))
+            )}
+          </div>
+
+          {/* Weekly trend: total processing loss + % work done, last 4 weeks */}
+          <Card className="p-3 shrink-0 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-[#51534a]">Weekly Trend</h2>
+              <span className="text-[9px] font-bold text-[#968C83] uppercase">Last {trendChartData.length || 4} Weeks</span>
+            </div>
+            <div style={{ height: 150 }}>
+              {trendLoading ? (
+                <div className="h-full flex items-center justify-center text-[#968C83] text-xs">Loading...</div>
+              ) : trendChartData.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-[#968C83] text-xs">No weekly data yet.</div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={trendChartData} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#D6D2C4" />
+                    <XAxis dataKey="weekLabel" tick={{ fontSize: 9 }} tickLine={false} axisLine={{ stroke: '#D6D2C4' }} />
+                    <YAxis yAxisId="loss" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={34} />
+                    <YAxis yAxisId="pct" orientation="right" domain={[0, 100]} tick={{ fontSize: 9 }} tickLine={false} axisLine={false} width={30} />
+                    <Tooltip
+                      formatter={(value: number, name: string) =>
+                        name === '% Work Done' ? [`${formatNumber(value, 1)}%`, name] : [`${formatNumber(value, 2)} ${unit}`, name]
+                      }
+                      labelFormatter={(label, payload) => (payload && payload[0] ? `Week ${payload[0].payload.week}` : label)}
+                      contentStyle={{ fontSize: 11, borderRadius: 8, border: '1px solid #D6D2C4' }}
+                    />
+                    <Legend wrapperStyle={{ fontSize: 10 }} />
+                    <Line yAxisId="loss" type="monotone" dataKey="loss" name={`Processing Loss (${unit.toUpperCase()})`} stroke="#B9975B" strokeWidth={2} dot={{ r: 3 }} />
+                    <Line yAxisId="pct" type="monotone" dataKey="pctWorkDone" name="% Work Done" stroke="#007680" strokeWidth={2} dot={{ r: 3 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </Card>
+
+          {/* Processing Activities: Input / Output / Gain-Loss per process type — most recent week */}
+          <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-sm border-none">
+            <div className="px-3 py-2 border-b border-[#D6D2C4] bg-white shrink-0 flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold text-[#51534a]">Processing Activities</h2>
+              {weeklyActivityWeek && <span className="text-[10px] font-bold text-[#968C83] uppercase">Week {weeklyActivityWeek}</span>}
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
+              {weeklyActivityLoading ? (
+                <div className="p-6 text-center text-[#968C83] text-sm">Loading...</div>
+              ) : activityRows.rows.length === 0 ? (
+                <div className="p-6 text-center text-[#968C83] text-sm">No activity recorded for the most recent week.</div>
+              ) : (
+                <table className="w-full text-xs text-left border-separate border-spacing-0">
+                  <thead className="sticky top-0 z-10">
+                    <tr>
+                      <th className="py-1.5 px-2 text-[#51534a] font-bold border-b border-[#D6D2C4] bg-[#007680] text-white">Process Type</th>
+                      <th className="py-1.5 px-2 text-right text-white font-bold border-b border-[#D6D2C4] bg-[#007680]">Input ({unit.toUpperCase()})</th>
+                      <th className="py-1.5 px-2 text-right text-white font-bold border-b border-[#D6D2C4] bg-[#007680]">Output ({unit.toUpperCase()})</th>
+                      <th className="py-1.5 px-2 text-right text-white font-bold border-b border-[#D6D2C4] bg-[#007680]">Gain/Loss</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activityRows.rows.map(r => {
+                      const pct = r.input > 0 ? (r.lossGain / r.input) * 100 : 0;
+                      const badgeClass = pct > 0 ? 'bg-[#97D700] text-[#2b3a1f]' : pct < 0 ? 'bg-red-500 text-white' : 'bg-[#51534a] text-white';
+                      return (
+                        <tr key={r.type} className="hover:bg-[#F5F5F3]/60">
+                          <td className="py-1.5 px-2 text-[#51534a] font-medium border-b border-[#F5F5F3] whitespace-nowrap">{r.type}</td>
+                          <td className="py-1.5 px-2 text-right font-mono text-[#51534a] border-b border-[#F5F5F3]">{formatNumber(r.input, unit === 'kg' ? 0 : 2)} {unit}</td>
+                          <td className="py-1.5 px-2 text-right font-mono text-[#51534a] border-b border-[#F5F5F3]">{formatNumber(r.output, unit === 'kg' ? 0 : 2)} {unit}</td>
+                          <td className="py-1.5 px-2 text-right border-b border-[#F5F5F3] whitespace-nowrap">
+                            <span className="font-mono text-[#51534a] mr-1.5">{formatNumber(Math.abs(r.lossGain), unit === 'kg' ? 0 : 2)} {unit}</span>
+                            <span className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold ${badgeClass}`}>
+                              {pct > 0 ? '+' : ''}{formatNumber(pct)}%
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot className="sticky bottom-0 z-10 shadow-[0_-2px_4px_rgba(0,0,0,0.08)]">
+                    <tr>
+                      <td className="py-1.5 px-2 sticky left-0 bg-[#51534a] text-white font-bold z-10 whitespace-nowrap">Total</td>
+                      <td className="py-1.5 px-2 text-right font-mono bg-[#51534a] text-white font-bold">{formatNumber(activityRows.totalInput, unit === 'kg' ? 0 : 2)} {unit}</td>
+                      <td className="py-1.5 px-2 text-right font-mono bg-[#51534a] text-white font-bold">{formatNumber(activityRows.totalOutput, unit === 'kg' ? 0 : 2)} {unit}</td>
+                      <td className="py-1.5 px-2 text-right bg-[#51534a] font-bold whitespace-nowrap">
+                        {(() => {
+                          const totalPct = activityRows.totalInput > 0 ? (activityRows.totalLossGain / activityRows.totalInput) * 100 : 0;
+                          const colorClass = totalPct > 0 ? 'text-[#97D700]' : totalPct < 0 ? 'text-red-400' : 'text-white';
+                          return (
+                            <>
+                              <span className="font-mono text-white mr-1.5">{formatNumber(Math.abs(activityRows.totalLossGain), unit === 'kg' ? 0 : 2)} {unit}</span>
+                              <span className={`font-mono ${colorClass}`}>({totalPct > 0 ? '+' : ''}{formatNumber(totalPct)}%)</span>
+                            </>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              )}
+            </div>
+          </Card>
+        </div>
       </div>
     </div>
   );
@@ -725,6 +1378,15 @@ function ProcessDetailsView({ process, onClose }: { process: DailyProcess; onClo
               <div className={`font-mono font-bold ${process.physical_loss_gain_pnl >= 0 ? 'text-[#97D700]' : 'text-[#B9975B]'}`}>
                   {process.physical_loss_gain_pnl > 0 ? '+' : ''}{formatNumber(process.physical_loss_gain_pnl)} <span className="text-xs font-normal opacity-70">USD</span>
               </div>
+
+              {process.transformation_pnl !== null && (
+                <>
+                  <div className="text-xs text-[#968C83] mt-2 mb-1">Transformation P&L</div>
+                  <div className={`font-mono font-bold ${process.transformation_pnl >= 0 ? 'text-[#97D700]' : 'text-[#B9975B]'}`}>
+                      {process.transformation_pnl > 0 ? '+' : ''}{formatNumber(process.transformation_pnl)} <span className="text-xs font-normal opacity-70">USD</span>
+                  </div>
+                </>
+              )}
            </div>
         </div>
 

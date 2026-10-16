@@ -8,6 +8,8 @@ export async function GET(request: Request) {
     const id = searchParams.get("id");
     const fromDate = searchParams.get("fromDate") || undefined;
     const toDate = searchParams.get("toDate") || undefined;
+    const dateField = searchParams.get("dateField") === 'instructed_date' ? 'instructed_date' : 'processing_date';
+    const allTime = searchParams.get("allTime") === 'true';
 
     // SCENARIO 1: Get Details for a specific Process ID
     if (id) {
@@ -21,7 +23,7 @@ export async function GET(request: Request) {
     }
 
     // SCENARIO 2: Get List of Processes (with optional date filtering)
-    const processes = await getDailyProcesses(fromDate, toDate);
+    const processes = await getDailyProcesses(fromDate, toDate, dateField, !allTime);
     return NextResponse.json(processes);
     
   } catch (error) {

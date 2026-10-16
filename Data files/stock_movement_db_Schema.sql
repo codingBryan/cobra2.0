@@ -102,13 +102,21 @@ CREATE TABLE daily_strategy_activities (
 CREATE TABLE daily_processes (
     id INT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Primary Key for the process record.',
     summary_id INT UNSIGNED NOT NULL COMMENT 'Foreign Key linking to the parent daily summary.',
-    processing_date DATE NOT NULL COMMENT 'The date the processing took place.',
+    processing_date DATE NOT NULL COMMENT 'The date the processing took place (Receipt Date).',
+    instructed_date DATE NULL COMMENT 'The date the process was instructed (Issue Date).',
     process_type VARCHAR(100) NOT NULL COMMENT 'e.g., Milling, Sorting.',
     process_number VARCHAR(100) NOT NULL COMMENT 'Unique identifier for the process.',
     input_qty DECIMAL(10, 2) NOT NULL,
     output_qty DECIMAL(10, 2) NOT NULL,
     milling_loss DECIMAL(10, 2) NOT NULL,
     processing_loss_gain_qty DECIMAL(10, 2) NOT NULL,
+    input_value DECIMAL(10, 2) COMMENT 'Theoretical valo-based value of the inputs, in dollars.',
+    output_value DECIMAL(10, 2) COMMENT 'Theoretical valo-based value of the outputs, in dollars.',
+    -- transformation_pnl + physical_loss_gain_pnl = pnl (output_value - input_value). See
+    -- calculate_and_update_trade_variables_for_other_processes() in lib/stack_pricing_utils.ts.
+    transformation_pnl DECIMAL(10, 2) COMMENT 'PNL component from the strategy/valo difference alone (output_value - input value priced at output qty).',
+    physical_loss_gain_pnl DECIMAL(10, 2) COMMENT 'PNL component from the processing qty delta alone, valued at the input blended valo rate.',
+    pnl DECIMAL(10, 2) COMMENT 'Total theoretical PNL: output_value - input_value.',
     trade_variables_updated BOOLEAN DEFAULT FALSE,
 
     PRIMARY KEY (id),
@@ -339,7 +347,8 @@ CREATE TABLE certified_stock_tracker (
     season VARCHAR(20) NOT NULL,
     sale_type VARCHAR(50),
     outturn VARCHAR(50),
-    lot_number VARCHAR(50),
+    lot VARCHAR(50),
+    sale_number VARCHAR(50),
     cooperative VARCHAR(100),
     wet_mill VARCHAR(100),
     county VARCHAR(50),
@@ -377,7 +386,7 @@ CREATE TABLE certified_stock_tracker (
     fully_declared BOOLEAN DEFAULT FALSE,
     
     -- Optional: Indexing frequently queried columns speeds up search operations
-    INDEX idx_lot_number (lot_number),
+    INDEX idx_lot (lot),
     INDEX idx_grower_code (grower_code)
 );
 
@@ -419,7 +428,39 @@ CREATE TABLE sale_contract_stock (
     
     FOREIGN KEY (sale_contract_id) REFERENCES sale_contract(id) ON DELETE CASCADE,
     FOREIGN KEY (stock_tracker_id) REFERENCES certified_stock_tracker(id) ON DELETE CASCADE,
-    
+
     -- Index for reverse lookups (finding contracts by stock)
     INDEX idx_stock_tracker_id (stock_tracker_id)
+);
+
+-- Table: process_instructions
+-- Ledger of EVERY instructed process (complete or not), upserted by process_number on every
+-- Processing Analysis upload. Exists because daily_processes only ever gets a row for a process
+-- once it has a processing_date AND output batches — an instructed-but-not-yet-completed process
+-- never lands there, so it can't be used as the source of "total instructed volume". This ledger
+-- is what weekly_process_summary.input_weight is actually summed from.
+CREATE TABLE process_instructions (
+    process_number   VARCHAR(100)   NOT NULL,
+    process_type     VARCHAR(100)   NOT NULL,
+    instructed_date  DATE           NOT NULL,
+    input_qty        DECIMAL(12,3)  NOT NULL,
+    PRIMARY KEY (process_number),
+    INDEX idx_instructed_date (instructed_date)
+);
+
+-- Table: weekly_process_summary
+-- Per week (Mon-Sat; Sunday rolls forward into the following week) and process_type: how much was
+-- instructed that week (input_weight, from process_instructions), and how much of that same
+-- instructed volume was also completed within that same week (output_weight / processing_loss,
+-- from daily_processes). Recomputed and overwritten automatically after every Processing Analysis
+-- upload — see updateWeeklyProcessSummary() in lib/sti_processing_utils.ts.
+CREATE TABLE weekly_process_summary (
+    calendar_week    VARCHAR(8)     NOT NULL,   -- Week label, e.g. '2026-W42'
+    process_type     VARCHAR(50)    NOT NULL,
+    input_weight     DECIMAL(12,3)  NOT NULL,
+    output_weight    DECIMAL(12,3)  NOT NULL,
+    processing_loss  DECIMAL(12,3),
+    PRIMARY KEY (calendar_week, process_type),
+    CHECK (input_weight >= 0),
+    CHECK (output_weight >= 0)
 );

@@ -44,7 +44,8 @@ const CONTRACT_QUALITIES = [
 
 interface CertifiedStock {
   id: number;
-  lot_number: string;
+  lot: string;
+  sale_number?: string;
   strategy: string;
   purchased_weight: number;
   rfa_certified: boolean;
@@ -116,7 +117,8 @@ interface DeclarationRow {
   contract_weight: number;
   shipping_date: string;
   stock_id: number;
-  lot_number: string;
+  lot: string;
+  sale_number?: string;
   grade: string;
   strategy: string;
   cooperative: string;
@@ -328,7 +330,8 @@ function buildTrackerRow(stock: CertifiedStock, cert: TrackerCertType) {
     id: stock.id,
     season: displayText(stock.season),
     outturn: displayText(stock.outturn),
-    lot_number: displayText(stock.lot_number),
+    lot: displayText(stock.lot),
+    sale_number: displayText(stock.sale_number),
     strategy: displayText(stock.strategy || stock.grade || stock.cooperative || stock.wet_mill || stock.county),
     cooperative: displayText(stock.cooperative),
     county: displayText(stock.county),
@@ -391,7 +394,7 @@ function getTrackerColumns(cert: TrackerCertType, unit: Unit): TrackerColumn[] {
     { key: "outturn", label: "Outturn", align: "left", render: (row) => row.outturn, exportValue: (row) => row.outturn },
     { key: "strategy", label: "Strategy", align: "left", render: (row) => row.strategy, exportValue: (row) => row.strategy },
     { key: "cooperative", label: "Cooperative", align: "left", render: (row) => row.cooperative, exportValue: (row) => row.cooperative },
-    { key: "lot_number", label: "Lot", align: "left", render: (row) => row.lot_number, exportValue: (row) => row.lot_number },
+    { key: "lot", label: "Lot", align: "left", render: (row) => row.lot, exportValue: (row) => row.lot },
     { key: "county", label: "County", align: "left", render: (row) => row.county, exportValue: (row) => row.county },
     { key: "grade", label: "Grade", align: "left", render: (row) => row.grade, exportValue: (row) => row.grade },
     { key: "grower_code", label: "Grower", align: "left", render: (row) => row.grower_code, exportValue: (row) => row.grower_code },
@@ -686,6 +689,7 @@ export default function CertificationsPage() {
       setTimeout(() => setToast(prev => ({ ...prev, show: false })), 15000);
   };
   const [isManualSalesModalOpen, setIsManualSalesModalOpen] = useState(false);
+  const [isUploadPanelOpen, setIsUploadPanelOpen] = useState(false);
   const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
 
   const [isDirectSale, setIsDirectSale] = useState(true);
@@ -710,6 +714,7 @@ export default function CertificationsPage() {
   });
 
   const [solFile, setSolFile] = useState<File | null>(null);
+  const [dnpFile, setDnpFile] = useState<File | null>(null);
   const [purchaseFile, setPurchaseFile] = useState<File | null>(null);
 
   const [manualSaleForm, setManualSaleForm] = useState({
@@ -997,7 +1002,7 @@ export default function CertificationsPage() {
       })
       .filter((stock) => (trackerDateStartFilter || trackerDateEndFilter ? isWithinDateRange(stock.recorded_date, trackerDateStartFilter, trackerDateEndFilter) : true))
       .filter((stock) => {
-         if (trackerSearchLot && !(stock.lot_number || '').toLowerCase().includes(trackerSearchLot.toLowerCase())) return false;
+         if (trackerSearchLot && !(stock.lot || '').toLowerCase().includes(trackerSearchLot.toLowerCase())) return false;
          if (trackerFilterCounty && stock.county !== trackerFilterCounty) return false;
          if (trackerFilterWetmill && stock.wet_mill !== trackerFilterWetmill) return false;
          if (trackerFilterGrade && stock.grade !== trackerFilterGrade) return false;
@@ -1056,7 +1061,7 @@ export default function CertificationsPage() {
       if (result.nextExpiryDays === null || expiryInfo.days < result.nextExpiryDays) {
         result.nextExpiryDays = expiryInfo.days;
         result.nextExpiryLabel = expiryInfo.label;
-        result.nextExpiryLot = displayText(stock.lot_number);
+        result.nextExpiryLot = displayText(stock.lot);
       }
     });
 
@@ -1401,7 +1406,8 @@ export default function CertificationsPage() {
                       'County': stock.county || '',
                       'Cooperative': stock.cooperative || '',
                       'Purchased Weight': asNumber(stock.purchased_weight),
-                      'Lot Number': stock.lot_number || '',
+                      'Lot Number': stock.lot || '',
+                      'Sale Number': stock.sale_number || '',
                       'Strategy': stock.strategy || '',
                       'allocated Weight': valInThisContract,
                       'Balance': baseVol - asNumber((stock as any)[field])
@@ -1420,7 +1426,8 @@ export default function CertificationsPage() {
                   'County': stock.county || '',
                   'Cooperative': stock.cooperative || '',
                   'Purchased Weight': asNumber(stock.purchased_weight),
-                  'Lot Number': stock.lot_number || '',
+                  'Lot Number': stock.lot || '',
+                  'Sale Number': stock.sale_number || '',
                   'Strategy': stock.strategy || '',
                   'allocated Weight': maxDeclForLotInContract,
                   'Balance': stock._replacementCap || (baseVol - maxDeclForLotInContract) 
@@ -1501,6 +1508,23 @@ export default function CertificationsPage() {
     }
   };
   const COBRA_SERVICE = process.env.NEXT_PUBLIC_COBRA_MICROSERVICE_URL;
+  const handleUploadSol = async () => {
+    if (!solFile) return;
+    const formData = new FormData();
+    formData.append('sol_file', solFile);
+    if (dnpFile) formData.append('daily_net_position_file', dnpFile);
+
+    try {
+      const response = await fetch(COBRA_SERVICE+'/api/upload_sol_report', { method: 'POST', body: formData });
+      if (!response.ok) throw new Error("Failed to upload reports.");
+      alert("Reports uploaded successfully!");
+      setIsUploadPanelOpen(false);
+      window.location.reload();
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    }
+  };
+
   const handleUploadPurchasesSubmit = async (e: React.FormEvent) => {
 
 
@@ -2053,7 +2077,7 @@ export default function CertificationsPage() {
                                    <td className="py-3 px-4 text-center">
                                        <input type="checkbox" readOnly checked={replacementSelected.has(stock.id)} className="w-4 h-4 accent-[#007680] text-[#007680] rounded" />
                                    </td>
-                                   <td className="py-3 px-4 font-bold text-[#007680]">{stock.lot_number}</td>
+                                   <td className="py-3 px-4 font-bold text-[#007680]">{stock.lot}</td>
                                    <td className="py-3 px-4 text-[#51534a]">{stock.grade || '-'}</td>
                                    <td className="py-3 px-4 text-[#51534a]">
                                        <div className="flex flex-col">
@@ -2165,7 +2189,7 @@ export default function CertificationsPage() {
                                       <tbody className="divide-y divide-[#D6D2C4]">
                                           {activeLots.length > 0 ? activeLots.map((lot, idx) => (
                                               <tr key={lot.stock_id} className={idx % 2 === 0 ? "bg-white" : "bg-[#FCF7EA] hover:bg-[#D6D2C4]/20 transition-colors"}>
-                                                  <td className="py-3 px-4 font-bold text-[#007680]">{lot.lot_number}</td>
+                                                  <td className="py-3 px-4 font-bold text-[#007680]">{lot.lot}</td>
                                                   <td className="py-3 px-4 text-[#51534a]">{lot.grade || '-'}</td>
                                                   <td className="py-3 px-4 text-[#51534a]">{lot.strategy || '-'}</td>
                                                   <td className="py-3 px-4 text-[#51534a]">
@@ -2193,7 +2217,7 @@ export default function CertificationsPage() {
                                                                   oldStockId: lot.stock_id,
                                                                   contractCerts: Array.from(contract.certs) as string[],
                                                                   replacedVolume: maxVol,
-                                                                  oldLotNumber: lot.lot_number
+                                                                  oldLotNumber: lot.lot
                                                               });
                                                           }}
                                                           className="text-[#B9975B] hover:text-[#5B3427] font-bold text-[11px] uppercase tracking-wider underline underline-offset-2 transition-colors"
@@ -2549,6 +2573,38 @@ export default function CertificationsPage() {
         </div>
       )}
 
+      {/* --- ADD / UPLOAD RECORDS MODAL --- */}
+      {isUploadPanelOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-[#EFEFE9] w-full max-w-4xl rounded-xl shadow-2xl flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-[#D6D2C4] bg-white">
+              <h2 className="text-lg font-bold text-[#51534a] flex items-center gap-2">
+                <div className="w-8 h-8 bg-[#007680] rounded flex items-center justify-center text-white"><Plus size={18} /></div>
+                Add / Upload Records
+              </h2>
+              <button onClick={() => setIsUploadPanelOpen(false)} className="text-[#968C83] hover:text-[#51534a]"><X size={20} /></button>
+            </div>
+            <div className="flex flex-col md:flex-row divide-[#D6D2C4] bg-[#F5F5F3]">
+              <div className="flex-1 p-6 flex flex-col gap-6">
+                <div><h3 className="font-bold text-[#51534a] text-sm">Upload Purchases</h3></div>
+                <FileDropZone label="XBS Template" accept=".xls,.xlsx" file={purchaseFile} onFileAdded={setPurchaseFile} onRemoveFile={() => setPurchaseFile(null)} />
+                <button onClick={() => setIsPurchaseModalOpen(true)} disabled={!purchaseFile} className="w-full bg-[#51534a] text-white px-4 py-2 rounded text-sm font-medium">Next</button>
+              </div>
+              <div className="flex-1 p-6 flex flex-col gap-6 bg-white/50 border-l border-[#D6D2C4]">
+                <div><h3 className="font-bold text-[#51534a] text-sm">Add Sales & Daily Position</h3></div>
+                <div className="grid grid-cols-1 gap-4">
+                  <FileDropZone label="SOL Report *" accept=".xls,.xlsx" file={solFile} onFileAdded={setSolFile} onRemoveFile={() => setSolFile(null)} />
+                  <FileDropZone label="Daily Net Position (Optional)" accept=".xls,.xlsx" file={dnpFile} onFileAdded={setDnpFile} onRemoveFile={() => setDnpFile(null)} />
+                  {solFile && <button onClick={handleUploadSol} className="w-full bg-[#007680] text-white px-4 py-2 rounded text-sm font-medium flex justify-center items-center gap-2"><CloudUpload size={16}/> Upload Reports</button>}
+                </div>
+                <div className="flex items-center gap-4 my-2"><div className="h-px bg-[#D6D2C4] flex-1"></div><span className="text-[10px] font-bold text-[#968C83]">OR</span><div className="h-px bg-[#D6D2C4] flex-1"></div></div>
+                <button onClick={() => setIsManualSalesModalOpen(true)} disabled={!!solFile} className="w-full bg-white border-2 border-[#007680] text-[#007680] px-4 py-2 rounded text-sm font-bold">Manual Entry</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {isPurchaseModalOpen && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
           <div className="bg-white w-full max-w-sm rounded-xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 my-8">
@@ -2649,7 +2705,9 @@ export default function CertificationsPage() {
               ))}
             </div>
 
-           
+            <button onClick={() => setIsUploadPanelOpen(true)} className="flex items-center justify-center w-10 h-10 bg-[#007680] text-white rounded-lg hover:bg-[#007680]/90 shadow-sm" title="Add / Upload Records">
+              <Plus size={20} />
+            </button>
           </div>
         </header>
 

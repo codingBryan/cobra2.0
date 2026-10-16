@@ -799,7 +799,7 @@ function getMappedStrategy(strategy: string, mappings: Record<string, string[]>)
 //             physicalLossGainPnlDollars, 
 //             finalPnl, 
 //             processId
-//         ],
+//         ],B
 //     });
 
 //     console.log(`[${processNumber}] Success. PnL: $${finalPnl.toFixed(2)} | Physical Impact: $${physicalLossGainPnlDollars.toFixed(2)}`);
@@ -1102,6 +1102,13 @@ export async function calculate_and_update_trade_variables_for_other_processes(
 
 
     // --- STEP 5: PNL & Value Calculations (O(1) Algebraic Math) ---
+    // Matches the Python reference implementation (processing_parser.py: calculate_pnl_for_process):
+    //   input_value_at_output_qty = output_qty * weighted_avg_input_valo   <- the pivot value
+    //   transformation_pnl = output_value - input_value_at_output_qty      <- value change from strategy/valo alone
+    //   physical_loss_pnl  = input_value_at_output_qty - input_value       <- value change from the qty delta alone
+    //   PNL = output_value - input_value = transformation_pnl + physical_loss_pnl
+    // (previously this added physicalLossGainPnlDollars a second time on top of output-input, which
+    // double-counted the physical component instead of reproducing OV - IV.)
 
     const inputValueDollars = (inputValoProductSum * KG_TO_LBS) / 100;
 
@@ -1109,15 +1116,17 @@ export async function calculate_and_update_trade_variables_for_other_processes(
 
 
 
-    const weightedAvgInputValoCents = inputValoProductSum / totalInputQty; 
+    const weightedAvgInputValoCents = inputValoProductSum / totalInputQty;
 
-    const weightDiffKg = totalOutputQty - totalInputQty;
+    const inputValueAtOutputQtyDollars = (totalOutputQty * KG_TO_LBS * weightedAvgInputValoCents) / 100;
 
-    const physicalLossGainPnlDollars = (weightDiffKg * KG_TO_LBS * weightedAvgInputValoCents) / 100;
+    const transformationPnlDollars = outputValueDollars - inputValueAtOutputQtyDollars;
+
+    const physicalLossGainPnlDollars = inputValueAtOutputQtyDollars - inputValueDollars;
 
 
 
-    const finalPnl = outputValueDollars - inputValueDollars + physicalLossGainPnlDollars;
+    const finalPnl = outputValueDollars - inputValueDollars; // = transformationPnlDollars + physicalLossGainPnlDollars
 
 
 
@@ -1189,29 +1198,33 @@ export async function calculate_and_update_trade_variables_for_other_processes(
 
     await query<ResultSetHeader>({
 
-        query: `UPDATE daily_processes 
+        query: `UPDATE daily_processes
 
-                SET trade_variables_updated = TRUE, 
+                SET trade_variables_updated = TRUE,
 
-                    input_value = ?, 
+                    input_value = ?,
 
-                    output_value = ?, 
+                    output_value = ?,
 
                     physical_loss_gain_pnl = ?,
 
-                    pnl = ? 
+                    transformation_pnl = ?,
+
+                    pnl = ?
 
                 WHERE id = ?`,
 
         values: [
 
-            inputValueDollars, 
+            inputValueDollars,
 
-            outputValueDollars, 
+            outputValueDollars,
 
-            physicalLossGainPnlDollars, 
+            physicalLossGainPnlDollars,
 
-            finalPnl, 
+            transformationPnlDollars,
+
+            finalPnl,
 
             processId
 
@@ -1221,7 +1234,7 @@ export async function calculate_and_update_trade_variables_for_other_processes(
 
 
 
-    console.log(`[${processNumber}] Success. PnL: $${finalPnl.toFixed(2)} | Physical Impact: $${physicalLossGainPnlDollars.toFixed(2)}`);
+    console.log(`[${processNumber}] Success. PnL: $${finalPnl.toFixed(2)} | Transformation: $${transformationPnlDollars.toFixed(2)} | Physical Impact: $${physicalLossGainPnlDollars.toFixed(2)}`);
 
     return true;
 
@@ -1300,7 +1313,7 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     let wSumCost = 0;
     let wSumHedge = 0;
     let wSumDiff = 0;
-    let totalInputValueCents = 0;
+    let inputValoProductSum = 0; // sum(qty_kg * valo_usc_lb), KG_TO_LBS applied once below
 
     for (const rec of updatedInputs) {
         const qty = Number(rec.input_qty);
@@ -1321,9 +1334,7 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
             inputValo = STRATEGY_VALOS[mainStrategy];
         }
 
-        // Value: (Hedge + Valo) * Qty * 2.205
-        const theoreticalInputPrice = hedge + inputValo;
-        totalInputValueCents += (inputValo * qty * KG_TO_LBS);
+        inputValoProductSum += (inputValo * qty);
     }
 
     if (totalInputQty === 0) return false;
@@ -1336,9 +1347,10 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     if (!Number.isFinite(avgCost)) { avgCost = null; avgHedge = null; avgDiff = null; }
 
     // --- Calculate OUTPUT VALUE (Cents) ---
-    // Logic: (OutputHedge + OutputValo) * OutputQty * 2.205
-    // Output Hedge for bulking IS the Weighted Avg Input Hedge
-    
+    // Logic: OutputValo * OutputQty * 2.205
+    // Output Hedge for bulking IS the Weighted Avg Input Hedge (unchanged — see output_cost_usd_50/
+    // output_hedge_level_usc_lb/output_differential update below, left untouched by this fix)
+
     let outputValo = 0;
     if (outputBatch.strategy && outputBatch.strategy !== 'UNDEFINED') {
         const mainStrategy = mapStrategyToMainKey(outputBatch.strategy);
@@ -1348,19 +1360,24 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     }
 
     const outputQty = Number(outputBatch.output_qty);
-    let totalOutputValueCents = 0;
-    
-    if (avgHedge !== null) {
-        const theoreticalOutputPrice = avgHedge + outputValo;
-        totalOutputValueCents = outputValo * outputQty * KG_TO_LBS;
-    }
+    const outputValoProductSum = outputValo * outputQty;
 
-    // --- PnL Calculation ---
-    const pnl = (totalOutputValueCents - totalInputValueCents) / 100;
-    const inputValueDollars = totalInputValueCents / 100;
-    const outputValueDollars = totalOutputValueCents / 100;
+    // --- PNL & Value Calculations (same decomposition as the generic multi-batch path — see
+    // calculate_and_update_trade_variables_for_other_processes STEP 5 — so bulking and generic
+    // processes report PNL consistently):
+    //   input_value_at_output_qty = output_qty * weighted_avg_input_valo   <- the pivot value
+    //   transformation_pnl = output_value - input_value_at_output_qty      <- value change from strategy/valo alone
+    //   physical_loss_pnl  = input_value_at_output_qty - input_value       <- value change from the qty delta alone
+    //   PNL = output_value - input_value = transformation_pnl + physical_loss_pnl
+    const inputValueDollars = (inputValoProductSum * KG_TO_LBS) / 100;
+    const outputValueDollars = (outputValoProductSum * KG_TO_LBS) / 100;
+    const weightedAvgInputValoCents = inputValoProductSum / totalInputQty;
+    const inputValueAtOutputQtyDollars = (outputQty * KG_TO_LBS * weightedAvgInputValoCents) / 100;
+    const transformationPnlDollars = outputValueDollars - inputValueAtOutputQtyDollars;
+    const physicalLossGainPnlDollars = inputValueAtOutputQtyDollars - inputValueDollars;
+    const pnl = outputValueDollars - inputValueDollars; // = transformationPnlDollars + physicalLossGainPnlDollars
 
-    // Update Output Record (Standard Accounting Updates)
+    // Update Output Record (Standard Accounting Updates) — pricing logic unchanged
     await query<ResultSetHeader>({
         query: `UPDATE daily_strategy_processing SET output_cost_usd_50 = ?, output_hedge_level_usc_lb = ?, output_differential = ? WHERE id = ?`,
         values: [avgCost, avgHedge, avgDiff, outputBatch.id],
@@ -1372,11 +1389,25 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
 
     // Update Process Record
     await query<ResultSetHeader>({
-        query: `UPDATE daily_processes SET trade_variables_updated = TRUE, input_value = ?, output_value = ?, pnl = ? WHERE id = ?`,
-        values: [inputValueDollars, outputValueDollars, pnl, processId],
+        query: `UPDATE daily_processes
+                SET trade_variables_updated = TRUE,
+                    input_value = ?,
+                    output_value = ?,
+                    physical_loss_gain_pnl = ?,
+                    transformation_pnl = ?,
+                    pnl = ?
+                WHERE id = ?`,
+        values: [
+            inputValueDollars,
+            outputValueDollars,
+            physicalLossGainPnlDollars,
+            transformationPnlDollars,
+            pnl,
+            processId
+        ],
     });
 
-    console.log(`[${processNumber}] Successfully updated BULKING. PnL: $${pnl.toFixed(2)}`);
+    console.log(`[${processNumber}] Successfully updated BULKING. PnL: $${pnl.toFixed(2)} | Transformation: $${transformationPnlDollars.toFixed(2)} | Physical Impact: $${physicalLossGainPnlDollars.toFixed(2)}`);
     return true;
 }
 

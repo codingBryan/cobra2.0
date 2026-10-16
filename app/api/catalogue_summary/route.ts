@@ -79,8 +79,8 @@ export async function POST(request: NextRequest) {
         
         const tableName = 'catalogue_summary';
         const columns = [
-            'sale_type', 'sale_number', 'outturn', 'grower_mark', 'lot_number', 
-            'weight', 'grade', 'season', 'certification', 'batch_number', 
+            'sale_type', 'sale_number', 'outturn', 'grower_mark', 'lot_number',
+            'weight', 'grade', 'season', 'certification', 'batch_number',
             'cost_usd_50', 'hedge_usc_lb', 'diff_usc_lb', 'trade_month'
         ];
 
