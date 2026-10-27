@@ -713,22 +713,28 @@ function ProcessSummaryTab({ unit }: { unit: Unit }) {
     direction: 'desc'
   });
 
-  // Processing Activities card: always the most recent week in weekly_process_summary —
-  // independent of the matrix's date filter above, so it isn't fetched in that effect.
+  // Processing Activities card: defaults to the most recent week in weekly_process_summary, or a
+  // specific week once the user picks one from the filter — independent of the matrix's date
+  // filter above, so it isn't fetched in that effect.
   const [weeklyActivityLoading, setWeeklyActivityLoading] = useState(true);
   const [weeklyActivityWeek, setWeeklyActivityWeek] = useState<string | null>(null);
   const [weeklyActivityRows, setWeeklyActivityRows] = useState<WeeklyProcessSummaryRow[]>([]);
+  const [availableWeeks, setAvailableWeeks] = useState<string[]>([]);
+  // '' means "latest" (the default, unfiltered view).
+  const [selectedWeek, setSelectedWeek] = useState<string>('');
 
   useEffect(() => {
     let cancelled = false;
     async function loadWeeklyActivity() {
       setWeeklyActivityLoading(true);
       try {
-        const res = await fetch('/api/processes/weekly-summary');
+        const url = selectedWeek ? `/api/processes/weekly-summary?week=${encodeURIComponent(selectedWeek)}` : '/api/processes/weekly-summary';
+        const res = await fetch(url);
         if (!cancelled && res.ok) {
           const data = await res.json();
           setWeeklyActivityWeek(data.calendar_week || null);
           setWeeklyActivityRows(data.rows || []);
+          setAvailableWeeks(data.availableWeeks || []);
         }
       } catch (e) {
         console.error('Failed to load weekly process activity', e);
@@ -738,7 +744,7 @@ function ProcessSummaryTab({ unit }: { unit: Unit }) {
     }
     loadWeeklyActivity();
     return () => { cancelled = true; };
-  }, []);
+  }, [selectedWeek]);
 
   // Weekly trend chart: total processing loss & % work done, last 4 weeks — also independent of
   // the matrix's date filter.
@@ -1183,17 +1189,26 @@ function ProcessSummaryTab({ unit }: { unit: Unit }) {
             </div>
           </Card>
 
-          {/* Processing Activities: Input / Output / Gain-Loss per process type — most recent week */}
+          {/* Processing Activities: Input / Output / Gain-Loss per process type — pick any week, defaults to most recent */}
           <Card className="flex-1 min-h-0 flex flex-col overflow-hidden shadow-sm border-none">
             <div className="px-3 py-2 border-b border-[#D6D2C4] bg-white shrink-0 flex items-center justify-between gap-2">
               <h2 className="text-sm font-bold text-[#51534a]">Processing Activities</h2>
-              {weeklyActivityWeek && <span className="text-[10px] font-bold text-[#968C83] uppercase">Week {weeklyActivityWeek}</span>}
+              <select
+                value={selectedWeek}
+                onChange={e => setSelectedWeek(e.target.value)}
+                className="text-[10px] font-bold text-[#51534a] uppercase border border-[#D6D2C4] rounded px-1.5 py-0.5 outline-none bg-white"
+              >
+                <option value="">Latest {weeklyActivityWeek && !selectedWeek ? `(${weeklyActivityWeek})` : ''}</option>
+                {availableWeeks.map(w => (
+                  <option key={w} value={w}>Week {w}</option>
+                ))}
+              </select>
             </div>
             <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
               {weeklyActivityLoading ? (
                 <div className="p-6 text-center text-[#968C83] text-sm">Loading...</div>
               ) : activityRows.rows.length === 0 ? (
-                <div className="p-6 text-center text-[#968C83] text-sm">No activity recorded for the most recent week.</div>
+                <div className="p-6 text-center text-[#968C83] text-sm">No activity recorded for {selectedWeek ? `week ${selectedWeek}` : 'the most recent week'}.</div>
               ) : (
                 <table className="w-full text-xs text-left border-separate border-spacing-0">
                   <thead className="sticky top-0 z-10">

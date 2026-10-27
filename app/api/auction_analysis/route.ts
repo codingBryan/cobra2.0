@@ -8,6 +8,39 @@ export async function GET(request: Request) {
 
     const { searchParams } = new URL(request.url);
     const seasonsParam = searchParams.get('seasons');
+    const recentSalesParam = searchParams.get('recentSales');
+
+    // Season-independent mode: the last N distinct (season, sale_number) sales, by recency,
+    // regardless of which season(s) are selected in the sidebar filter. Used by the Season
+    // Analysis tab's "last N sales" charts, which are meant to ignore the season filter entirely.
+    if (recentSalesParam) {
+      const n = Math.max(1, Math.min(52, parseInt(recentSalesParam, 10) || 4));
+
+      const recentSalesQuery = `
+        SELECT season, sale_number
+        FROM nce_transactions
+        WHERE weight > 0 AND season IS NOT NULL AND sale_number IS NOT NULL
+        GROUP BY season, sale_number
+        ORDER BY MAX(id) DESC
+        LIMIT ?
+      `;
+      const [recentSaleRows] = await pool.query<RowDataPacket[]>(recentSalesQuery, [n]);
+
+      if (recentSaleRows.length === 0) {
+        return NextResponse.json({ data: [] }, { status: 200 });
+      }
+
+      const pairPlaceholders = recentSaleRows.map(() => '(season = ? AND sale_number = ?)').join(' OR ');
+      const pairParams = recentSaleRows.flatMap(r => [r.season, r.sale_number]);
+      const rowsQuery = `
+        SELECT *
+        FROM nce_transactions
+        WHERE weight > 0 AND (${pairPlaceholders})
+      `;
+      const [rows] = await pool.query<RowDataPacket[]>(rowsQuery, pairParams);
+
+      return NextResponse.json({ data: rows }, { status: 200 });
+    }
 
     let query = '';
     let params: any[] = [];

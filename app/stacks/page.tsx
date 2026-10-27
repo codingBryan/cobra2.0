@@ -664,6 +664,9 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
   const [isUploadingStock, setIsUploadingStock] = useState(false);
   const [overwriteModalOpen, setOverwriteModalOpen] = useState(false);
   const [existingSummaryId, setExistingSummaryId] = useState<number>(0);
+  // Guards against a double-click on "Yes, Overwrite" firing two overlapping upload flows
+  // that each delete/recreate today's daily_stock_summaries row out from under each other.
+  const overwriteInFlightRef = useRef(false);
 
   // Handlers Section 1: Catalogue Upload
   const handleUploadCatalogue = async () => {
@@ -916,9 +919,10 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
 
   // --- NEW: Overwrite "Yes" Handler ---
   const handleOverwriteConfirm = async () => {
-    if (!existingSummaryId) return;
+    if (!existingSummaryId || overwriteInFlightRef.current) return;
+    overwriteInFlightRef.current = true;
     setOverwriteModalOpen(false);
-    setIsUploadingStock(true); 
+    setIsUploadingStock(true);
     try {
         const deleteResponse = await fetch(`/api/movement_summary?id=${existingSummaryId}`, {
             method: 'DELETE'
@@ -934,6 +938,8 @@ const FileUploadModal = ({ onClose }: { onClose: () => void }) => {
         alert(`Error during overwrite: ${error.message}`);
         setIsUploadingStock(false);
         setOverwriteModalOpen(false);
+    } finally {
+        overwriteInFlightRef.current = false;
     }
   };
 

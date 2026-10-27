@@ -7,85 +7,6 @@ import fs_node from 'fs';
 import * as path from 'path';
 import { Batch, DailyStrategyRow, LastUpdateDates, PostStackBatchRow, SaleRecord } from "@/custom_utilities/custom_types";
 
-const STRATEGY_VALOS: Record<string, number> = {
-    "SPECIALTY": 160,
-    "AA TOP": 140,
-    "AB TOP": 80,
-    "PB TOP": 80,
-    "AA PLUS": 75.0,
-    "PB PLUS": 60.0,
-    "AB PLUS": 60.0,
-    "ABC PLUS": 50.0,
-    "AA FAQ": 45.0,
-    "PB FAQ": 30.0,
-    "AB FAQ": 30.0,
-    "ABC FAQ": 20.0,
-    "GRINDER BOLD": -5.0,
-    "GRINDER RC": -5.0,
-    "GRINDER LIGHT": -55.0,
-    "REJECTS": -220.0,
-    "MBUNIS": -30.0,
-    "WASTE":-220,
-    "MH":-30
-};
-
-const STRATEGY_MAPPING: Record<string, string[]> = {
-    "SPECIALTY": [
-        "SPECIALTY - WASHED", "SPECIALTY - NATURAL", "SPECIALTY", "NATURAL", "POST NATURAL", "POST WASHED", "POST - WASHED", "IN SPECIALTY - WASHED", "FINISHED SPECIALTY - WASHED", "POST SPECIALTY WASHED",
-    ],
-    "AA TOP": [
-        "AA - TOP", "POST 17 UP TOP", "IN AA - TOP", "PRE AA - TOP", "FINISHED AA - TOP"
-    ],
-    "AB TOP": [
-        "AB - TOP", "FINISHED AB - TOP", "IN AB - TOP", "POST 16 TOP"
-    ],
-    "PB TOP": [
-        "PB-TOP","FINISHED PB-TOP", "PB - Top", "PB - TOP", "POST PB - TOP", "IN PB - TOP", "PRE PB - TOP"
-    ],
-    "AA PLUS": [
-        "AA - PLUS", "IN AA - PLUS", "PRE AA - PLUS", "POST 17 UP PLUS", "FINISHED AA - PLUS"
-    ],
-    "AB PLUS": [
-        "AB - PLUS", "POST 16 PLUS", "POST 15 PLUS", "PRE AB - PLUS", "IN AB - PLUS", "FINISHED AB - PLUS"
-    ],
-    "PB PLUS": [
-        "PB - PLUS", "POST PB - PLUS", "PRE PB - PLUS", "IN PB - PLUS", "FINISHED PB - PLUS"
-    ],
-    "ABC PLUS": [
-        "ABC - PLUS", "POST 14 PLUS", "IN ABC - PLUS", "PRE ABC - PLUS", "FINISHED ABC - PLUS"
-    ],
-    "AA FAQ": [
-        "AA - FAQ", "AA - FAQ MINUS", "FAQ - PLUS", "PRE AA - FAQ", "IN AA - FAQ", "IN AA- FAQ", "IN AA - FAQ PLUS", "FINISHED AA - FAQ MINUS", "POST 17 UP FAQ", "FINISHED AA - FAQ", "POST FAQ PLUS"
-    ],
-    "AB FAQ": [
-        "AB - FAQ", "AB - FAQ MINUS", "PRE AB - FAQ", "IN AB - FAQ", "POST 15 FAQ", "POST FAQ MINUS", "FINISHED AB - FAQ MINUS", "FINISHED AB - FAQ", "POST 16 FAQ"
-    ],
-    "PB FAQ": [
-        "PB - FAQ", "PRE PB - FAQ", "IN PB - FAQ", "POST PB - FAQ", "FINISHED PB - FAQ"
-    ],
-    "ABC FAQ": [
-        "ABC - FAQ", "PRE ABC - FAQ", "IN ABC - FAQ", "POST 14 FAQ", "FINISHED ABC - FAQ"
-    ],
-    "GRINDER BOLD": [
-        "PRE GRINDER BOLD", "IN GRINDER BOLD", "POST GRINDER BOLD", "FINISHED GRINDER BOLD", "FINISHED GRINDER ", "GRINDER BOLD", "FINISHED GRINDER", "GRINDERS "
-    ],
-    "GRINDER RC": [
-     "IN GRINDER RECOVERABLE", "PRE GRINDER RECOVERABLE"
-    ],
-    "GRINDER LIGHT": [
-        "PRE GRINDER LIGHT", "IN GRINDER LIGHT", "POST GRINDER LIGHT", "FINISHED GRINDER LIGHT"
-    ],
-    "MBUNIS": [
-        "MBUNIS", "ML", "MH", "PRE MBUNIS", "POST MH", "IN MBUNIS", "FINISHED MBUNIS", "POST MBUNI HEAVY", "POST MBUNI LIGHT"
-    ],
-    "REJECTS": [
-        "REJECTS L", "REJECT", "REJECTS B", "DEFECTS P. %", "LOW GRADE", "PRE REJECT", "IN REJECT", "IN REJECTS S", "POST REJECTS S", "FINISHED REJECT", "POST REJECTS P"
-    ],
-    "WASTE": [
-         "SWEEPINGS", "DUST", "STONES", "FINISHED DUST"
-    ]
-};
-
 
 /**
  * Interface for the Excel row structure used for strategy lookup
@@ -143,19 +64,6 @@ interface CatalogueSummaryRow extends RowDataPacket {
 }
 
 
-
-function mapStrategyToMainKey(detailedStrategy: string): string | null {
-    const cleanStrategy = detailedStrategy.toUpperCase().trim();
-    for (const mainKey in STRATEGY_MAPPING) {
-        if (STRATEGY_MAPPING[mainKey].some(s => s.toUpperCase().trim() === cleanStrategy)) {
-            return mainKey;
-        }
-    }
-    if (STRATEGY_VALOS.hasOwnProperty(cleanStrategy)) {
-        return cleanStrategy;
-    }
-    return null;
-}
 
 // 1. Define Interface
 interface StockRow {
@@ -1243,7 +1151,11 @@ export async function calculate_and_update_trade_variables_for_other_processes(
 
 
 
-export async function process_bulking(process: DailyProcessRow, enablePush: boolean): Promise<boolean> {
+export async function process_bulking(
+    process: DailyProcessRow,
+    enablePush: boolean,
+    mappingsAndValos?: Awaited<ReturnType<typeof fetchMappingsAndValos>>
+): Promise<boolean> {
     const processId = process.id;
     const processNumber = process.process_number;
 
@@ -1313,28 +1225,37 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     let wSumCost = 0;
     let wSumHedge = 0;
     let wSumDiff = 0;
-    let inputValoProductSum = 0; // sum(qty_kg * valo_usc_lb), KG_TO_LBS applied once below
+    let inputValoProductSum = 0; // sum(qty_kg * valo_usc_lb) — used for the weighted-average input valo
+    let inputValueDollars = 0;   // sum over inputs of (qty_kg * KG_TO_LBS * valo_usc_lb) / 100
+
+    // PNL uses the same strategy mappings & valos as every other process type (reuse caller-supplied ones when available)
+    const { mappings, valos } = mappingsAndValos ?? await fetchMappingsAndValos();
 
     for (const rec of updatedInputs) {
+        // Skip the whole BULKING if any input has no usable strategy (UNDEFINED, empty or unmapped)
+        const inputStrategy = (rec.strategy || '').trim();
+        const inputMainStrategy = inputStrategy && inputStrategy.toUpperCase() !== 'UNDEFINED'
+            ? getMappedStrategy(inputStrategy, mappings)
+            : null;
+        const inputValo = inputMainStrategy ? valos[inputMainStrategy] : null;
+        if (inputValo === null || inputValo === undefined) {
+            console.log(`[${processNumber}] Skipping BULKING: input batch ${rec.batch_number} has undefined/unmapped strategy ("${rec.strategy}").`);
+            return false;
+        }
+
         const qty = Number(rec.input_qty);
         const cost = Number(rec.input_cost_usd_50 || 0);
         const hedge = Number(rec.input_hedge_level_usc_lb || 0);
         const diff = Number(rec.input_differential || 0);
-        const strategy = rec.strategy || 'UNDEFINED';
 
         totalInputQty += qty;
         wSumCost += (qty * cost);
         wSumHedge += (qty * hedge);
         wSumDiff += (qty * diff);
 
-        // Input Valo Lookup
-        let inputValo = 0;
-        const mainStrategy = mapStrategyToMainKey(strategy);
-        if (mainStrategy && STRATEGY_VALOS[mainStrategy] !== undefined) {
-            inputValo = STRATEGY_VALOS[mainStrategy];
-        }
-
+        // Input value for this input alone: valo (USc/lb) * qty (kg -> lb) / 100 -> dollars
         inputValoProductSum += (inputValo * qty);
+        inputValueDollars += (inputValo * qty * KG_TO_LBS) / 100;
     }
 
     if (totalInputQty === 0) return false;
@@ -1351,13 +1272,11 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     // Output Hedge for bulking IS the Weighted Avg Input Hedge (unchanged — see output_cost_usd_50/
     // output_hedge_level_usc_lb/output_differential update below, left untouched by this fix)
 
-    let outputValo = 0;
-    if (outputBatch.strategy && outputBatch.strategy !== 'UNDEFINED') {
-        const mainStrategy = mapStrategyToMainKey(outputBatch.strategy);
-        if (mainStrategy && STRATEGY_VALOS[mainStrategy] !== undefined) {
-            outputValo = STRATEGY_VALOS[mainStrategy];
-        }
-    }
+    // Same rule as the generic path: an undefined/unmapped output strategy means the process can't be priced yet
+    if (!outputBatch.strategy || outputBatch.strategy === 'UNDEFINED') return false;
+    const outputMainStrategy = getMappedStrategy(outputBatch.strategy, mappings);
+    const outputValo = outputMainStrategy ? valos[outputMainStrategy] : null;
+    if (outputValo === null || outputValo === undefined) return false;
 
     const outputQty = Number(outputBatch.output_qty);
     const outputValoProductSum = outputValo * outputQty;
@@ -1369,7 +1288,7 @@ export async function process_bulking(process: DailyProcessRow, enablePush: bool
     //   transformation_pnl = output_value - input_value_at_output_qty      <- value change from strategy/valo alone
     //   physical_loss_pnl  = input_value_at_output_qty - input_value       <- value change from the qty delta alone
     //   PNL = output_value - input_value = transformation_pnl + physical_loss_pnl
-    const inputValueDollars = (inputValoProductSum * KG_TO_LBS) / 100;
+    // inputValueDollars is already summed per input in the loop above
     const outputValueDollars = (outputValoProductSum * KG_TO_LBS) / 100;
     const weightedAvgInputValoCents = inputValoProductSum / totalInputQty;
     const inputValueAtOutputQtyDollars = (outputQty * KG_TO_LBS * weightedAvgInputValoCents) / 100;
@@ -1572,7 +1491,7 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
                     console.log(`[${process.process_number}] BULKING with multiple output batches — using generic multi-input/multi-output calculation.`);
                     await calculate_and_update_trade_variables_for_other_processes(process, true, mappingsAndValos); // enablePush = true
                 } else {
-                    await process_bulking(process, true); // enablePush = true
+                    await process_bulking(process, true, mappingsAndValos); // enablePush = true
                 }
             } else {
                 await calculate_and_update_trade_variables_for_other_processes(process, true, mappingsAndValos); // enablePush = true
@@ -1595,7 +1514,7 @@ export async function update_post_trade_variables(excelFiles: File[] = []): Prom
                     console.log(`[${process.process_number}] BULKING with multiple output batches — using generic multi-input/multi-output calculation.`);
                     success = await calculate_and_update_trade_variables_for_other_processes(process, false, mappingsAndValos); // enablePush = false
                 } else {
-                    success = await process_bulking(process, false); // enablePush = false
+                    success = await process_bulking(process, false, mappingsAndValos); // enablePush = false
                 }
             } else {
                 success = await calculate_and_update_trade_variables_for_other_processes(process, false, mappingsAndValos); // enablePush = false
@@ -1640,7 +1559,7 @@ export async function update_post_trade_variables_unorthodox(): Promise<string[]
                 // Optimization: Add timeout race to prevent infinite hanging
                 const processingPromise = (async () => {
                     if (process.process_type === 'BULKING') {
-                        return await process_bulking(process, true); // enablePush = true
+                        return await process_bulking(process, true, mappingsAndValos); // enablePush = true
                     } else {
                         return await calculate_and_update_trade_variables_for_other_processes(process, true, mappingsAndValos); // enablePush = true
                     }
@@ -1680,7 +1599,7 @@ export async function update_post_trade_variables_unorthodox(): Promise<string[]
                 // Optimization: Add timeout race to prevent infinite hanging
                 const processingPromise = (async () => {
                     if (process.process_type === 'BULKING') {
-                        return await process_bulking(process, false); // enablePush = false
+                        return await process_bulking(process, false, mappingsAndValos); // enablePush = false
                     } else {
                         return await calculate_and_update_trade_variables_for_other_processes(process, false, mappingsAndValos); // enablePush = false
                     }

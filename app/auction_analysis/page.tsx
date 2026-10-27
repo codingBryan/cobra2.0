@@ -251,10 +251,19 @@ export default function AuctionAnalysis() {
   const [buyerPriceMetric, setBuyerPriceMetric] = useState('price');
   const [buyerMixGroupBy, setBuyerMixGroupBy] = useState('grade');
 
+  // Season Summary card: its own independent sale selection (defaults to the last 4 sales),
+  // separate from the Grade Projections / Buyer Deep-Dive sale picker above.
+  const [summarySales, setSummarySales] = useState<string[]>([]);
+
+  // Raw rows for the last-N-sales-regardless-of-season charts — fetched separately from the main
+  // season-scoped `rawData`, since that's always limited to whichever season(s) are selected/loaded.
+  const [recentSalesRawData, setRecentSalesRawData] = useState<any[]>([]);
+
   // Season Analysis Legend Visibility State
   const [hiddenProjectionSeries, setHiddenProjectionSeries] = useState<Set<string>>(new Set());
   const [hiddenBuyerTrendSeries, setHiddenBuyerTrendSeries] = useState<Set<string>>(new Set());
   const [hiddenBuyerMixSeries, setHiddenBuyerMixSeries] = useState<Set<string>>(new Set());
+  const [hiddenSummarySeries, setHiddenSummarySeries] = useState<Set<string>>(new Set());
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -263,6 +272,27 @@ export default function AuctionAnalysis() {
 
   useEffect(() => {
     fetchData(); // Fetch with no arguments triggers 'initial load' behavior on the backend
+  }, []);
+
+  // Season Summary's "last 4 sales" charts need rows that may fall outside whatever season(s) are
+  // currently selected/loaded into `rawData` — so they're fetched separately, once, via a
+  // season-independent endpoint mode (recentSales=N), and never refetched when the season filter changes.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadRecentSales() {
+      try {
+        // 4 displayed sales + the 3 sales before the oldest one, so every displayed point has a full rolling window
+        const res = await fetch('/api/auction_analysis?recentSales=7');
+        if (!cancelled && res.ok) {
+          const json = await res.json();
+          setRecentSalesRawData(Array.isArray(json.data) ? json.data : []);
+        }
+      } catch (e) {
+        console.error('Failed to load recent sales', e);
+      }
+    }
+    loadRecentSales();
+    return () => { cancelled = true; };
   }, []);
 
   const fetchData = async (seasonsToFetch?: string[]) => {
@@ -480,6 +510,8 @@ export default function AuctionAnalysis() {
     let fobbingSum = 0;
     let hedgeSum = 0;
     let weightForAvgs = 0;
+    let diffSum = 0;
+    let weightForDiff = 0;
 
     let aaaVol = 0;
     let rfaVol = 0;
@@ -508,6 +540,13 @@ export default function AuctionAnalysis() {
         hedgeSum += (hedge * w);
         weightForAvgs += w;
       }
+
+      // Differential (USc/lb) = floor_price / 1.10231 - hedge_level + fobbing, weighted by the row's weight
+      const floor = parseFloat(d.floor_price);
+      if (!isNaN(floor) && !isNaN(fob) && !isNaN(hedge) && w > 0) {
+        diffSum += ((floor / 1.10231) - hedge + fob) * w;
+        weightForDiff += w;
+      }
     });
 
     return {
@@ -515,7 +554,8 @@ export default function AuctionAnalysis() {
       certifiedVolume: certVol * weightMultiplier,
       aaaVol, rfaVol, cafeVol, sklVol,
       avgFobbing: weightForAvgs > 0 ? fobbingSum / weightForAvgs : 0,
-      avgHedge: weightForAvgs > 0 ? hedgeSum / weightForAvgs : 0
+      avgHedge: weightForAvgs > 0 ? hedgeSum / weightForAvgs : 0,
+      avgDifferential: weightForDiff > 0 ? diffSum / weightForDiff : null
     };
   }, [filteredData, weightMultiplier]);
 
@@ -666,6 +706,12 @@ export default function AuctionAnalysis() {
     setSeasonAnalysisSales(salesInSeason.slice(-DEFAULT_SALE_COUNT));
   }, [salesInSeason]);
 
+  // Season Summary card defaults to just the last 4 sales of the selected season.
+  const DEFAULT_SUMMARY_SALE_COUNT = 4;
+  useEffect(() => {
+    setSummarySales(salesInSeason.slice(-DEFAULT_SUMMARY_SALE_COUNT));
+  }, [salesInSeason]);
+
   // Default the Buyer Deep-Dive to Kenyacof, once, as soon as it's available in the buyer list.
   const buyerDefaultApplied = useRef(false);
   useEffect(() => {
@@ -687,6 +733,53 @@ export default function AuctionAnalysis() {
     return filteredData.filter(d => d.season === seasonAnalysisSeason && saleSet.has(d.sale_number));
   }, [filteredData, seasonAnalysisSeason, seasonAnalysisSales]);
 
+  // Dataset for the Season Summary card only: selected season, its own (independently selectable) sales.
+  const summaryScopedData = useMemo(() => {
+    if (!seasonAnalysisSeason || summarySales.length === 0) return [];
+    const saleSet = new Set(summarySales);
+    return filteredData.filter(d => d.season === seasonAnalysisSeason && saleSet.has(d.sale_number));
+  }, [filteredData, seasonAnalysisSeason, summarySales]);
+
+  // Weighted-average price/differential and cumulative volume, grouped by `field` ('grade' or
+  // 'strategy'), across summaryScopedData. Sorted by volume descending.
+  const buildWeightedSummary = (rows: any[], field: string) => {
+    const byKey: Record<string, { volume: number; priceSum: number; priceWeight: number; diffSum: number; diffWeight: number }> = {};
+    let totalVolume = 0;
+    rows.forEach(d => {
+      const key = d[field];
+      if (!key) return;
+      const w = parseFloat(d.weight) || 0;
+      if (w <= 0) return;
+      const scaledW = w * weightMultiplier;
+      if (!byKey[key]) byKey[key] = { volume: 0, priceSum: 0, priceWeight: 0, diffSum: 0, diffWeight: 0 };
+      byKey[key].volume += scaledW;
+      totalVolume += scaledW;
+
+      const price = getPrice(d, 'price');
+      if (price !== null) {
+        byKey[key].priceSum += price * w;
+        byKey[key].priceWeight += w;
+      }
+      const diff = getPrice(d, 'differential');
+      if (diff !== null) {
+        byKey[key].diffSum += diff * w;
+        byKey[key].diffWeight += w;
+      }
+    });
+
+    return Object.entries(byKey)
+      .map(([key, v]) => ({
+        key,
+        volume: v.volume,
+        pctOfTotal: totalVolume > 0 ? (v.volume / totalVolume) * 100 : 0,
+        avgPrice: v.priceWeight > 0 ? v.priceSum / v.priceWeight : null,
+        avgDifferential: v.diffWeight > 0 ? v.diffSum / v.diffWeight : null,
+      }))
+      .sort((a, b) => b.volume - a.volume);
+  };
+
+  const summaryByStrategy = useMemo(() => buildWeightedSummary(summaryScopedData, 'strategy'), [summaryScopedData, weightMultiplier]);
+
   const rankByVolume = (rows: any[], field: string, topN: number) => {
     const totals: Record<string, number> = {};
     rows.forEach(d => {
@@ -697,6 +790,97 @@ export default function AuctionAnalysis() {
     });
     return Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, topN).map(([k]) => k);
   };
+
+  // --- Season Summary charts: strategy volume & differential over the last 4 sales REGARDLESS of
+  // season — sourced from recentSalesRawData (fetched via ?recentSales=4), which is completely
+  // independent of the sidebar's season filter / whatever season(s) are loaded into rawData. ---
+  const GLOBAL_LAST_SALES_COUNT = 4;
+  // Each displayed point accumulates its own sale plus the (WINDOW - 1) sales before it.
+  const ROLLING_WINDOW_SALES = 4;
+
+  // recentSalesRawData holds the last GLOBAL_LAST_SALES_COUNT + (ROLLING_WINDOW_SALES - 1) sales
+  // (server-side); this works out their chronological order and axis labels.
+  const recentSalesChrono = useMemo(() => {
+    const bySale = new Map<string, { key: string; label: string; ts: number }>();
+    recentSalesRawData.forEach(d => {
+      if (d.sale_number === null || d.sale_number === undefined || String(d.sale_number).trim() === '') return;
+      const key = `${d.season}|${d.sale_number}`;
+      const ts = new Date(d.timestamp).getTime();
+      const existing = bySale.get(key);
+      if (!existing) {
+        bySale.set(key, { key, label: `${d.season} S${d.sale_number}`, ts: isFinite(ts) ? ts : Infinity });
+      } else if (isFinite(ts) && ts < existing.ts) {
+        existing.ts = ts;
+      }
+    });
+    return Array.from(bySale.values()).sort((a, b) => a.ts - b.ts);
+  }, [recentSalesRawData]);
+
+  // The sales actually plotted on the x-axis.
+  const last4Sales = useMemo(() => recentSalesChrono.slice(-GLOBAL_LAST_SALES_COUNT), [recentSalesChrono]);
+
+  // Rows of the plotted sales only — used to pick which strategies get a line.
+  const last4ScopedData = useMemo(() => {
+    const shown = new Set(last4Sales.map(s => s.key));
+    return recentSalesRawData.filter(d => shown.has(`${d.season}|${d.sale_number}`));
+  }, [recentSalesRawData, last4Sales]);
+
+  const last4StrategyCategories = useMemo(() => rankByVolume(last4ScopedData, 'strategy', 8), [last4ScopedData, weightMultiplier]);
+
+  // { saleKey -> { strategy -> { sum, weight (for differential), vol } } }
+  const last4ByStrategy = useMemo(() => {
+    const bySaleCat: Record<string, Record<string, { sum: number; weight: number; vol: number }>> = {};
+    recentSalesRawData.forEach(d => {
+      const key = `${d.season}|${d.sale_number}`;
+      const cat = d.strategy;
+      if (!cat || !last4StrategyCategories.includes(cat)) return;
+      const w = parseFloat(d.weight) || 0;
+      if (w <= 0) return;
+      if (!bySaleCat[key]) bySaleCat[key] = {};
+      if (!bySaleCat[key][cat]) bySaleCat[key][cat] = { sum: 0, weight: 0, vol: 0 };
+      bySaleCat[key][cat].vol += w * weightMultiplier;
+      const diff = getPrice(d, 'differential');
+      if (diff !== null) {
+        bySaleCat[key][cat].sum += diff * w;
+        bySaleCat[key][cat].weight += w;
+      }
+    });
+    return bySaleCat;
+  }, [recentSalesRawData, last4StrategyCategories, weightMultiplier]);
+
+  // Rolling accumulation: for each plotted sale, pool its own stats with those of the (ROLLING_WINDOW_SALES - 1)
+  // sales before it (across seasons). Volume is summed; differential is weighted across all pooled rows.
+  // The earliest sales in the data simply use however many prior sales exist.
+  const last4Rolling = useMemo(() => {
+    const offset = recentSalesChrono.length - last4Sales.length;
+    return last4Sales.map((s, i) => {
+      const end = offset + i;
+      const windowSales = recentSalesChrono.slice(Math.max(0, end - (ROLLING_WINDOW_SALES - 1)), end + 1);
+      const pooled: Record<string, { sum: number; weight: number; vol: number }> = {};
+      windowSales.forEach(ws => {
+        const cats = last4ByStrategy[ws.key] || {};
+        Object.entries(cats).forEach(([c, cell]) => {
+          if (!pooled[c]) pooled[c] = { sum: 0, weight: 0, vol: 0 };
+          pooled[c].sum += cell.sum;
+          pooled[c].weight += cell.weight;
+          pooled[c].vol += cell.vol;
+        });
+      });
+      return { sale: s, pooled };
+    });
+  }, [recentSalesChrono, last4Sales, last4ByStrategy]);
+
+  const last4VolumeChartData = useMemo(() => last4Rolling.map(({ sale, pooled }) => {
+    const row: any = { label: sale.label };
+    last4StrategyCategories.forEach(c => { row[c] = pooled[c]?.vol ?? 0; });
+    return row;
+  }), [last4Rolling, last4StrategyCategories]);
+
+  const last4DiffChartData = useMemo(() => last4Rolling.map(({ sale, pooled }) => {
+    const row: any = { label: sale.label };
+    last4StrategyCategories.forEach(c => { const cell = pooled[c]; row[c] = (cell && cell.weight > 0) ? cell.sum / cell.weight : null; });
+    return row;
+  }), [last4Rolling, last4StrategyCategories]);
 
   // Grade Projections can group by either Grade or Strategy.
   const projectionField = projectionGroupBy === 'strategy' ? 'strategy' : 'grade';
@@ -1411,6 +1595,11 @@ export default function AuctionAnalysis() {
                     <div className="text-lg font-black leading-tight">{formatNum(kpis.avgHedge)}</div>
                     <div className="text-[9px] text-teal-100 font-medium">AVG HEDGE LEVEL</div>
                   </div>
+                  <div className="w-[1px] h-6 bg-teal-600"></div>
+                  <div className="text-right">
+                    <div className="text-lg font-black leading-tight">{kpis.avgDifferential !== null ? formatNum(kpis.avgDifferential) : '—'}</div>
+                    <div className="text-[9px] text-teal-100 font-medium">AVG DIFFERENTIAL</div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1659,6 +1848,114 @@ export default function AuctionAnalysis() {
                     </div>
                   </div>
                   <p className="text-[9px] text-gray-400">Grade/strategy pricing, projections, and buyer analytics below compare the selected sales sale-by-sale — defaults to the last {DEFAULT_SALE_COUNT} sales of the most recent season.</p>
+                </div>
+
+                {/* Season Summary: weighted-average prices & cumulative volume by Grade / Strategy, over its own independently-selectable set of sales (defaults to the last 4). */}
+                <div className="bg-white p-2.5 rounded-xl shadow-sm border border-gray-200 flex flex-col shrink-0">
+                  <div className="flex flex-wrap justify-between items-center mb-1 gap-2">
+                    <h2 className="text-sm font-bold text-gray-800 flex items-center gap-1.5">
+                      <BarChart3 className="w-4 h-4 text-[#0d9488]" /> Season Summary
+                    </h2>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-3 mb-2">
+                    <div className="flex-1 min-w-[320px]">
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-[10px] font-bold text-gray-500 uppercase tracking-wider">Sales in Summary ({summarySales.length}/{salesInSeason.length} selected)</label>
+                        <div className="flex gap-2">
+                          <button
+                            className="text-[9px] font-bold text-[#0d9488] hover:text-[#0f766e] uppercase tracking-wider"
+                            onClick={() => setSummarySales(salesInSeason.slice(-DEFAULT_SUMMARY_SALE_COUNT))}
+                          >
+                            Last {DEFAULT_SUMMARY_SALE_COUNT}
+                          </button>
+                          <button
+                            className="text-[9px] font-bold text-[#0d9488] hover:text-[#0f766e] uppercase tracking-wider"
+                            onClick={() => setSummarySales(salesInSeason)}
+                          >
+                            Select All
+                          </button>
+                        </div>
+                      </div>
+                      <MultiSelect label="" placeholder="Search sale numbers..." options={salesInSeason} selected={summarySales} onChange={setSummarySales} badgeLayout="row" />
+                    </div>
+                  </div>
+
+                  {summaryScopedData.length === 0 ? (
+                    <div className="py-10 text-center text-gray-400 text-xs font-medium">Select at least one sale above to view the summary.</div>
+                  ) : (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      {/* By Strategy table — weighted avg price/differential & cumulative volume over the sales selected above */}
+                      <div className="border border-gray-200 rounded-lg overflow-hidden">
+                        <table className="w-full text-xs text-left">
+                          <thead>
+                            <tr className="bg-gray-50 border-b border-gray-200">
+                              <th className="py-1.5 px-2 font-bold text-gray-500 uppercase text-[9px]">By Strategy</th>
+                              <th className="py-1.5 px-2 font-bold text-gray-500 uppercase text-[9px] text-right">Volume ({unit})</th>
+                              <th className="py-1.5 px-2 font-bold text-gray-500 uppercase text-[9px] text-right">% of Total</th>
+                              <th className="py-1.5 px-2 font-bold text-gray-500 uppercase text-[9px] text-right">Avg Price</th>
+                              <th className="py-1.5 px-2 font-bold text-gray-500 uppercase text-[9px] text-right">Avg Diff. (USc/lb)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {summaryByStrategy.map(r => (
+                              <tr key={r.key} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                                <td className="py-1.5 px-2 font-semibold text-gray-700">{r.key}</td>
+                                <td className="py-1.5 px-2 text-right font-mono text-gray-700">{formatNum(r.volume)}</td>
+                                <td className="py-1.5 px-2 text-right font-mono text-gray-500">{formatNum(r.pctOfTotal)}%</td>
+                                <td className="py-1.5 px-2 text-right font-mono text-gray-700">{r.avgPrice !== null ? formatNum(r.avgPrice) : '—'}</td>
+                                <td className="py-1.5 px-2 text-right font-mono text-gray-700">{r.avgDifferential !== null ? formatNum(r.avgDifferential) : '—'}</td>
+                              </tr>
+                            ))}
+                            {summaryByStrategy.length === 0 && (
+                              <tr><td colSpan={5} className="py-4 text-center text-gray-400">No data for the selected sales.</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* By-Strategy Volume & Differential trend — always the last 4 sales chronologically, regardless of season */}
+                      <div className="border border-gray-200 rounded-lg p-2 flex flex-col">
+                        {last4Sales.length === 0 ? (
+                          <div className="flex-1 flex items-center justify-center text-gray-400 text-xs font-medium py-10">No sales available.</div>
+                        ) : (
+                          <>
+                            {renderCustomLegend(last4StrategyCategories.map((c, i) => ({ value: c, dataKey: c, color: COLORS[i % COLORS.length] })), hiddenSummarySeries, setHiddenSummarySeries, last4StrategyCategories)}
+
+                            <h3 className="text-[10px] font-bold text-gray-600 mt-1 mb-1">Volume by Strategy ({unit}) — last {last4Sales.length} sales, each point = that sale + {ROLLING_WINDOW_SALES - 1} prior</h3>
+                            <div className="flex-1 relative" style={{ minHeight: 160 }}>
+                              <ResponsiveContainer width="100%" height="100%" className="!absolute inset-0">
+                                <LineChart data={last4VolumeChartData} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+                                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                                  <XAxis dataKey="label" interval={0} tick={{ fontSize: 8 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} />
+                                  <YAxis tick={{ fontSize: 8 }} tickLine={false} axisLine={false} tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v} />
+                                  <Tooltip content={<CustomTooltip />} />
+                                  {last4StrategyCategories.map((c, i) => (
+                                    <Line key={c} type="monotone" dataKey={c} name={c} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 4 }} hide={hiddenSummarySeries.has(c)} connectNulls={false} />
+                                  ))}
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+
+                            <h3 className="text-[10px] font-bold text-gray-600 mt-3 mb-1">Differential by Strategy (USc/lb) — last {last4Sales.length} sales, each point = that sale + {ROLLING_WINDOW_SALES - 1} prior</h3>
+                            <div className="flex-1 relative" style={{ minHeight: 160 }}>
+                              <ResponsiveContainer width="100%" height="100%" className="!absolute inset-0">
+                                <LineChart data={last4DiffChartData} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
+                                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                                  <XAxis dataKey="label" interval={0} tick={{ fontSize: 8 }} tickLine={false} axisLine={{ stroke: '#e5e7eb' }} />
+                                  <YAxis tick={{ fontSize: 8 }} tickLine={false} axisLine={false} domain={['auto', 'auto']} />
+                                  <Tooltip content={<CustomTooltip />} />
+                                  {last4StrategyCategories.map((c, i) => (
+                                    <Line key={c} type="monotone" dataKey={c} name={c} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 4 }} hide={hiddenSummarySeries.has(c)} connectNulls={false} />
+                                  ))}
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-[9px] text-gray-400 mt-2">By Strategy table is weighted by volume across the sales selected above. The two charts on the right always show the last {GLOBAL_LAST_SALES_COUNT} sales chronologically regardless of season; each point accumulates that sale and the {ROLLING_WINDOW_SALES - 1} sales before it (volume summed, differential weighted across all of them), and they are independent of both sale pickers on this tab.</p>
                 </div>
 
                 {saleScopedData.length === 0 ? (

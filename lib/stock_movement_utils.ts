@@ -422,27 +422,42 @@ export interface WeeklyProcessSummaryRow extends RowDataPacket {
 }
 
 /**
- * Powers the Processing page's "Processing Activities" card: the most recent calendar_week present
- * in weekly_process_summary, independent of whatever date range the Summary tab's matrix is scoped to.
+ * Powers the Processing page's "Processing Activities" card. Defaults to the most recent
+ * calendar_week present in weekly_process_summary, or a specific week when `week` is given —
+ * independent of whatever date range the Summary tab's matrix is scoped to.
+ * Also returns every distinct calendar_week on record (newest first) so the UI can offer a
+ * week picker instead of always showing the latest one.
  */
-export async function getLatestWeeklyProcessSummary(): Promise<{
+export async function getWeeklyProcessSummary(week?: string): Promise<{
   calendar_week: string | null;
   rows: WeeklyProcessSummaryRow[];
+  availableWeeks: string[];
 }> {
   try {
-    const rows = await query<WeeklyProcessSummaryRow[]>({
-      // calendar_week is 'YYYY-Www' (zero-padded), so string MAX() sorts chronologically correctly.
-      query: `
-        SELECT calendar_week, process_type, input_weight, output_weight, processing_loss
-        FROM weekly_process_summary
-        WHERE calendar_week = (SELECT MAX(calendar_week) FROM weekly_process_summary)
-        ORDER BY process_type ASC
-      `,
-    });
+    const weekCondition = week ? '= ?' : '= (SELECT MAX(calendar_week) FROM weekly_process_summary)';
+    const [rows, weekRows] = await Promise.all([
+      query<WeeklyProcessSummaryRow[]>({
+        // calendar_week is 'YYYY-Www' (zero-padded), so string comparison sorts chronologically correctly.
+        query: `
+          SELECT calendar_week, process_type, input_weight, output_weight, processing_loss
+          FROM weekly_process_summary
+          WHERE calendar_week ${weekCondition}
+          ORDER BY process_type ASC
+        `,
+        values: week ? [week] : [],
+      }),
+      query<RowDataPacket[]>({
+        query: `SELECT DISTINCT calendar_week FROM weekly_process_summary ORDER BY calendar_week DESC`,
+      }),
+    ]);
 
-    return { calendar_week: rows && rows.length > 0 ? rows[0].calendar_week : null, rows: rows || [] };
+    return {
+      calendar_week: rows && rows.length > 0 ? rows[0].calendar_week : (week || null),
+      rows: rows || [],
+      availableWeeks: (weekRows || []).map(r => r.calendar_week as string),
+    };
   } catch (error) {
-    console.error("Failed to fetch latest weekly process summary", error);
+    console.error("Failed to fetch weekly process summary", error);
     throw error;
   }
 }

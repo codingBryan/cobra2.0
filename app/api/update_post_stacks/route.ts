@@ -1,4 +1,4 @@
-import { process_post_stack_updates } from '@/lib/stack_pricing_utils';
+import { process_post_stack_updates, update_post_trade_variables } from '@/lib/stack_pricing_utils';
 import { updateUndefinedStrategies } from '@/lib/sti_processing_utils';
 import { NextRequest, NextResponse } from 'next/server';
 ; // Adjust path as needed
@@ -34,10 +34,21 @@ export async function POST(request: NextRequest) {
         // 3. Call the core processing function
         await process_post_stack_updates(file);
 
-        // 4. Success response
-        return NextResponse.json({ 
-            success: true, 
-            message: `Post Stack updates initiated and completed successfully for file: ${file.name}` 
+        // 4. Retry trade variables / PNL for any process that was stuck on an UNDEFINED output
+        // strategy earlier in this same upload — that strategy was only just resolved by the
+        // updateUndefinedStrategies call above (step 1), which runs AFTER debit_credit_processing
+        // creates that batch's row, so it couldn't have been fixed in time for the earlier
+        // update_post_trade_variables() call inside /api/create_summary. Re-running it here lets
+        // those processes get priced same-day instead of sitting at trade_variables_updated = FALSE
+        // until the next upload.
+        const skipped_process_numbers = await update_post_trade_variables();
+        console.log(`[API] Retried trade variables after post-stack update. Still skipped: ${skipped_process_numbers.length}`);
+
+        // 5. Success response
+        return NextResponse.json({
+            success: true,
+            message: `Post Stack updates initiated and completed successfully for file: ${file.name}`,
+            skipped_process_numbers
         });
 
     } catch (error) {
